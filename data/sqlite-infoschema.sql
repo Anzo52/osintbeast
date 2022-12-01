@@ -12,7 +12,7 @@ CREATE TABLE Names (
 CREATE TABLE Locations (
         locationID integer primary key, 
         country text,
-        state text,
+        usState text,
         county text,
         city text,
         street text,
@@ -26,7 +26,7 @@ CREATE TABLE Domains (
 );
 CREATE TABLE Services (
         serviceID integer primary key,
-        service text not null,
+        serviceName text not null,
         domainID integer,
         platformID integer,
         foreign key (domainID) references Domains (domainID),
@@ -34,7 +34,7 @@ CREATE TABLE Services (
 );
 CREATE TABLE Urls (
         urlID integer primary key,
-        url text not null,
+        urlAddress text not null,
         domainID integer,
         foreign key (domainID) references Domains (domainID)
 );
