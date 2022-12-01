@@ -22,7 +22,7 @@ Usernames | usernameID, username, nameID, serviceID | usernameID, nameID, servic
 
 ### info/target mysql schema
 
-#### tools sqlite3 schema
+### tools sqlite3 schema
 
 Not sure what would be best here especially concerning indexing.
 Ideally I would like the user to be able to find a tool based on:
@@ -30,7 +30,7 @@ Ideally I would like the user to be able to find a tool based on:
     b) the information they have, or
     c) combining both to build a full profile of target.
 
-#### tools mysql schema
+### tools mysql schema
 
 ----------------
 
