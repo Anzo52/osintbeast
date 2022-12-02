@@ -38,6 +38,9 @@ Ideally I would like the user to be able to find a tool based on:
 
 ### Tools to add
 
+**Libraries**
+- [ ] [holehe](https://github.com/megadose/holehe)
+
 ### Tools added
 
 ### (bonus) Tools to fix before adding
