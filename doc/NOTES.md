@@ -41,8 +41,14 @@ Ideally I would like the user to be able to find a tool based on:
 **Libraries**
 - [ ] [holehe](https://github.com/megadose/holehe)
 
+**CL Tools**
+
+**Graphical Tools**
+
 ### Tools added
 
 ### (bonus) Tools to fix before adding
 
+**CL Tools**
+- [ ] [](https://github.com/Anzo52/dorker)
 ----------------
