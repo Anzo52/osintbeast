@@ -50,5 +50,5 @@ Ideally I would like the user to be able to find a tool based on:
 ### (bonus) Tools to fix before adding
 
 **CL Tools**
-- [ ] [](https://github.com/Anzo52/dorker)
+- [ ] [dorker](https://github.com/Anzo52/dorker)
 ----------------
