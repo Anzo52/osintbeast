@@ -1,0 +1,6 @@
+click
+python-dotenv
+requests
+SQLAlchemy
+pandas
+simple-term-menu
