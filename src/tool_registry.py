@@ -1,0 +1,53 @@
+from __future__ import annotations
+
+from typing import Dict, Optional
+
+TOOL_REGISTRY: Dict[str, Dict[str, str]] = {
+    "holehe": {
+        "repo": "https://github.com/megadose/holehe",
+        "category": "email",
+        "install_method": "pip",
+        "notes": "Checks whether an email is registered on many sites.",
+    },
+    "sherlock": {
+        "repo": "https://github.com/sherlock-project/sherlock",
+        "category": "username",
+        "install_method": "pip",
+        "notes": "Searches for usernames across multiple social networks.",
+    },
+    "maigret": {
+        "repo": "https://github.com/soxoj/maigret",
+        "category": "username",
+        "install_method": "pip",
+        "notes": "Advanced username intelligence and profile enumeration.",
+    },
+    "amass": {
+        "repo": "https://github.com/owasp-amass/amass",
+        "category": "domain",
+        "install_method": "binary",
+        "notes": "Passive subdomain and attack-surface discovery.",
+    },
+    "sublist3r": {
+        "repo": "https://github.com/aboul3la/Sublist3r",
+        "category": "domain",
+        "install_method": "pip",
+        "notes": "Enumerates subdomains using public sources.",
+    },
+    "dorker": {
+        "repo": "https://github.com/Anzo52/dorker",
+        "category": "search",
+        "install_method": "pip",
+        "notes": "Custom search and dork-style automation helper.",
+    },
+}
+
+
+def get_supported_tools() -> list[str]:
+    """Return the alphabetized list of supported tool names."""
+    return sorted(TOOL_REGISTRY)
+
+
+def get_tool_metadata(name: str) -> Optional[Dict[str, str]]:
+    """Return metadata for a single supported tool."""
+    key = name.strip().lower()
+    return TOOL_REGISTRY.get(key)
