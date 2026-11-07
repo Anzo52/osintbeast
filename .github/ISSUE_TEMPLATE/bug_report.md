@@ -1,65 +1,48 @@
-# OSINT Beast
+import os
 
-OSINT Beast is a Python-based CLI for gathering, storing, and managing OSINT workflow data. The project is intentionally lightweight: it downloads supported tool repositories, exposes a safe install path, and stores results in SQLite with a schema that can be extended to MySQL.
+from downloader import download_tool
+from installer import install_tool
 
-## Current status
 
-This repository is still in development. The goal is to move from the placeholder database and example tooling to a real registry of vetted OSINT tools, with explicit safety checks before downloads or installation.
+class DummyResponse:
+    def __init__(self, payload):
+        self.content = payload
 
-## Features
+    def raise_for_status(self):
+        return None
 
-- Download supported OSINT tools from GitHub
-- Install tools using explicit and safe installation logic
-- Initialize a SQLite schema for target and tool data
-- Track supported tools through a central registry
 
-## Supported tools
+def test_download_tool_uses_registry(monkeypatch, tmp_path):
+    calls = {}
 
-The project currently recognizes a small, curated set of tools:
+    def fake_download_github_repo(repo_url, output_dir):
+        calls["repo"] = repo_url
+        calls["output_dir"] = output_dir
+        os.makedirs(output_dir, exist_ok=True)
+        return output_dir
 
-- `holehe`
-- `sherlock`
-- `maigret`
-- `amass`
-- `sublist3r`
-- `dorker`
+    monkeypatch.setattr("downloader.download_github_repo", fake_download_github_repo)
 
-## Installation
+    target_dir = download_tool("holehe", output_dir=str(tmp_path))
 
-```bash
-git clone https://github.com/Anzo52/osintbeast.git
-cd osintbeast
-python -m pip install -r requirements.txt
-```
+    assert target_dir == os.path.join(str(tmp_path), "holehe")
+    assert calls["repo"] == "https://github.com/megadose/holehe"
 
-## Running the CLI
 
-```bash
-python src/main.py
-```
+def test_install_tool_supports_requirements(tmp_path, monkeypatch):
+    tool_dir = tmp_path / "holehe"
+    tool_dir.mkdir()
+    (tool_dir / "requirements.txt").write_text("requests\n")
 
-## Safety note
+    captured = {}
 
-Only run this project against targets and data sources you are authorized to assess. OSINT research should always comply with applicable laws, access policies, and platform rules.
+    def fake_install_requirements(path):
+        captured["path"] = path
 
-## Repository layout
+    monkeypatch.setattr("installer.install_requirements", fake_install_requirements)
 
-```text
-.
-├── data/                  Project SQL schema definitions
-├── doc/                   Design and notes
-├── src/                   CLI and tooling logic
-├── LICENSE
-├── README.md
-├── requirements.txt
-└── osintbeast.db         SQLite database created at runtime
-```
+    result = install_tool("holehe", str(tool_dir))
 
-## Planned work
+    assert result == str(tool_dir)
+    assert captured["path"] == str(tool_dir / "requirements.txt")
 
-- Replace placeholder database logic with the real schema
-- Add explicit tool metadata and source validation
-- Add safer install flows and repository checks
-- Complete MySQL schema support
-- Add issue and pull request templates
-- Expand tests for CLI and database behavior

@@ -11,4 +11,3 @@ Describe what changed and why.
 ## Notes
 
 List any follow-up work, assumptions, or limitations.
-

@@ -41,7 +41,7 @@ def download_tool(tool_name, output_dir="tools"):
     """Download a supported OSINT tool into a local folder."""
     tool = get_tool_metadata(tool_name)
     if tool is None:
-        supported = ", ".join(sorted([name for name in __import__("tool_registry").TOOL_REGISTRY]))
+        supported = ", ".join(sorted(__import__("tool_registry").TOOL_REGISTRY))
         raise ValueError(f"Tool '{tool_name}' is not supported. Available tools: {supported}")
 
     target_dir = os.path.join(output_dir, tool_name)
