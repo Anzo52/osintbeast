@@ -1,43 +1,53 @@
-from simple_term_menu import TerminalMenu
-from downloader import download_tool
-from installer import install_tool
-from database import setup_database, query_database
+import os
+import subprocess
+import sys
 
-def main_menu():
-    options = ["Initialize Database", "Download Tool", "Install Tool", "Query Database", "Exit"]
-    terminal_menu = TerminalMenu(options, title="OSINT Beast Main Menu")
-    choice = terminal_menu.show()
+from tool_registry import get_tool_metadata
 
-    if choice == 0:
-        init_db()
-    elif choice == 1:
-        tool_name = input("Enter the name of the tool to download: ")
-        download(tool_name)
-    elif choice == 2:
-        tool_name = input("Enter the name of the tool to install: ")
-        install(tool_name)
-    elif choice == 3:
-        query_str = input("Enter your query: ")
-        query(query_str)
-    elif choice == 4:
-        exit()
 
-def init_db():
-    setup_database()
-    print("Database initialized successfully.")
+def install_python_package(package_path):
+    """Install a Python package from a local path or repository checkout."""
+    subprocess.run([sys.executable, "-m", "pip", "install", package_path], check=True)
 
-def download(tool_name):
-    download_tool(tool_name)
-    print(f"{tool_name} downloaded successfully.")
 
-def install(tool_name):
-    install_tool(tool_name)
-    print(f"{tool_name} installed successfully.")
+def install_requirements(requirements_path):
+    """Install requirements from a requirements.txt file."""
+    if not os.path.isfile(requirements_path):
+        raise FileNotFoundError(f"Requirements file not found: {requirements_path}")
+    subprocess.run([sys.executable, "-m", "pip", "install", "-r", requirements_path], check=True)
 
-def query(query):
-    result = query_database(query)
-    print(f"Query result: {result}")
 
-if __name__ == "__main__":
-    while True:
-        main_menu()
+def run_install_script(script_path):
+    """Run a shell install script if one exists in the repository."""
+    if not os.path.isfile(script_path):
+        raise FileNotFoundError(f"Installation script not found at {script_path}")
+    subprocess.run(["bash", script_path], check=True)
+
+
+def install_tool(tool_name, tool_path=None):
+    """Install a supported tool using a safe, explicit installation method."""
+    tool = get_tool_metadata(tool_name)
+    if tool is None:
+        raise ValueError(f"Tool '{tool_name}' is not supported.")
+
+    target = tool_path or os.path.join("tools", tool_name)
+    if not os.path.isdir(target):
+        raise FileNotFoundError(f"Tool path not found for '{tool_name}': {target}")
+
+    install_method = tool.get("install_method", "pip")
+    if install_method == "pip":
+        requirements_path = os.path.join(target, "requirements.txt")
+        if os.path.isfile(requirements_path):
+            install_requirements(requirements_path)
+        else:
+            install_python_package(target)
+        return target
+
+    if install_method == "binary":
+        install_script = os.path.join(target, "install.sh")
+        if os.path.isfile(install_script):
+            run_install_script(install_script)
+            return target
+        raise RuntimeError(f"No install script was found for '{tool_name}' in {target}.")
+
+    raise RuntimeError(f"No supported install method is configured for '{tool_name}'.")
