@@ -1,64 +1,27 @@
-# IN DEVELOPMENT
-
 # OSINT Beast
 
-OSINT Beast is a powerful command-line interface (CLI) tool designed for Open Source Intelligence (OSINT) gathering. It simplifies the process of downloading, installing, and managing various OSINT tools from GitHub, providing a unified interface for diverse intelligence-gathering activities.
+OSINT Beast is a Python-based CLI for Open Source Intelligence gathering. It combines a small set of vetted OSINT tools into one framework, stores structured data in SQLite, and is designed to grow toward broader database and workflow support.
+
+## Supported tools
+
+The project currently includes the following tool integrations through `src/tool_registry.py`:
+
+- `holehe` — email registration and username-related checks on public sites
+- `sherlock` — username lookups across many social platforms
+- `maigret` — deeper username discovery and profile enrichment
+- `amass` — passive domain and subdomain enumeration
+- `sublist3r` — subdomain discovery using public OSINT sources
 
 ## Features
 
-- **Download OSINT Tools**: Directly download OSINT tools from GitHub repositories.
-- **Install OSINT Tools**: Seamlessly install and set up downloaded tools.
-- **Database Integration**: Utilize an integrated SQLite database to manage tools and data efficiently.
+- Download supported OSINT tools from GitHub
+- Install tools using explicit and safe installation logic
+- Initialize a SQLite schema for target and tool metadata
+- Manage a curated list of supported tools in one registry
 
-## Getting Started
-
-### Prerequisites
-
-- Python 3.6 or higher
-- Git (for cloning the repository)
-
-### Installation
-
-Clone the OSINT Beast repository:
+## Installation
 
 ```bash
 git clone https://github.com/Anzo52/osintbeast.git
 cd osintbeast
-```
-
-Install the required Python packages:
-
-```bash
-pip install -r requirements.txt
-```
-
-### Running OSINT Beast
-
-To start OSINT Beast, run the following command:
-
-```bash
-python src/main.py
-```
-
-Follow the on-screen instructions to download, install, and manage OSINT tools.
-
-## Usage
-
-### Downloading Tools
-
-- Choose the **Download Tools** option from the main menu.
-- Follow the on-screen instructions to download tools from GitHub repositories.
-
-### Installing Tools
-
-- Choose the **Install Tools** option from the main menu.
-- Follow the on-screen instructions to install downloaded tools.
-
-### Database Management
-
-- Access the database management menu by choosing the **Database Management** option from the main menu.
-
-## License
-
-This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
-```
+python -m pip install -r requirements.txt
