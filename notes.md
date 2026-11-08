@@ -9,7 +9,7 @@ The roadmap is a living plan. Items are not commitments to specific dates; prior
 ### Phase 1 — Reliable baseline
 
 - [x] Keep requirements files, Python modules, SQL schemas, and documentation correctly separated; restore installable dependency entries and the tool registry module.
-- [ ] Establish supported Python versions and keep dependency installation reproducible with a lockfile or bounded dependency policy.
+- [x] Declare Python 3.10+ support, setuptools build metadata, and bounded direct dependency ranges in `pyproject.toml`.
 - [ ] Make SQLite setup idempotent and test it using temporary databases.
 - [ ] Add CI for the test suite and basic formatting/linting checks.
 - [ ] Add tests for CLI flows and error paths; mock external tools and HTTP.
@@ -58,6 +58,6 @@ The roadmap is a living plan. Items are not commitments to specific dates; prior
 
 ## Current follow-up
 
-- [x] Verify the dependency manifest contains installable dependency specifications and keep the supported-tools registry in `src/tool_registry.py`.
+- [x] Declare project metadata, Python >=3.10, and bounded direct dependency ranges; `requirements.txt` installs runtime dependencies and `requirements-dev.txt` adds test tools.
 - [ ] Run the full test suite from a clean environment and document the supported command.
 - [ ] Review the current CLI/database behavior against the roadmap before starting the web UI.

@@ -1,8 +1,1 @@
-# Runtime dependencies
-requests
-SQLAlchemy
-simple-term-menu
-holehe
-
-# Test dependencies
-pytest
+-e .

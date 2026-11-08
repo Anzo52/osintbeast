@@ -14,20 +14,17 @@ The current registry includes Holehe, Sherlock, Maigret, Amass, and Sublist3r. A
 
 ## Requirements
 
-- Python 3.10 or later is recommended.
+- Python 3.10 or later (Python 3.10–3.13 are currently declared in package classifiers).
 - Git is needed for repository checkout and some tool workflows.
 - Third-party integrations may have their own system and Python dependencies.
+
+The runtime and development dependency ranges are declared in `pyproject.toml`. Direct dependencies use bounded ranges to limit unexpected major-version changes; this is a compatibility policy, not a fully locked, hash-verified environment.
 
 ## Getting started
 
 ```bash
 git clone https://github.com/Anzo52/osintbeast.git
 cd osintbeast
-```
-
-Install the project's Python dependencies in a virtual environment, then launch the CLI:
-
-```bash
 python -m venv .venv
 # Linux/macOS
 source .venv/bin/activate
@@ -40,10 +37,11 @@ From the menu, initialize the database before saving or querying data. Use the s
 
 ## Development and tests
 
-Run tests from the repository root:
+Install development dependencies and run tests from the repository root:
 
 ```bash
-PYTHONPATH=src python -m pytest -q
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
 ```
 
 Tests should mock network requests and external tool execution; normal test runs should not contact third-party services or perform real scans. Keep database and subprocess behavior covered by focused tests.
@@ -61,7 +59,9 @@ Use OSINT Beast only with data and targets you are authorized to assess, and fol
 ├── src/        CLI, database, and tool integrations
 ├── tests/      Automated tests
 ├── README.md
-└── notes.md    Development notes and roadmap
+├── notes.md    Development notes and roadmap
+├── pyproject.toml
+└── osintbeast.db (created at runtime)
 ```
 
 ## Development roadmap
@@ -70,7 +70,8 @@ This roadmap describes planned work, not a promise or release schedule. Prioriti
 
 ### 1. Stabilize the foundation
 
-- [ ] Keep dependency manifests, source modules, schemas, and documentation in their correct files.
+- [x] Keep dependency manifests, source modules, schemas, and documentation in their correct files.
+- [x] Declare Python 3.10+ support and bounded dependency ranges in `pyproject.toml`.
 - [ ] Make database initialization reliable and repeatable across supported environments.
 - [ ] Expand automated coverage for database operations, CLI behavior, validation, timeouts, and failures.
 - [ ] Add continuous integration to run tests and basic static checks on changes.
