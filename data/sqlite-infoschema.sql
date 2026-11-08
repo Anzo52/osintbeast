@@ -1,48 +1,63 @@
-CREATE TABLE Platforms (
-        platformID integer primary key,
-        platform text unique not null
+CREATE TABLE IF NOT EXISTS Platforms (
+    platformID INTEGER PRIMARY KEY,
+    platform TEXT UNIQUE NOT NULL
 );
-CREATE TABLE Names (
-        nameID integer primary key,
-        firstName text not null,
-        middleName text,
-        lastName text,
-        other text
+
+CREATE TABLE IF NOT EXISTS Names (
+    nameID INTEGER PRIMARY KEY,
+    firstName TEXT NOT NULL,
+    middleName TEXT,
+    lastName TEXT,
+    other TEXT
 );
-CREATE TABLE Locations (
-        locationID integer primary key, 
-        country text,
-        usState text,
-        county text,
-        city text,
-        street text,
-        addressNum integer,
-        apt integer,
-        zip integer 
+
+CREATE TABLE IF NOT EXISTS Locations (
+    locationID INTEGER PRIMARY KEY,
+    country TEXT,
+    usState TEXT,
+    county TEXT,
+    city TEXT,
+    street TEXT,
+    addressNum INTEGER,
+    apt INTEGER,
+    zip INTEGER
 );
-CREATE TABLE Domains (
-        domainID int primary key,
-        domain text not null unique
+
+CREATE TABLE IF NOT EXISTS Domains (
+    domainID INTEGER PRIMARY KEY,
+    domain TEXT NOT NULL UNIQUE
 );
-CREATE TABLE Services (
-        serviceID integer primary key,
-        serviceName text not null,
-        domainID integer,
-        platformID integer,
-        foreign key (domainID) references Domains (domainID),
-        foreign key (platformID) references Platforms (platformID)
+
+CREATE TABLE IF NOT EXISTS Services (
+    serviceID INTEGER PRIMARY KEY,
+    serviceName TEXT NOT NULL,
+    domainID INTEGER,
+    platformID INTEGER,
+    FOREIGN KEY (domainID) REFERENCES Domains (domainID),
+    FOREIGN KEY (platformID) REFERENCES Platforms (platformID)
 );
-CREATE TABLE Urls (
-        urlID integer primary key,
-        urlAddress text not null,
-        domainID integer,
-        foreign key (domainID) references Domains (domainID)
+
+CREATE TABLE IF NOT EXISTS Urls (
+    urlID INTEGER PRIMARY KEY,
+    urlAddress TEXT NOT NULL,
+    domainID INTEGER,
+    FOREIGN KEY (domainID) REFERENCES Domains (domainID)
 );
-CREATE TABLE Usernames (
-        usernameID integer primary key,
-        username text not null unique,
-        nameID integer,
-        serviceID integer,
-        foreign key (nameID) references Names (nameID),
-        foreign key (serviceID) references Services (serviceID) 
+
+CREATE TABLE IF NOT EXISTS Usernames (
+    usernameID INTEGER PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    nameID INTEGER,
+    serviceID INTEGER,
+    FOREIGN KEY (nameID) REFERENCES Names (nameID),
+    FOREIGN KEY (serviceID) REFERENCES Services (serviceID)
 );
+
+CREATE INDEX IF NOT EXISTS idx_services_domain_platform
+    ON Services (domainID, platformID);
+CREATE INDEX IF NOT EXISTS idx_urls_domain
+    ON Urls (domainID);
+CREATE INDEX IF NOT EXISTS idx_usernames_service
+    ON Usernames (serviceID);
+CREATE INDEX IF NOT EXISTS idx_usernames_name
+    ON Usernames (nameID);
