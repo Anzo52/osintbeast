@@ -1,3 +1,6 @@
+import subprocess
+import sys
+
 import pytest
 
 import holehe_integration
@@ -49,3 +52,21 @@ def test_invalid_email_does_not_launch_holehe(monkeypatch):
 
     with pytest.raises(ValueError):
         holehe_integration.run_holehe("broken@@example.com")
+
+
+def test_holehe_runs_with_shell_disabled_and_argument_list(monkeypatch):
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return subprocess.CompletedProcess(args, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(holehe_integration.subprocess, "run", fake_run)
+
+    result = holehe_integration.run_holehe("user@example.com")
+
+    assert captured["args"] == [sys.executable, "-m", "holehe", "user@example.com"]
+    assert captured["kwargs"]["shell"] is False
+    assert captured["kwargs"]["timeout"] == 300
+    assert result == {"returncode": 0, "output": "ok"}

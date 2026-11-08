@@ -6,7 +6,9 @@ from pathlib import Path
 
 DB_FILE = Path(__file__).resolve().parent.parent / "osintbeast.db"
 
-_LOCAL_PART_RE = re.compile(r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*\Z")
+_LOCAL_PART_RE = re.compile(
+    r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+(?:\.[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+)*\Z"
+)
 _DOMAIN_LABEL_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\Z")
 
 
@@ -48,8 +50,18 @@ def validate_email(email: str) -> str:
 def run_holehe(email: str):
     email = validate_email(email)
 
+    # Pass arguments directly (never through a shell): the validated address is
+    # one argv item, so shell metacharacters cannot become commands. The module
+    # and executable are fixed by the application.
     cmd = [sys.executable, "-m", "holehe", email]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        shell=False,
+        check=False,
+        timeout=300,
+    )
 
     output = (result.stdout or "").strip()
     if not output:
