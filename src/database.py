@@ -2,11 +2,24 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
+from sqlalchemy import MetaData, Table, create_engine
+
 # Keep the default database alongside the repository, independent of the current
 # working directory. Tests and deployments may override this value.
 DB_FILE = str(Path(__file__).resolve().parent.parent / "osintbeast.db")
 SCHEMA_DIR = Path(__file__).resolve().parent.parent / "data"
 SCHEMA_FILES = ("sqlite-infoschema.sql", "sqlite-toolschema.sql")
+
+# SQL identifiers cannot be bound as query parameters. Restrict reflected table
+# names to this fixed set, then let SQLAlchemy Core compile insert identifiers.
+INSERTABLE_TABLES = frozenset(
+    {"Platforms", "Names", "Locations", "Domains", "Services", "Urls", "Usernames", "ToolCatalog", "ToolResults"}
+)
+
+
+def _database_url() -> str:
+    """Build a SQLAlchemy URL for the configured SQLite database file."""
+    return f"sqlite:///{Path(DB_FILE).resolve().as_posix()}"
 
 
 def connect_db() -> sqlite3.Connection:
@@ -27,33 +40,28 @@ def setup_database() -> None:
 
 
 def insert_data(table: str, data: Mapping[str, Any]) -> None:
-    """Insert a mapping into a known table using parameterized values."""
+    """Insert a mapping into a known table using SQLAlchemy Core.
+
+    Identifiers are selected only from the fixed INSERTABLE_TABLES allowlist;
+    values are bound by SQLAlchemy rather than interpolated into SQL text.
+    """
     if not data:
         raise ValueError("data must contain at least one column")
+    if table not in INSERTABLE_TABLES:
+        raise ValueError(f"Unknown database table: {table}")
 
-    with connect_db() as conn:
-        table_names = {
-            row[0]
-            for row in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            )
-        }
-        if table not in table_names:
-            raise ValueError(f"Unknown database table: {table}")
-
-        valid_columns = {
-            row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')
-        }
-        columns = list(data)
-        if any(column not in valid_columns for column in columns):
+    engine = create_engine(_database_url())
+    try:
+        metadata = MetaData()
+        reflected_table = Table(table, metadata, autoload_with=engine)
+        valid_columns = {column.name for column in reflected_table.columns}
+        if any(column not in valid_columns for column in data):
             raise ValueError(f"Unknown column for table {table}")
 
-        quoted_columns = ", ".join(f'"{column}"' for column in columns)
-        placeholders = ", ".join("?" for _ in columns)
-        conn.execute(
-            f'INSERT INTO "{table}" ({quoted_columns}) VALUES ({placeholders})',
-            tuple(data[column] for column in columns),
-        )
+        with engine.begin() as conn:
+            conn.execute(reflected_table.insert().values(**dict(data)))
+    finally:
+        engine.dispose()
 
 
 def query_database(query: str, parameters: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
