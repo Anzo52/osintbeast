@@ -1,4 +1,4 @@
-import sqlite3
+import pytest
 
 import database
 
@@ -51,6 +51,22 @@ def test_insert_rejects_unknown_table_and_column(tmp_path, monkeypatch):
         database.insert_data("Platforms", {"missing_column": "x"})
 
 
-def test_database_module_has_no_syntax_errors():
-    # A lightweight import smoke test; the import itself parses the module.
-    assert callable(database.setup_database)
+def test_insert_binds_values_and_rejects_identifier_injection(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "injection.db"))
+    database.setup_database()
+
+    # A value containing SQL syntax remains ordinary data.
+    payload = "safe'); DROP TABLE Platforms; --"
+    database.insert_data("Platforms", {"platform": payload})
+    assert database.query_database(
+        "SELECT platform FROM Platforms WHERE platform = ?", (payload,)
+    ) == [(payload,)]
+
+    with pytest.raises(ValueError):
+        database.insert_data('Platforms"; DROP TABLE Platforms; --', {"platform": "x"})
+    with pytest.raises(ValueError):
+        database.insert_data("Platforms", {'platform" ) VALUES ("x"); --': "x"})
+
+    assert database.query_database(
+        "SELECT platform FROM Platforms WHERE platform = ?", (payload,)
+    ) == [(payload,)]
