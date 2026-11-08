@@ -3,7 +3,7 @@ from simple_term_menu import TerminalMenu
 from database import setup_database, query_database
 from downloader import download_tool
 from installer import install_tool
-from holehe_integration import run_holehe, save_tool_result
+from holehe_integration import HoleheTimeoutError, run_holehe, save_tool_result
 from tool_registry import get_supported_tools
 
 
@@ -46,9 +46,7 @@ def init_db():
 
 
 def list_supported_tools():
-    tools = get_supported_tools()
-    print("Supported tools:")
-    for tool_name in tools:
+    for tool_name in get_supported_tools():
         print(f"- {tool_name}")
 
 
@@ -59,8 +57,7 @@ def download(tool_name):
 
 def install(tool_name):
     tool_path = input("Enter the local tool path or press Enter to use the default download directory: ").strip()
-    install_path = tool_path or f"tools/{tool_name}"
-    install_tool(tool_name, install_path)
+    install_tool(tool_name, tool_path or f"tools/{tool_name}")
     print(f"{tool_name} installed successfully.")
 
 
@@ -73,6 +70,10 @@ def run_holehe_check(email):
         print("Holehe check saved to the database.")
     except ValueError as exc:
         print(f"Input error: {exc}")
+    except HoleheTimeoutError as exc:
+        print(f"Holehe timed out: {exc}")
+    except RuntimeError as exc:
+        print(f"Holehe could not run: {exc}")
 
 
 def query(query_text):
