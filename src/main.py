@@ -1,53 +1,85 @@
-import os
-import subprocess
-import sys
+from simple_term_menu import TerminalMenu
 
-from tool_registry import get_tool_metadata
-
-
-def install_python_package(package_path):
-    """Install a Python package from a local path or repository checkout."""
-    subprocess.run([sys.executable, "-m", "pip", "install", package_path], check=True)
+from database import setup_database, query_database
+from downloader import download_tool
+from installer import install_tool
+from holehe_integration import run_holehe, save_tool_result
+from tool_registry import get_supported_tools
 
 
-def install_requirements(requirements_path):
-    """Install requirements from a requirements.txt file."""
-    if not os.path.isfile(requirements_path):
-        raise FileNotFoundError(f"Requirements file not found: {requirements_path}")
-    subprocess.run([sys.executable, "-m", "pip", "install", "-r", requirements_path], check=True)
+def main_menu():
+    options = [
+        "Initialize Database",
+        "List Supported Tools",
+        "Download Tool",
+        "Install Tool",
+        "Run Holehe Check",
+        "Query Database",
+        "Exit",
+    ]
+    terminal_menu = TerminalMenu(options, title="OSINT Beast Main Menu")
+    choice = terminal_menu.show()
+
+    if choice == 0:
+        init_db()
+    elif choice == 1:
+        list_supported_tools()
+    elif choice == 2:
+        tool_name = input("Enter the name of the tool to download: ").strip()
+        download(tool_name)
+    elif choice == 3:
+        tool_name = input("Enter the name of the tool to install: ").strip()
+        install(tool_name)
+    elif choice == 4:
+        email = input("Enter the email to check: ").strip()
+        run_holehe_check(email)
+    elif choice == 5:
+        query_str = input("Enter your query: ").strip()
+        query(query_str)
+    elif choice == 6:
+        raise SystemExit(0)
 
 
-def run_install_script(script_path):
-    """Run a shell install script if one exists in the repository."""
-    if not os.path.isfile(script_path):
-        raise FileNotFoundError(f"Installation script not found at {script_path}")
-    subprocess.run(["bash", script_path], check=True)
+def init_db():
+    setup_database()
+    print("Database initialized successfully.")
 
 
-def install_tool(tool_name, tool_path=None):
-    """Install a supported tool using a safe, explicit installation method."""
-    tool = get_tool_metadata(tool_name)
-    if tool is None:
-        raise ValueError(f"Tool '{tool_name}' is not supported.")
+def list_supported_tools():
+    tools = get_supported_tools()
+    print("Supported tools:")
+    for tool_name in tools:
+        print(f"- {tool_name}")
 
-    target = tool_path or os.path.join("tools", tool_name)
-    if not os.path.isdir(target):
-        raise FileNotFoundError(f"Tool path not found for '{tool_name}': {target}")
 
-    install_method = tool.get("install_method", "pip")
-    if install_method == "pip":
-        requirements_path = os.path.join(target, "requirements.txt")
-        if os.path.isfile(requirements_path):
-            install_requirements(requirements_path)
-        else:
-            install_python_package(target)
-        return target
+def download(tool_name):
+    target_dir = download_tool(tool_name, output_dir="tools")
+    print(f"{tool_name} downloaded successfully to {target_dir}.")
 
-    if install_method == "binary":
-        install_script = os.path.join(target, "install.sh")
-        if os.path.isfile(install_script):
-            run_install_script(install_script)
-            return target
-        raise RuntimeError(f"No install script was found for '{tool_name}' in {target}.")
 
-    raise RuntimeError(f"No supported install method is configured for '{tool_name}'.")
+def install(tool_name):
+    tool_path = input("Enter the local tool path or press Enter to use the default download directory: ").strip()
+    install_path = tool_path or f"tools/{tool_name}"
+    install_tool(tool_name, install_path)
+    print(f"{tool_name} installed successfully.")
+
+
+def run_holehe_check(email):
+    try:
+        result = run_holehe(email)
+        print(f"Return code: {result['returncode']}")
+        print(result["output"])
+        save_tool_result("holehe", email, result["output"])
+        print("Holehe check saved to the database.")
+    except ValueError as exc:
+        print(f"Input error: {exc}")
+
+
+def query(query_text):
+    result = query_database(query_text)
+    print(f"Query result: {result}")
+
+
+if __name__ == "__main__":
+    while True:
+        main_menu()
