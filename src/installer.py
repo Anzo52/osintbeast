@@ -1,10 +1,54 @@
 import io
 import os
+import subprocess
+import sys
 import zipfile
+from pathlib import Path
 
 import requests
 
 from tool_registry import get_tool_metadata
+
+
+def _find_install_source(tool_path):
+    """Resolve the project directory in a downloaded repository folder."""
+    root = Path(tool_path).expanduser().resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"Tool directory does not exist: {root}")
+
+    def is_python_project(path):
+        return (path / "pyproject.toml").is_file() or (path / "setup.py").is_file()
+
+    if is_python_project(root):
+        return root
+
+    projects = sorted(
+        child for child in root.iterdir() if child.is_dir() and is_python_project(child)
+    )
+    if len(projects) == 1:
+        return projects[0]
+    if len(projects) > 1:
+        raise ValueError(f"Multiple Python projects found in tool directory: {root}")
+    raise ValueError(f"No Python project metadata found in tool directory: {root}")
+
+
+def install_tool(tool_name, tool_path):
+    """Install a registered Python tool from its local project directory."""
+    tool = get_tool_metadata(tool_name)
+    if tool is None:
+        raise ValueError(f"Tool '{tool_name}' is not supported.")
+    if tool["install_method"] != "pip":
+        raise ValueError(
+            f"Automated installation is not supported for "
+            f"'{tool_name}' ({tool['install_method']} tool)."
+        )
+
+    source = _find_install_source(tool_path)
+    subprocess.run(
+        [sys.executable, "-m", "pip", "install", str(source)],
+        check=True,
+        timeout=600,
+    )
 
 
 def _ensure_repo_url(repo_url):

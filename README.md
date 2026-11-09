@@ -1,11 +1,11 @@
 # OSINT Beast
 
-OSINT Beast is a Python command-line framework for organizing authorized open-source intelligence (OSINT) workflows. It provides a curated registry of tools and uses SQLite to store structured records and tool results. The project is under active development; see the [development roadmap](#development-roadmap) and [`notes.md`](notes.md).
+OSINT Beast is a Python command-line framework for organizing authorized open-source intelligence (OSINT) workflows. It provides a curated registry of tools and uses SQLite to store structured records and tool results. The project is under active development; see the [development roadmap](#development-roadmap) and [development notes](doc/NOTES.md).
 
 ## Current capabilities
 
 - Browse a curated list of supported tools.
-- Download and install registered tools through the CLI.
+- Download registered tools and install supported Python packages through the CLI. Binary tools such as Amass require manual installation.
 - Initialize a local SQLite database for OSINT records and tool metadata.
 - Run the Holehe email-check integration and save its output.
 - Query stored database records from the CLI.
@@ -59,7 +59,7 @@ Use OSINT Beast only with data and targets you are authorized to assess, and fol
 ├── src/        CLI, database, and tool integrations
 ├── tests/      Automated tests
 ├── README.md
-├── notes.md    Development notes and roadmap
+├── doc/        Design documentation and development notes
 ├── pyproject.toml
 └── osintbeast.db (created at runtime)
 ```

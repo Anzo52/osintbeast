@@ -57,7 +57,7 @@ def download(tool_name):
 
 def install(tool_name):
     tool_path = input("Enter the local tool path or press Enter to use the default download directory: ").strip()
-    install_tool(tool_name, tool_path or f"tools/{tool_name}")
+    install_tool(tool_name, tool_path or f"tools/{tool_name.strip().lower()}")
     print(f"{tool_name} installed successfully.")
 
 

@@ -1,5 +1,5 @@
-# Development notes moved
+# Development notes
 
-`notes.md` at the repository root is now the canonical development-notes document. It combines the roadmap and design constraints with the database schema notes and integration ideas previously maintained here.
-
-Please update [the root notes document](../notes.md) rather than adding new content to this file.
+The development roadmap and current design constraints are maintained in the
+[README](../README.md#development-roadmap). This file remains the location for
+additional design notes that do not belong in the user-facing overview.
