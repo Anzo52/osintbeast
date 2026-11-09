@@ -42,9 +42,12 @@ Install development dependencies and run tests from the repository root:
 ```bash
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
+python -m ruff check --select E4,E7,E9,F src tests
 ```
 
 Tests should mock network requests and external tool execution; normal test runs should not contact third-party services or perform real scans. Keep database and subprocess behavior covered by focused tests.
+
+GitHub Actions runs the test suite and Ruff checks on Python 3.10–3.13 for pushes and pull requests.
 
 ## Responsible use and privacy
 
