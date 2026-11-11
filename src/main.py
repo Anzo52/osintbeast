@@ -1,3 +1,5 @@
+import sqlite3
+
 from simple_term_menu import TerminalMenu
 
 from database import setup_database, query_database
@@ -41,7 +43,11 @@ def main_menu():
 
 
 def init_db():
-    setup_database()
+    try:
+        setup_database()
+    except (OSError, sqlite3.Error, UnicodeError) as exc:
+        print(f"Database initialization failed: {exc}")
+        return
     print("Database initialized successfully.")
 
 

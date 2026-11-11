@@ -33,6 +33,7 @@ dev = [
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+packages = ["osintbeast_schemas"]
 py-modules = [
     "database",
     "downloader",
@@ -41,6 +42,9 @@ py-modules = [
     "main",
     "tool_registry",
 ]
+
+[tool.setuptools.package-data]
+osintbeast_schemas = ["*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

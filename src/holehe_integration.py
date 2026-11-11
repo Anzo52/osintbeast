@@ -1,9 +1,9 @@
 import json
 import re
 import sqlite3
-from pathlib import Path
 
-DB_FILE = Path(__file__).resolve().parent.parent / "osintbeast.db"
+import database
+
 HOLEHE_TIMEOUT_SECONDS = 300
 
 _LOCAL_PART_RE = re.compile(
@@ -92,7 +92,7 @@ def run_holehe(email: str):
 
 
 def save_tool_result(tool_name: str, query_text: str, result_text: str):
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(database.DB_FILE)
     try:
         conn.execute(
             """CREATE TABLE IF NOT EXISTS ToolResults (

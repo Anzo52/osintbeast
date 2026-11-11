@@ -8,7 +8,9 @@ from urllib.parse import urlparse
 import requests
 from sqlalchemy import MetaData, Table, create_engine
 
-DB_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "osintbeast.db"))
+import database
+
+DB_FILE = database.DB_FILE
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS Platforms (
@@ -90,8 +92,7 @@ def connect_db():
 
 
 def setup_database():
-    with connect_db() as conn:
-        conn.executescript(SCHEMA)
+    database.setup_database()
 
 
 def insert_data(table, data):

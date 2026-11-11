@@ -1,12 +1,19 @@
+import os
 import sqlite3
 from contextlib import closing
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-# Keep the default database alongside the repository, independent of the current
-# working directory. Tests and deployments may override this value.
-DB_FILE = str(Path(__file__).resolve().parent.parent / "osintbeast.db")
-SCHEMA_DIR = Path(__file__).resolve().parent.parent / "data"
+# Keep the checkout default independent of the current working directory.
+DB_FILE = str(
+    Path(
+        os.environ.get(
+            "OSINTBEAST_DB_PATH",
+            str(Path(__file__).resolve().parent.parent / "osintbeast.db"),
+        )
+    ).expanduser().resolve()
+)
+SCHEMA_DIR = Path(__file__).resolve().parent / "osintbeast_schemas"
 SCHEMA_FILES = ("sqlite-infoschema.sql", "sqlite-toolschema.sql")
 
 # SQL identifiers cannot be bound as query parameters, so table names are
@@ -24,13 +31,16 @@ def connect_db() -> sqlite3.Connection:
 
 
 def setup_database() -> None:
-    """Create all application tables from the checked-in SQLite schemas."""
+    """Create missing schema objects atomically without replacing existing data."""
+    schemas = []
+    for schema_name in SCHEMA_FILES:
+        schema_path = SCHEMA_DIR / schema_name
+        if not schema_path.is_file():
+            raise FileNotFoundError(f"SQLite schema file not found: {schema_path}")
+        schemas.append(schema_path.read_text(encoding="utf-8"))
+
     with closing(connect_db()) as conn, conn:
-        for schema_name in SCHEMA_FILES:
-            schema_path = SCHEMA_DIR / schema_name
-            if not schema_path.is_file():
-                raise FileNotFoundError(f"SQLite schema file not found: {schema_path}")
-            conn.executescript(schema_path.read_text(encoding="utf-8"))
+        conn.executescript("BEGIN IMMEDIATE;\n" + "\n".join(schemas))
 
 
 def insert_data(table: str, data: Mapping[str, Any]) -> None:

@@ -35,6 +35,27 @@ python src/main.py
 
 From the menu, initialize the database before saving or querying data. Use the supported-tools option to see the registered integrations.
 
+### Database initialization
+
+Select **Initialize Database** from the menu. In a source checkout, the default
+database is `osintbeast.db` in the repository root, regardless of the current
+working directory. Initialization creates missing tables and indexes in one
+transaction; running it again preserves existing records and recreates missing
+schema objects. It does not migrate or repair incompatible existing tables.
+
+To use a different location, set `OSINTBEAST_DB_PATH` before starting the
+application. The parent directory must already exist and be writable. For an
+installed package, set this variable to a writable location outside the
+installation directory. Relative paths are resolved against the working
+directory at startup. Initialization errors are reported in the menu; check
+the path and permissions before retrying.
+
+```bash
+# Linux/macOS, for example
+export OSINTBEAST_DB_PATH="$HOME/osintbeast.db"
+# Windows PowerShell: $env:OSINTBEAST_DB_PATH = "$HOME\osintbeast.db"
+```
+
 ## Development and tests
 
 Install development dependencies and run tests from the repository root:
@@ -57,12 +78,11 @@ Use OSINT Beast only with data and targets you are authorized to assess, and fol
 
 ```text
 .
-├── data/       SQL schema files
+├── data/       MySQL schema files
 ├── doc/        Design documentation
-├── src/        CLI, database, and tool integrations
+├── src/        CLI, database, SQLite schemas, and tool integrations
 ├── tests/      Automated tests
 ├── README.md
-├── doc/        Design documentation and development notes
 ├── pyproject.toml
 └── osintbeast.db (created at runtime)
 ```
@@ -75,7 +95,7 @@ This roadmap describes planned work, not a promise or release schedule. Prioriti
 
 - [x] Keep dependency manifests, source modules, schemas, and documentation in their correct files.
 - [x] Declare Python 3.10+ support and bounded dependency ranges in `pyproject.toml`.
-- [ ] Make database initialization reliable and repeatable across supported environments.
+- [x] Make database initialization reliable and repeatable across supported environments.
 - [ ] Expand automated coverage for database operations, CLI behavior, validation, timeouts, and failures.
 - [ ] Add continuous integration to run tests and basic static checks on changes.
 

@@ -1,3 +1,4 @@
+-- Tool metadata and results
 CREATE TABLE IF NOT EXISTS ToolCatalog (
     toolID INTEGER PRIMARY KEY,
     toolName TEXT NOT NULL UNIQUE,

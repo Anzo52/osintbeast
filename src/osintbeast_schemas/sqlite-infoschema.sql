@@ -1,3 +1,4 @@
+-- OSINT records
 CREATE TABLE IF NOT EXISTS Platforms (
     platformID INTEGER PRIMARY KEY,
     platform TEXT UNIQUE NOT NULL
