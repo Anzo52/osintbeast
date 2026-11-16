@@ -8,8 +8,10 @@ from simple_term_menu import TerminalMenu
 from database import setup_database, query_database
 from downloader import download_tool
 from installer import install_tool
-from holehe_integration import HoleheTimeoutError, run_holehe, save_tool_result
+from holehe_integration import run_holehe, validate_email
+from maigret_integration import run_maigret, validate_username
 from tool_registry import get_supported_tools
+from tool_runs import execute_tool_run
 
 
 def main_menu():
@@ -20,6 +22,7 @@ def main_menu():
         "Install Tool",
         "Run Holehe Check",
         "Query Database",
+        "Run Maigret Check",
         "Exit",
     ]
     terminal_menu = TerminalMenu(options, title="OSINT Beast Main Menu")
@@ -42,6 +45,9 @@ def main_menu():
         query_str = input("Enter your query: ").strip()
         query(query_str)
     elif choice == 6:
+        username = input("Enter the username to check: ").strip()
+        run_maigret_check(username)
+    elif choice == 7:
         raise SystemExit(0)
 
 
@@ -81,19 +87,32 @@ def install(tool_name):
     print(f"{tool_name} installed successfully.")
 
 
-def run_holehe_check(email):
+def _run_check(tool_name, query_text, validator, runner):
     try:
-        result = run_holehe(email)
-        print(f"Return code: {result['returncode']}")
-        print(result["output"])
-        save_tool_result("holehe", email, result["output"])
-        print("Holehe check saved to the database.")
+        query_text = validator(query_text)
     except ValueError as exc:
         print(f"Input error: {exc}")
-    except HoleheTimeoutError as exc:
-        print(f"Holehe timed out: {exc}")
-    except RuntimeError as exc:
-        print(f"Holehe could not run: {exc}")
+        return
+    try:
+        status, value = execute_tool_run(tool_name, query_text, runner)
+    except sqlite3.Error as exc:
+        print(f"Could not record {tool_name} run: {exc}. Initialize the database and check its permissions.")
+        return
+    if status == "success":
+        print(value)
+        print(f"{tool_name.capitalize()} check saved to the database.")
+    elif status == "timed_out":
+        print(f"{tool_name.capitalize()} timed out: {value}")
+    else:
+        print(f"{tool_name.capitalize()} could not run: {value}")
+
+
+def run_holehe_check(email):
+    _run_check("holehe", email, validate_email, lambda value: run_holehe(value)["output"])
+
+
+def run_maigret_check(username):
+    _run_check("maigret", username, validate_username, run_maigret)
 
 
 def query(query_text):

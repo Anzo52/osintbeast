@@ -30,6 +30,9 @@ dev = [
     "pytest>=7,<9",
     "ruff>=0.11,<1",
 ]
+maigret = [
+    "maigret>=0.6.6,<0.7",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -40,6 +43,8 @@ py-modules = [
     "holehe_integration",
     "installer",
     "main",
+    "maigret_integration",
+    "tool_runs",
     "tool_registry",
 ]
 

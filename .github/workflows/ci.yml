@@ -28,7 +28,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: python -m pip install -r requirements-dev.txt
+        run: python -m pip install -e ".[dev,maigret]"
 
       - name: Run tests
         run: python -m pytest -q
@@ -41,4 +41,4 @@ jobs:
           python -m pip wheel --no-deps --wheel-dir "$RUNNER_TEMP/wheels" .
           python -m pip install --no-deps --target "$RUNNER_TEMP/osintbeast-install" "$RUNNER_TEMP"/wheels/osintbeast-*.whl
           cd "$RUNNER_TEMP"
-          OSINTBEAST_DB_PATH="$RUNNER_TEMP/osintbeast-test.db" PYTHONPATH="$RUNNER_TEMP/osintbeast-install" python -c "import database; database.setup_database(); database.setup_database(); assert database.query_database(\"SELECT name FROM sqlite_master WHERE name = 'ToolResults'\")"
+          OSINTBEAST_DB_PATH="$RUNNER_TEMP/osintbeast-test.db" PYTHONPATH="$RUNNER_TEMP/osintbeast-install" python -c "import database, maigret_integration, tool_runs; database.setup_database(); database.setup_database(); assert len(database.query_database(\"SELECT name FROM sqlite_master WHERE name IN ('ToolResults', 'ToolRuns')\")) == 2"

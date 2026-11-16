@@ -7,7 +7,7 @@ OSINT Beast is a Python command-line framework for organizing authorized open-so
 - Browse a curated list of supported tools.
 - Download registered tools and install supported Python packages through the CLI. Binary tools such as Amass require manual installation.
 - Initialize a local SQLite database for OSINT records and tool metadata.
-- Run the Holehe email-check integration and save its output.
+- Run Holehe email checks and optional Maigret username checks, with recorded outcomes.
 - Query stored database records from the CLI.
 
 The current registry includes Holehe, Sherlock, Maigret, Amass, and Sublist3r. Availability in the registry does not necessarily mean every tool has a complete first-party integration; consult the code and each tool's own documentation before use.
@@ -39,13 +39,45 @@ you can correct the input or environment and try again. For example, check the
 tool name and download directory, network access and file permissions, or SQL
 syntax and database initialization as appropriate.
 
+### Running checks
+
+Holehe is installed with the standard dependencies. To enable Maigret in a
+source checkout, install its optional dependencies:
+
+```bash
+python -m pip install -e ".[maigret]"
+```
+
+Select **Run Holehe Check** or **Run Maigret Check** in the menu. Maigret accepts
+up to 100 ASCII letters, digits, dots, underscores, and hyphens. It checks all
+enabled username sites in its bundled database, without a proxy or profile
+enrichment. This can contact thousands of services and consume considerable
+network resources; use it only for authorized targets. Each Maigret request
+has a 30-second timeout, and the overall search has a 300-second timeout.
+Partial results are not saved when the overall search times out. Individual
+site failures appear as `Unknown` results; a successful run means the search
+completed, not that every site was reachable or every match is confirmed.
+
+The CLI validates input before recording a run. Valid attempts are stored in
+`ToolRuns` with the tool, input, status (`running`, `success`, `failed`, or
+`timed_out`), UTC start and finish timestamps, and either output or an error.
+A `running` record can remain after interruption or a database-write failure.
+Successful outputs are also saved to the existing `ToolResults` table.
+Existing `ToolResults` rows are preserved but do not gain historical run
+statuses. Use **Query Database** to inspect either table.
+
+Inputs, results, and errors can contain sensitive data. They are stored in
+plain text in the local database; restrict its permissions and delete records
+when no longer needed. Searches send the supplied input to third-party sites.
+
 ### Database initialization
 
 Select **Initialize Database** from the menu. In a source checkout, the default
 database is `osintbeast.db` in the repository root, regardless of the current
 working directory. Initialization creates missing tables and indexes in one
 transaction; running it again preserves existing records and recreates missing
-schema objects. It does not migrate or repair incompatible existing tables.
+schema objects, including the new run-history table in existing databases. It
+does not migrate or repair incompatible existing tables.
 
 To use a different location, set `OSINTBEAST_DB_PATH` before starting the
 application. The parent directory must already exist and be writable. For an
@@ -71,8 +103,11 @@ python -m ruff check --select E4,E7,E9,F src tests
 ```
 
 Tests should mock network requests and external tool execution; normal test runs should not contact third-party services or perform real scans. Keep database and subprocess behavior covered by focused tests.
+The Maigret API-contract tests require the optional extra; without it those
+tests are skipped.
 
 GitHub Actions runs the test suite and Ruff checks on Python 3.10–3.13 for pushes and pull requests.
+It also installs the Maigret extra so its offline API-contract tests run.
 
 ## Responsible use and privacy
 
@@ -101,7 +136,7 @@ This roadmap describes planned work, not a promise or release schedule. Prioriti
 - [x] Declare Python 3.10+ support and bounded dependency ranges in `pyproject.toml`.
 - [x] Make database initialization reliable and repeatable across supported environments.
 - [ ] Expand automated coverage for database operations, CLI behavior, validation, timeouts, and failures.
-- [ ] Add continuous integration to run tests and basic static checks on changes.
+- [x] Add continuous integration to run tests and basic static checks on changes.
 
 ### 2. Harden tool execution and data handling
 

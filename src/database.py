@@ -107,3 +107,40 @@ def list_tool_results(limit: int = 100) -> list[tuple[Any, ...]]:
                FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
             (limit,),
         ).fetchall()
+
+
+def start_tool_run(tool_name: str, query_text: str) -> int:
+    """Create a running record before starting an external check."""
+    with closing(connect_db()) as conn, conn:
+        cursor = conn.execute(
+            "INSERT INTO ToolRuns (toolName, queryText, status) VALUES (?, ?, 'running')",
+            (tool_name, query_text),
+        )
+        return int(cursor.lastrowid)
+
+
+def finish_tool_run(
+    run_id: int, status: str, result_text: Optional[str] = None,
+    error_text: Optional[str] = None,
+) -> None:
+    """Finish a run and retain successful results in the legacy results table."""
+    if status not in {"success", "failed", "timed_out"}:
+        raise ValueError(f"Invalid terminal run status: {status}")
+    if (status == "success" and (result_text is None or error_text is not None)) or (
+        status != "success" and (error_text is None or result_text is not None)
+    ):
+        raise ValueError("Success requires a result; failures require an error.")
+    with closing(connect_db()) as conn, conn:
+        cursor = conn.execute(
+            """UPDATE ToolRuns SET status = ?, resultText = ?, errorText = ?,
+               finishedAt = CURRENT_TIMESTAMP WHERE runID = ? AND status = 'running'""",
+            (status, result_text, error_text, run_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("Run does not exist or is already finished.")
+        if status == "success":
+            conn.execute(
+                """INSERT INTO ToolResults (toolName, queryText, resultText)
+                   SELECT toolName, queryText, resultText FROM ToolRuns WHERE runID = ?""",
+                (run_id,),
+            )

@@ -18,3 +18,17 @@ CREATE TABLE IF NOT EXISTS ToolResults (
 
 CREATE INDEX IF NOT EXISTS idx_toolresults_tool_created
     ON ToolResults (toolName, createdAt);
+
+CREATE TABLE IF NOT EXISTS ToolRuns (
+    runID INTEGER PRIMARY KEY AUTOINCREMENT,
+    toolName TEXT NOT NULL,
+    queryText TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('running', 'success', 'failed', 'timed_out')),
+    resultText TEXT,
+    errorText TEXT,
+    startedAt TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    finishedAt TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_toolruns_tool_started
+    ON ToolRuns (toolName, startedAt);
