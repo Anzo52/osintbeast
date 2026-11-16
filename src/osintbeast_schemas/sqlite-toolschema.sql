@@ -1,5 +1,5 @@
 -- Tool metadata and results
-CREATE TABLE IF NOT EXISTS ToolCatalog (
+CREATE TABLE ToolCatalog (
     toolID INTEGER PRIMARY KEY,
     toolName TEXT NOT NULL UNIQUE,
     category TEXT,
@@ -8,19 +8,19 @@ CREATE TABLE IF NOT EXISTS ToolCatalog (
     notes TEXT
 );
 
-CREATE TABLE IF NOT EXISTS ToolResults (
-    resultID INTEGER PRIMARY KEY AUTOINCREMENT,
+CREATE TABLE ToolResults (
+    resultID INTEGER PRIMARY KEY,
     toolName TEXT NOT NULL,
     queryText TEXT NOT NULL,
     resultText TEXT,
     createdAt TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
-CREATE INDEX IF NOT EXISTS idx_toolresults_tool_created
+CREATE INDEX idx_toolresults_tool_created
     ON ToolResults (toolName, createdAt);
 
-CREATE TABLE IF NOT EXISTS ToolRuns (
-    runID INTEGER PRIMARY KEY AUTOINCREMENT,
+CREATE TABLE ToolRuns (
+    runID INTEGER PRIMARY KEY,
     toolName TEXT NOT NULL,
     queryText TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('running', 'success', 'failed', 'timed_out')),
@@ -30,5 +30,5 @@ CREATE TABLE IF NOT EXISTS ToolRuns (
     finishedAt TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_toolruns_tool_started
+CREATE INDEX idx_toolruns_tool_started
     ON ToolRuns (toolName, startedAt);
