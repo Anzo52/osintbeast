@@ -28,9 +28,32 @@ def test_setup_database_loads_both_idempotent_schemas(tmp_path, monkeypatch):
         }
         assert {
             "Platforms", "Names", "Locations", "Domains", "Services",
-            "Urls", "Usernames", "ToolCatalog", "ToolResults",
+            "Urls", "Usernames", "ToolCatalog", "ToolSources", "ToolResults",
+            "ToolRuns",
         } <= tables
         assert conn.execute("PRAGMA foreign_keys").fetchone() == (1,)
+        location_types = {
+            row[1]: row[2] for row in conn.execute("PRAGMA table_info(Locations)")
+        }
+        assert location_types["addressNum"] == "TEXT"
+        assert location_types["apt"] == "TEXT"
+        assert location_types["zip"] == "TEXT"
+
+
+def test_mysql_schemas_are_split_by_domain_and_include_run_history():
+    schema_dir = Path(__file__).resolve().parents[1] / "data"
+    info_schema = (schema_dir / "mysql-infoschema.sql").read_text(encoding="utf-8")
+    tool_schema = (schema_dir / "mysql-toolschema.sql").read_text(encoding="utf-8")
+
+    assert "CREATE TABLE IF NOT EXISTS Platforms" in info_schema
+    assert "CREATE TABLE IF NOT EXISTS Locations" in info_schema
+    assert "CREATE TABLE IF NOT EXISTS ToolCatalog" not in info_schema
+    assert "zip VARCHAR(16)" in info_schema
+    assert "CREATE TABLE IF NOT EXISTS ToolCatalog" in tool_schema
+    assert "CREATE TABLE IF NOT EXISTS ToolSources" in tool_schema
+    assert "CREATE TABLE IF NOT EXISTS ToolResults" in tool_schema
+    assert "CREATE TABLE IF NOT EXISTS ToolRuns" in tool_schema
+    assert "CREATE TABLE IF NOT EXISTS Platforms" not in tool_schema
 
 
 def test_setup_database_preserves_existing_data_and_repairs_missing_objects(

@@ -19,9 +19,9 @@ CREATE TABLE IF NOT EXISTS Locations (
     county TEXT,
     city TEXT,
     street TEXT,
-    addressNum INTEGER,
-    apt INTEGER,
-    zip INTEGER
+    addressNum TEXT,
+    apt TEXT,
+    zip TEXT
 );
 
 CREATE TABLE IF NOT EXISTS Domains (
