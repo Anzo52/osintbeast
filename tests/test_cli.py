@@ -8,6 +8,19 @@ import database
 import main
 
 
+def test_list_supported_tools_shows_current_installation_status(monkeypatch, capsys):
+    monkeypatch.setattr(main, "get_supported_tools", lambda: ["amass", "holehe"])
+    installed = {"amass"}
+    monkeypatch.setattr(main, "is_tool_installed", lambda name: name in installed)
+
+    main.list_supported_tools()
+    assert capsys.readouterr().out == "- amass: installed\n- holehe: not installed\n"
+
+    installed.add("holehe")
+    main.list_supported_tools()
+    assert capsys.readouterr().out == "- amass: installed\n- holehe: installed\n"
+
+
 @pytest.mark.parametrize(
     ("error", "message"),
     [

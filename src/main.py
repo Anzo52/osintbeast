@@ -10,7 +10,7 @@ from downloader import download_tool
 from installer import install_tool
 from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username
-from tool_registry import get_supported_tools
+from tool_registry import get_supported_tools, is_tool_installed
 from tool_runs import execute_tool_run
 
 
@@ -62,7 +62,8 @@ def init_db():
 
 def list_supported_tools():
     for tool_name in get_supported_tools():
-        print(f"- {tool_name}")
+        status = "installed" if is_tool_installed(tool_name) else "not installed"
+        print(f"- {tool_name}: {status}")
 
 
 def download(tool_name):
