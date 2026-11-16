@@ -127,7 +127,19 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
-osintbeast.db
+
+# Runtime database and SQLite sidecars
+/osintbeast.db
+/osintbeast.db-journal
+/osintbeast.db-wal
+/osintbeast.db-shm
+
+# Tool downloads created by the CLI
+/tools/holehe/
+/tools/sherlock/
+/tools/maigret/
+/tools/amass/
+/tools/sublist3r/
 .gitignore
 tools/sherlock/sherlock-master/.editorconfig
 tools/sherlock/sherlock-master/Dockerfile
