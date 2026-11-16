@@ -41,6 +41,12 @@ TOOL_REGISTRY: dict[str, ToolMetadata] = {
         "install_method": "pip",
         "notes": "Enumerates subdomains using public sources.",
     },
+    "helix": {
+        "repo": "https://github.com/thalha-a9/helix",
+        "category": "username",
+        "install_method": "pip",
+        "notes": "Searches for usernames across social networks.",
+    },
 }
 
 
