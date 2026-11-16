@@ -6,31 +6,41 @@ from pathlib import Path
 from typing import Any, Mapping, Optional
 
 # Keep the checkout default independent of the current working directory.
-DB_FILE = str(
+def setup_database_paths(__file__):
+    DB_FILE = str(
     Path(
         os.environ.get(
             "OSINTBEAST_DB_PATH",
-            str(Path(__file__).resolve().parent.parent / "osintbeast.db"),
+            str(
+                Path(__file__).resolve().parent.parent
+                / "data"
+                / "databases"
+                / "osintbeast.db"
+            ),
         )
     ).expanduser().resolve()
 )
-try:
-    SCHEMA_DIR = Path(__file__).resolve().parent.parent / "data" / "schemas"
-    if not SCHEMA_DIR.is_dir():
-        SCHEMA_DIR = files("osintbeast_schemas")
-except ModuleNotFoundError:
-    raise ModuleNotFoundError("Database schema resources are not installed.")
-SCHEMA_FILES = ("sqlite-infoschema.sql", "sqlite-toolschema.sql")
+    try:
+        SCHEMA_DIR = Path(__file__).resolve().parent.parent / "data" / "schemas"
+        if not SCHEMA_DIR.is_dir():
+            SCHEMA_DIR = files("osintbeast_schemas")
+    except ModuleNotFoundError:
+        raise ModuleNotFoundError("Database schema resources are not installed.")
+    SCHEMA_FILES = ("sqlite-infoschema.sql", "sqlite-toolschema.sql")
 
 # SQL identifiers cannot be bound as query parameters, so table names are
 # restricted to this fixed set and columns are checked against the live schema.
-INSERTABLE_TABLES = frozenset(
+    INSERTABLE_TABLES = frozenset(
     {"Platforms", "Names", "Locations", "Domains", "Services", "Urls", "Usernames", "ToolCatalog", "ToolResults"}
 )
+    return DB_FILE,SCHEMA_DIR,SCHEMA_FILES,INSERTABLE_TABLES
+
+DB_FILE, SCHEMA_DIR, SCHEMA_FILES, INSERTABLE_TABLES = setup_database_paths(__file__)
 
 
 def connect_db() -> sqlite3.Connection:
     """Open the SQLite database with foreign-key enforcement enabled."""
+    Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_FILE)
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
@@ -92,7 +102,7 @@ def query_database(query: str, parameters: tuple[Any, ...] = ()) -> list[tuple[A
 
 def save_tool_result(
     tool_name: str, query_text: str, result_text: Optional[str]
-) -> int:
+):
     """Persist a tool run and return its result row ID."""
     with closing(connect_db()) as conn, conn:
         cursor = conn.execute(
@@ -100,7 +110,7 @@ def save_tool_result(
                VALUES (?, ?, ?)""",
             (tool_name, query_text, result_text),
         )
-        return int(cursor.lastrowid)
+        return cursor.lastrowid
 
 
 def list_tool_results(limit: int = 100) -> list[tuple[Any, ...]]:
@@ -115,14 +125,14 @@ def list_tool_results(limit: int = 100) -> list[tuple[Any, ...]]:
         ).fetchall()
 
 
-def start_tool_run(tool_name: str, query_text: str) -> int:
+def start_tool_run(tool_name: str, query_text: str):
     """Create a running record before starting an external check."""
     with closing(connect_db()) as conn, conn:
         cursor = conn.execute(
             "INSERT INTO ToolRuns (toolName, queryText, status) VALUES (?, ?, 'running')",
             (tool_name, query_text),
         )
-        return int(cursor.lastrowid)
+        return cursor.lastrowid
 
 
 def finish_tool_run(
