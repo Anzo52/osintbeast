@@ -34,6 +34,10 @@ python src/main.py
 ```
 
 From the menu, initialize the database before saving or querying data. Use the supported-tools option to see the registered integrations.
+Download, installation, and database query errors are reported in the menu so
+you can correct the input or environment and try again. For example, check the
+tool name and download directory, network access and file permissions, or SQL
+syntax and database initialization as appropriate.
 
 ### Database initialization
 

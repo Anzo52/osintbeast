@@ -1,4 +1,7 @@
 import sqlite3
+import subprocess
+import zipfile
+import zlib
 
 from simple_term_menu import TerminalMenu
 
@@ -57,13 +60,24 @@ def list_supported_tools():
 
 
 def download(tool_name):
-    target_dir = download_tool(tool_name, output_dir="tools")
+    try:
+        target_dir = download_tool(tool_name, output_dir="tools")
+    except (
+        ValueError, RuntimeError, OSError, zipfile.BadZipFile,
+        EOFError, NotImplementedError, zlib.error,
+    ) as exc:
+        print(f"Download failed: {exc}")
+        return
     print(f"{tool_name} downloaded successfully to {target_dir}.")
 
 
 def install(tool_name):
     tool_path = input("Enter the local tool path or press Enter to use the default download directory: ").strip()
-    install_tool(tool_name, tool_path or f"tools/{tool_name.strip().lower()}")
+    try:
+        install_tool(tool_name, tool_path or f"tools/{tool_name.strip().lower()}")
+    except (ValueError, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        print(f"Installation failed: {exc}")
+        return
     print(f"{tool_name} installed successfully.")
 
 
@@ -83,7 +97,11 @@ def run_holehe_check(email):
 
 
 def query(query_text):
-    result = query_database(query_text)
+    try:
+        result = query_database(query_text)
+    except sqlite3.Error as exc:
+        print(f"Database query failed: {exc}")
+        return
     print(f"Query result: {result}")
 
 
