@@ -35,7 +35,7 @@ maigret = [
 ]
 
 [tool.setuptools]
-package-dir = {"" = "src"}
+package-dir = {"" = "src", "osintbeast_schemas" = "data/schemas"}
 packages = ["osintbeast_schemas"]
 py-modules = [
     "database",

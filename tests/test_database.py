@@ -41,7 +41,7 @@ def test_setup_database_loads_both_idempotent_schemas(tmp_path, monkeypatch):
 
 
 def test_mysql_schemas_are_split_by_domain_and_include_run_history():
-    schema_dir = Path(__file__).resolve().parents[1] / "data"
+    schema_dir = Path(__file__).resolve().parents[1] / "data" / "schemas"
     info_schema = (schema_dir / "mysql-infoschema.sql").read_text(encoding="utf-8")
     tool_schema = (schema_dir / "mysql-toolschema.sql").read_text(encoding="utf-8")
 

@@ -117,9 +117,10 @@ Use OSINT Beast only with data and targets you are authorized to assess, and fol
 
 ```text
 .
-├── data/       MySQL schema files
+├── data/
+│   └── schemas/  MySQL and SQLite schema files
 ├── doc/        Design documentation
-├── src/        CLI, database, SQLite schemas, and tool integrations
+├── src/        CLI, database, and tool integrations
 ├── tests/      Automated tests
 ├── README.md
 ├── pyproject.toml

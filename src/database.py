@@ -1,6 +1,7 @@
 import os
 import sqlite3
 from contextlib import closing
+from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
@@ -13,7 +14,12 @@ DB_FILE = str(
         )
     ).expanduser().resolve()
 )
-SCHEMA_DIR = Path(__file__).resolve().parent / "osintbeast_schemas"
+try:
+    SCHEMA_DIR = Path(__file__).resolve().parent.parent / "data" / "schemas"
+    if not SCHEMA_DIR.is_dir():
+        SCHEMA_DIR = files("osintbeast_schemas")
+except ModuleNotFoundError:
+    raise ModuleNotFoundError("Database schema resources are not installed.")
 SCHEMA_FILES = ("sqlite-infoschema.sql", "sqlite-toolschema.sql")
 
 # SQL identifiers cannot be bound as query parameters, so table names are
@@ -34,7 +40,7 @@ def setup_database() -> None:
     """Create missing schema objects atomically without replacing existing data."""
     schemas = []
     for schema_name in SCHEMA_FILES:
-        schema_path = SCHEMA_DIR / schema_name
+        schema_path = SCHEMA_DIR.joinpath(schema_name)
         if not schema_path.is_file():
             raise FileNotFoundError(f"SQLite schema file not found: {schema_path}")
         schemas.append(schema_path.read_text(encoding="utf-8"))
