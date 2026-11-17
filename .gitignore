@@ -197,3 +197,4 @@ tools/sherlock/sherlock-master/tests/test_unicode.py
 tools/sherlock/sherlock-master/tests/test_ux.py
 tools/sherlock/sherlock-master/tests/test_validate_targets.py
 tools/sherlock/sherlock-master/tests/test_version.py
+data/databases/osintbeast.db
