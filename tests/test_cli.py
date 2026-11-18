@@ -158,6 +158,24 @@ def test_helix_menu_action_dispatches_username(monkeypatch):
     runner.assert_called_once_with("@user")
 
 
+def test_sherlock_menu_action_dispatches_username(monkeypatch):
+    class FakeMenu:
+        def __init__(self, options, title):
+            assert "Run Sherlock Check" in options
+
+        def show(self):
+            return 8
+
+    runner = Mock()
+    monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
+    monkeypatch.setattr("builtins.input", lambda prompt: " user ")
+    monkeypatch.setattr(main, "run_sherlock_check", runner)
+
+    main.main_menu()
+
+    runner.assert_called_once_with("user")
+
+
 def test_download_menu_selects_registered_tool_without_typing(monkeypatch):
     choices = iter([2, 1])
 
