@@ -49,6 +49,7 @@ def test_mysql_schemas_are_split_by_domain_and_include_run_history():
     assert "CREATE TABLE IF NOT EXISTS Locations" in info_schema
     assert "CREATE TABLE IF NOT EXISTS ToolCatalog" not in info_schema
     assert "zip VARCHAR(16)" in info_schema
+    assert "KEY idx_services_platform (platformID)" in info_schema
     assert "CREATE TABLE IF NOT EXISTS ToolCatalog" in tool_schema
     assert "CREATE TABLE IF NOT EXISTS ToolSources" in tool_schema
     assert "CREATE TABLE IF NOT EXISTS ToolResults" in tool_schema
@@ -64,6 +65,7 @@ def test_setup_database_preserves_existing_data_and_repairs_missing_objects(
     database.insert_data("Platforms", {"platform": "existing"})
     with database.connect_db() as conn:
         conn.execute("DROP INDEX idx_usernames_name")
+        conn.execute("DROP INDEX idx_services_platform")
 
     database.setup_database()
 
@@ -72,6 +74,10 @@ def test_setup_database_preserves_existing_data_and_repairs_missing_objects(
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
         ("idx_usernames_name",),
     ) == [("idx_usernames_name",)]
+    assert database.query_database(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
+        ("idx_services_platform",),
+    ) == [("idx_services_platform",)]
 
 
 def test_setup_database_rolls_back_all_schemas_on_sql_error(tmp_path, monkeypatch):
