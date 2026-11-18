@@ -11,6 +11,7 @@ from helix_integration import run_helix, validate_username as validate_helix_use
 from installer import install_tool
 from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username
+from sherlock_integration import run_sherlock, validate_username as validate_sherlock_username
 from tool_registry import TOOL_REGISTRY, get_supported_tools, is_tool_installed
 from tool_runs import execute_tool_run
 
@@ -40,6 +41,7 @@ def main_menu():
         "Query Database",
         "Run Maigret Check",
         "Run Helix Check",
+        "Run Sherlock Check",
         "Exit",
     ]
     terminal_menu = TerminalMenu(options, title="OSINT Beast Main Menu")
@@ -82,6 +84,9 @@ def main_menu():
         username = input("Enter the username to check: ").strip()
         run_helix_check(username)
     elif choice == 8:
+        username = input("Enter the username to check: ").strip()
+        run_sherlock_check(username)
+    elif choice == 9:
         raise SystemExit(0)
 
 
@@ -152,6 +157,10 @@ def run_maigret_check(username):
 
 def run_helix_check(username):
     _run_check("helix", username, validate_helix_username, run_helix)
+
+
+def run_sherlock_check(username):
+    _run_check("sherlock", username, validate_sherlock_username, run_sherlock)
 
 
 def query(query_text):

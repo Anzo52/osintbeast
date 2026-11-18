@@ -36,6 +36,9 @@ maigret = [
 helix = [
     "helix-osint>=4.4,<5",
 ]
+sherlock = [
+    "sherlock-project>=0.16.2,<0.17",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src", "osintbeast_schemas" = "data/schemas"}
@@ -48,6 +51,7 @@ py-modules = [
     "installer",
     "main",
     "maigret_integration",
+    "sherlock_integration",
     "tool_runs",
     "tool_registry",
 ]

@@ -21,8 +21,10 @@ def initialized_db(tmp_path, monkeypatch):
         ("holehe", RuntimeError("missing dependency"), "failed"),
         ("maigret", ValueError("invalid site database"), "failed"),
         ("maigret", OSError("network error"), "failed"),
+        ("sherlock", RuntimeError("missing dependency"), "failed"),
         ("holehe", HoleheTimeoutError("timeout"), "timed_out"),
         ("maigret", TimeoutError(), "timed_out"),
+        ("sherlock", TimeoutError(), "timed_out"),
     ],
 )
 def test_failed_runs_are_recorded(initialized_db, tool, error, status):
@@ -40,7 +42,7 @@ def test_failed_runs_are_recorded(initialized_db, tool, error, status):
     assert database.list_tool_results() == []
 
 
-@pytest.mark.parametrize("tool", ["holehe", "maigret"])
+@pytest.mark.parametrize("tool", ["holehe", "maigret", "sherlock"])
 def test_success_run_preserves_legacy_results(initialized_db, tool):
     assert tool_runs.execute_tool_run(tool, "test", lambda _: "output") == (
         "success", "output"
@@ -88,7 +90,11 @@ def test_reinitializing_legacy_database_preserves_results(tmp_path, monkeypatch)
 
 @pytest.mark.parametrize(
     ("function", "invalid"),
-    [(main.run_holehe_check, "bad email"), (main.run_maigret_check, "bad username")],
+    [
+        (main.run_holehe_check, "bad email"),
+        (main.run_maigret_check, "bad username"),
+        (main.run_sherlock_check, "bad username"),
+    ],
 )
 def test_invalid_input_is_not_recorded(initialized_db, capsys, function, invalid):
     function(invalid)
@@ -125,6 +131,7 @@ def test_run_finish_rejects_repeated_completion(initialized_db):
         (main.run_holehe_check, "run_holehe", " user@example.com ", "user@example.com", {"output": "email output"}, "holehe"),
         (main.run_maigret_check, "run_maigret", " user ", "user", "username output", "maigret"),
         (main.run_helix_check, "run_helix", " @user ", "user", "helix output", "helix"),
+        (main.run_sherlock_check, "run_sherlock", " user ", "user", "sherlock output", "sherlock"),
     ],
 )
 def test_cli_saves_success(

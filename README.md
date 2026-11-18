@@ -7,7 +7,7 @@ OSINT Beast is a Python command-line framework for organizing authorized open-so
 - Browse the tool registry and check whether each tool is installed.
 - Download registered tools and install supported Python packages through the CLI. Binary tools such as Amass require manual installation.
 - Initialize a local SQLite database for OSINT records and tool metadata.
-- Run Holehe email checks and optional Maigret and Helix OSINT username checks, with recorded outcomes.
+- Run Holehe email checks and optional Maigret, Helix OSINT, and Sherlock username checks, with recorded outcomes.
 - Query stored database records from the CLI.
 
 ### Integrated tools
@@ -20,6 +20,7 @@ recorded outcomes:
 | Holehe | Email address | Included in the standard installation |
 | Maigret | Username | Optional: `python -m pip install -e ".[maigret]"` |
 | Helix OSINT | Username | Optional: `python -m pip install -e ".[helix]"` |
+| Sherlock | Username | Optional: `python -m pip install -e ".[sherlock]"` |
 
 ### Registered tools planned for integration
 
@@ -29,7 +30,6 @@ future integrations, not implemented features:
 
 | Tool | Registry support | Planned status |
 | --- | --- | --- |
-| Sherlock | Download and Python-package installation | Run integration not implemented |
 | Sublist3r | Download and Python-package installation | Run integration not implemented |
 | Amass | Download only; requires manual binary installation | Run integration not implemented |
 
@@ -84,9 +84,19 @@ To enable Helix OSINT:
 python -m pip install -e ".[helix]"
 ```
 
-Select **Run Holehe Check**, **Run Maigret Check**, or **Run Helix Check** in the menu. Helix
-uses its built-in site list through the in-process API; the broader optional
-source collections are not enabled by this menu integration. Helix accepts up to
+To enable Sherlock:
+
+```bash
+python -m pip install -e ".[sherlock]"
+```
+
+Select **Run Holehe Check**, **Run Maigret Check**, **Run Helix Check**, or
+**Run Sherlock Check** in the menu. Sherlock uses its bundled site list and
+skips sites marked NSFW. It sends a username to many public sites; each request
+has a 15-second timeout, so a full search may take longer. Use it only for
+authorized targets. Helix uses its built-in site list through the in-process
+API; the broader optional source collections are not enabled by this menu
+integration. Helix accepts up to
 50 ASCII letters, digits, dots, underscores, and hyphens (with an optional leading `@`).
 The scan has a 300-second overall timeout.
 Maigret accepts
@@ -206,7 +216,7 @@ This roadmap describes planned work, not a promise or release schedule. Prioriti
 ### 5. Expand persistence and integrations
 
 - [ ] Complete and test MySQL schema and database support behind a storage interface.
-- [ ] Add first-party run integrations for the registered Sherlock, Sublist3r, and Amass tools, with documented inputs, outputs, and safety requirements.
+- [x] Add a first-party run integration for Sherlock; Sublist3r and Amass remain candidates, with documented inputs, outputs, and safety requirements.
 - [ ] Document deployment, backup, upgrade, and migration procedures.
 
 ## License
