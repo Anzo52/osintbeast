@@ -197,7 +197,7 @@ def test_download_menu_selects_registered_tool_without_typing(monkeypatch):
 
     main.main_menu()
 
-    download.assert_called_once_with("holehe")
+    download.assert_called_once_with("helix")
 
 
 def test_install_defaults_to_download_folder_without_prompt(monkeypatch):

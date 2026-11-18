@@ -43,6 +43,25 @@ def test_download_tool_extracts_registered_repository(tmp_path, monkeypatch):
     ]
 
 
+def test_download_tool_supports_helix(tmp_path, monkeypatch):
+    response = _zip_response({"helix-main/README.md": "project"})
+    requests_seen = []
+
+    def fake_get(url, timeout):
+        requests_seen.append((url, timeout))
+        return response
+
+    monkeypatch.setattr(downloader.requests, "get", fake_get)
+
+    target = downloader.download_tool("helix", str(tmp_path))
+
+    assert target == str(tmp_path / "helix")
+    assert (tmp_path / "helix" / "helix-main" / "README.md").read_text() == "project"
+    assert requests_seen == [
+        ("https://github.com/thalha-a9/helix/archive/refs/heads/main.zip", 30)
+    ]
+
+
 def test_download_repo_tries_master_after_main_fails(tmp_path, monkeypatch):
     response = _zip_response({"repo-master/README.md": "project"})
     requests_seen = []

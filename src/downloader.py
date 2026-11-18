@@ -82,6 +82,7 @@ TOOL_REPOSITORIES = {
     "maigret": "https://github.com/soxoj/maigret",
     "amass": "https://github.com/owasp-amass/amass",
     "sublist3r": "https://github.com/aboul3la/Sublist3r",
+    "helix": "https://github.com/thalha-a9/helix",
 }
 
 
