@@ -4,13 +4,37 @@ OSINT Beast is a Python command-line framework for organizing authorized open-so
 
 ## Current capabilities
 
-- Browse a curated list of supported tools.
+- Browse the tool registry and check whether each tool is installed.
 - Download registered tools and install supported Python packages through the CLI. Binary tools such as Amass require manual installation.
 - Initialize a local SQLite database for OSINT records and tool metadata.
-- Run Holehe email checks and optional Maigret and Helix username checks, with recorded outcomes.
+- Run Holehe email checks and optional Maigret and Helix OSINT username checks, with recorded outcomes.
 - Query stored database records from the CLI.
 
-The current registry includes Holehe, Sherlock, Maigret, Helix OSINT, Amass, and Sublist3r. Availability in the registry does not necessarily mean every tool has a complete first-party integration; consult the code and each tool's own documentation before use.
+### Integrated tools
+
+These tools have a first-party run action in the menu, input validation, and
+recorded outcomes:
+
+| Tool | Input | Availability |
+| --- | --- | --- |
+| Holehe | Email address | Included in the standard installation |
+| Maigret | Username | Optional: `python -m pip install -e ".[maigret]"` |
+| Helix OSINT | Username | Optional: `python -m pip install -e ".[helix]"` |
+
+### Registered tools planned for integration
+
+The registry also supports discovering and downloading these tools, but they
+do not yet have first-party run actions in OSINT Beast. They are candidates for
+future integrations, not implemented features:
+
+| Tool | Registry support | Planned status |
+| --- | --- | --- |
+| Sherlock | Download and Python-package installation | Run integration not implemented |
+| Sublist3r | Download and Python-package installation | Run integration not implemented |
+| Amass | Download only; requires manual binary installation | Run integration not implemented |
+
+Being registered does not mean a tool can be run from the OSINT Beast menu.
+See the [development roadmap](#development-roadmap) for broader planned work.
 
 ## Requirements
 
@@ -33,14 +57,17 @@ python -m pip install -r requirements.txt
 python src/main.py
 ```
 
-From the menu, initialize the database before saving or querying data. Use the supported-tools option to see the registered integrations.
-The list reports whether each Python tool's distribution is installed in the
+From the menu, initialize the database before saving or querying data. The
+supported-tools option lists all registered tools. It reports whether each Python tool's distribution is installed in the
 current interpreter, or whether the Amass executable is available on `PATH`.
 This indicates presence, not whether the tool or all its dependencies work.
-Download, installation, and database query errors are reported in the menu so
-you can correct the input or environment and try again. For example, check the
-tool name and download directory, network access and file permissions, or SQL
-syntax and database initialization as appropriate.
+Use the arrow keys and Enter to choose a tool to download or install; installing
+uses the default `tools/<name>` download folder. A custom installation folder is
+available as an alternate menu choice. Database views include recent runs and
+saved results, alongside a custom SQL option. Type only the information that
+cannot be selected in advance, such as a username, email address, custom folder,
+or custom SQL query. Errors are reported in the menu so you can correct the
+input or environment and try again.
 
 ### Running checks
 
@@ -179,7 +206,7 @@ This roadmap describes planned work, not a promise or release schedule. Prioriti
 ### 5. Expand persistence and integrations
 
 - [ ] Complete and test MySQL schema and database support behind a storage interface.
-- [ ] Add further tool integrations one at a time, with documented inputs, outputs, and safety requirements.
+- [ ] Add first-party run integrations for the registered Sherlock, Sublist3r, and Amass tools, with documented inputs, outputs, and safety requirements.
 - [ ] Document deployment, backup, upgrade, and migration procedures.
 
 ## License

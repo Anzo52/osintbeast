@@ -80,19 +80,19 @@ def test_query_reports_sqlite_error(tmp_path, monkeypatch, capsys):
 
 
 @pytest.mark.parametrize(
-    ("choice", "inputs", "failure"),
+    ("choices", "inputs", "failure"),
     [
-        (2, ["unknown"], "Download failed: Unsupported tool: unknown"),
-        (3, ["unknown", ""], "Installation failed: Tool 'unknown' is not supported."),
-        (5, ["SELECT * FROM missing_table"], "Database query failed: no such table: missing_table"),
+        ([2, 2, 1], [], "Download failed: Unable to download repository archive"),
+        ([3, 1, 0, 1], [], "Installation failed: Tool 'holehe' is not supported."),
+        ([5, 2, 1], ["SELECT * FROM missing_table"], "Database query failed: no such table: missing_table"),
     ],
 )
 def test_menu_remains_usable_after_failure(
-    tmp_path, monkeypatch, capsys, choice, inputs, failure
+    tmp_path, monkeypatch, capsys, choices, inputs, failure
 ):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "test.db"))
     database.setup_database()
-    choices = iter([choice, 1])
+    choices = iter(choices)
     answers = iter(inputs)
 
     class FakeMenu:
@@ -104,6 +104,16 @@ def test_menu_remains_usable_after_failure(
 
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
     monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    monkeypatch.setattr(
+        main,
+        "download_tool",
+        Mock(side_effect=RuntimeError("Unable to download repository archive")),
+    )
+    monkeypatch.setattr(
+        main,
+        "install_tool",
+        Mock(side_effect=ValueError("Tool 'holehe' is not supported.")),
+    )
 
     main.main_menu()
     main.main_menu()
@@ -146,3 +156,88 @@ def test_helix_menu_action_dispatches_username(monkeypatch):
     main.main_menu()
 
     runner.assert_called_once_with("@user")
+
+
+def test_download_menu_selects_registered_tool_without_typing(monkeypatch):
+    choices = iter([2, 1])
+
+    class FakeMenu:
+        def __init__(self, options, title):
+            if title == "OSINT Beast Main Menu":
+                assert "Download Tool" in options
+            else:
+                assert title == "Select a tool to download"
+                assert "helix" in options
+
+        def show(self):
+            return next(choices)
+
+    download = Mock()
+    monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
+    monkeypatch.setattr(main, "download", download)
+    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("unexpected text prompt"))
+
+    main.main_menu()
+
+    download.assert_called_once_with("holehe")
+
+
+def test_install_defaults_to_download_folder_without_prompt(monkeypatch):
+    install_tool = Mock()
+    monkeypatch.setattr(main, "install_tool", install_tool)
+    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("unexpected text prompt"))
+
+    main.install("Helix")
+
+    install_tool.assert_called_once_with("Helix", "tools/helix")
+
+
+def test_install_menu_selects_pip_tool_and_default_source(monkeypatch):
+    choices = iter([3, 0, 0])
+
+    class FakeMenu:
+        def __init__(self, options, title):
+            if title == "Select a Python tool to install":
+                assert "amass" not in options
+                assert "helix" in options
+            elif title == "Install helix":
+                assert options == [
+                    "Use downloaded copy",
+                    "Choose another folder",
+                    "Back",
+                ]
+
+        def show(self):
+            return next(choices)
+
+    install = Mock()
+    monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
+    monkeypatch.setattr(main, "install", install)
+    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("unexpected text prompt"))
+
+    main.main_menu()
+
+    install.assert_called_once_with("helix")
+
+
+def test_query_menu_offers_recent_runs_without_custom_sql(monkeypatch):
+    query = Mock()
+
+    class FakeMenu:
+        def __init__(self, options, title):
+            assert options == [
+                "Recent Tool Runs",
+                "Saved Tool Results",
+                "Enter a Custom SQL Query",
+                "Back",
+            ]
+
+        def show(self):
+            return 0
+
+    monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
+    monkeypatch.setattr(main, "query", query)
+
+    main.query_menu()
+
+    assert query.call_args.args[0].startswith("SELECT runID, toolName, queryText, status")

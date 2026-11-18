@@ -11,8 +11,23 @@ from helix_integration import run_helix, validate_username as validate_helix_use
 from installer import install_tool
 from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username
-from tool_registry import get_supported_tools, is_tool_installed
+from tool_registry import TOOL_REGISTRY, get_supported_tools, is_tool_installed
 from tool_runs import execute_tool_run
+
+
+def _choose_option(options, title):
+    choice = TerminalMenu(options, title=title).show()
+    if choice is None or not 0 <= choice < len(options):
+        return None
+    return choice
+
+
+def _choose_tool(title, tool_names):
+    if not tool_names:
+        print("No tools are available for this action.")
+        return None
+    choice = _choose_option(tool_names, title)
+    return tool_names[choice] if choice is not None else None
 
 
 def main_menu():
@@ -35,17 +50,31 @@ def main_menu():
     elif choice == 1:
         list_supported_tools()
     elif choice == 2:
-        tool_name = input("Enter the name of the tool to download: ").strip()
-        download(tool_name)
+        tool_name = _choose_tool("Select a tool to download", get_supported_tools())
+        if tool_name:
+            download(tool_name)
     elif choice == 3:
-        tool_name = input("Enter the name of the tool to install: ").strip()
-        install(tool_name)
+        installable_tools = [
+            name for name in get_supported_tools()
+            if TOOL_REGISTRY[name]["install_method"] == "pip"
+        ]
+        tool_name = _choose_tool("Select a Python tool to install", installable_tools)
+        if tool_name:
+            install_source = _choose_option(
+                ["Use downloaded copy", "Choose another folder", "Back"],
+                f"Install {tool_name}",
+            )
+            if install_source == 0:
+                install(tool_name)
+            elif install_source == 1:
+                tool_path = input("Enter the local tool folder: ").strip()
+                if tool_path:
+                    install(tool_name, tool_path)
     elif choice == 4:
         email = input("Enter the email to check: ").strip()
         run_holehe_check(email)
     elif choice == 5:
-        query_str = input("Enter your query: ").strip()
-        query(query_str)
+        query_menu()
     elif choice == 6:
         username = input("Enter the username to check: ").strip()
         run_maigret_check(username)
@@ -83,10 +112,10 @@ def download(tool_name):
     print(f"{tool_name} downloaded successfully to {target_dir}.")
 
 
-def install(tool_name):
-    tool_path = input("Enter the local tool path or press Enter to use the default download directory: ").strip()
+def install(tool_name, tool_path=None):
+    tool_path = tool_path or f"tools/{tool_name.strip().lower()}"
     try:
-        install_tool(tool_name, tool_path or f"tools/{tool_name.strip().lower()}")
+        install_tool(tool_name, tool_path)
     except (ValueError, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         print(f"Installation failed: {exc}")
         return
@@ -132,6 +161,30 @@ def query(query_text):
         print(f"Database query failed: {exc}")
         return
     print(f"Query result: {result}")
+
+
+def query_menu():
+    choice = _choose_option(
+        [
+            "Recent Tool Runs",
+            "Saved Tool Results",
+            "Enter a Custom SQL Query",
+            "Back",
+        ],
+        "Choose database view",
+    )
+    if choice == 0:
+        query(
+            "SELECT runID, toolName, queryText, status, startedAt, finishedAt, "
+            "errorText FROM ToolRuns ORDER BY runID DESC LIMIT 20"
+        )
+    elif choice == 1:
+        query(
+            "SELECT resultID, toolName, queryText, resultText, createdAt "
+            "FROM ToolResults ORDER BY resultID DESC LIMIT 20"
+        )
+    elif choice == 2:
+        query(input("Enter your SQL query: ").strip())
 
 
 if __name__ == "__main__":
