@@ -1,19 +1,13 @@
----
-name: Feature request
-about: Suggest an enhancement for OSINT Beast.
-title: ""
-labels: enhancement
-assignees: ""
----
+## Summary
 
-## Feature summary
+Describe the changes and the problem they address.
 
-Describe the feature and the problem it solves.
+## Testing
 
-## Why this matters
+List the tests or checks run, and note anything that was not tested.
 
-Explain the value to users and the project.
+## Checklist
 
-## Proposed design
-
-Describe the desired behavior, data flow, or UX.
+- [ ] Changes are limited to the intended scope.
+- [ ] Tests pass.
+- [ ] Documentation is updated if needed.

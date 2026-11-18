@@ -1,27 +1,19 @@
 ---
-name: Bug report
-about: Create a report to help us fix unexpected behavior.
+name: Feature request
+about: Suggest an enhancement for OSINT Beast.
 title: ""
-labels: bug
+labels: enhancement
 assignees: ""
 ---
 
-## Summary
+## Feature summary
 
-A short description of the bug.
+Describe the feature and the problem it solves.
 
-## Reproduction
+## Why this matters
 
-1. Steps to reproduce
-2. Expected behavior
-3. Actual behavior
+Explain the value to users and the project.
 
-## Environment
+## Proposed design
 
-- OS:
-- Python version:
-- Command used:
-
-## Logs
-
-Paste relevant output, stack traces, or screenshots.
+Describe the desired behavior, data flow, or UX.
