@@ -120,20 +120,23 @@ def test_run_finish_rejects_repeated_completion(initialized_db):
 
 
 @pytest.mark.parametrize(
-    ("function", "target", "value", "result", "tool"),
+    ("function", "target", "value", "query_text", "result", "tool"),
     [
-        (main.run_holehe_check, "run_holehe", " user@example.com ", {"output": "email output"}, "holehe"),
-        (main.run_maigret_check, "run_maigret", " user ", "username output", "maigret"),
+        (main.run_holehe_check, "run_holehe", " user@example.com ", "user@example.com", {"output": "email output"}, "holehe"),
+        (main.run_maigret_check, "run_maigret", " user ", "user", "username output", "maigret"),
+        (main.run_helix_check, "run_helix", " @user ", "user", "helix output", "helix"),
     ],
 )
-def test_cli_saves_success(initialized_db, monkeypatch, capsys, function, target, value, result, tool):
+def test_cli_saves_success(
+    initialized_db, monkeypatch, capsys, function, target, value, query_text, result, tool
+):
     runner = Mock(return_value=result)
     monkeypatch.setattr(main, target, runner)
     function(value)
-    runner.assert_called_once_with(value.strip())
+    runner.assert_called_once_with(query_text)
     assert f"{tool.capitalize()} check saved to the database." in capsys.readouterr().out
     assert database.query_database("SELECT toolName, queryText, status FROM ToolRuns") == [
-        (tool, value.strip(), "success")
+        (tool, query_text, "success")
     ]
 
 

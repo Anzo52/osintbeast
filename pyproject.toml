@@ -33,6 +33,9 @@ dev = [
 maigret = [
     "maigret>=0.6.6,<0.7",
 ]
+helix = [
+    "helix-osint>=4.4,<5",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src", "osintbeast_schemas" = "data/schemas"}
@@ -41,6 +44,7 @@ py-modules = [
     "database",
     "downloader",
     "holehe_integration",
+    "helix_integration",
     "installer",
     "main",
     "maigret_integration",

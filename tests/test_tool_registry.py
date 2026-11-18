@@ -9,7 +9,7 @@ from tool_registry import TOOL_REGISTRY, get_supported_tools, get_tool_metadata
 def test_supported_tools_are_curated_and_sorted():
     tools = get_supported_tools()
     assert tools == sorted(TOOL_REGISTRY)
-    assert {"holehe", "sherlock", "maigret", "amass", "sublist3r"} <= set(tools)
+    assert {"holehe", "sherlock", "maigret", "helix", "amass", "sublist3r"} <= set(tools)
     assert "dorker" not in tools
 
 

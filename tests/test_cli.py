@@ -1,6 +1,7 @@
 import subprocess
 import zipfile
 import zlib
+from unittest.mock import Mock
 
 import pytest
 
@@ -127,3 +128,21 @@ def test_successful_actions_keep_their_output(monkeypatch, capsys):
         "holehe installed successfully.\n"
         "Query result: [(1,)]\n"
     )
+
+
+def test_helix_menu_action_dispatches_username(monkeypatch):
+    class FakeMenu:
+        def __init__(self, options, title):
+            assert "Run Helix Check" in options
+
+        def show(self):
+            return 7
+
+    runner = Mock()
+    monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
+    monkeypatch.setattr("builtins.input", lambda prompt: " @user ")
+    monkeypatch.setattr(main, "run_helix_check", runner)
+
+    main.main_menu()
+
+    runner.assert_called_once_with("@user")

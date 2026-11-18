@@ -52,7 +52,7 @@ TOOL_REGISTRY: dict[str, ToolMetadata] = {
     "helix": {
         "repo": "https://github.com/thalha-a9/helix",
         "category": "username",
-        "install_method": "pip",  # in PyPI it's called 'helix-osint'
+        "install_method": "pip",
         "install_target": "helix-osint",
         "notes": "Searches for usernames across social networks.",
     },

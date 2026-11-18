@@ -7,10 +7,10 @@ OSINT Beast is a Python command-line framework for organizing authorized open-so
 - Browse a curated list of supported tools.
 - Download registered tools and install supported Python packages through the CLI. Binary tools such as Amass require manual installation.
 - Initialize a local SQLite database for OSINT records and tool metadata.
-- Run Holehe email checks and optional Maigret username checks, with recorded outcomes.
+- Run Holehe email checks and optional Maigret and Helix username checks, with recorded outcomes.
 - Query stored database records from the CLI.
 
-The current registry includes Holehe, Sherlock, Maigret, Amass, and Sublist3r. Availability in the registry does not necessarily mean every tool has a complete first-party integration; consult the code and each tool's own documentation before use.
+The current registry includes Holehe, Sherlock, Maigret, Helix OSINT, Amass, and Sublist3r. Availability in the registry does not necessarily mean every tool has a complete first-party integration; consult the code and each tool's own documentation before use.
 
 ## Requirements
 
@@ -51,7 +51,18 @@ source checkout, install its optional dependencies:
 python -m pip install -e ".[maigret]"
 ```
 
-Select **Run Holehe Check** or **Run Maigret Check** in the menu. Maigret accepts
+To enable Helix OSINT:
+
+```bash
+python -m pip install -e ".[helix]"
+```
+
+Select **Run Holehe Check**, **Run Maigret Check**, or **Run Helix Check** in the menu. Helix
+uses its built-in site list through the in-process API; the broader optional
+source collections are not enabled by this menu integration. Helix accepts up to
+50 ASCII letters, digits, dots, underscores, and hyphens (with an optional leading `@`).
+The scan has a 300-second overall timeout.
+Maigret accepts
 up to 100 ASCII letters, digits, dots, underscores, and hyphens. It checks all
 enabled username sites in its bundled database, without a proxy or profile
 enrichment. This can contact thousands of services and consume considerable
