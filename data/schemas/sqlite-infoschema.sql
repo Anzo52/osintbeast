@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS Usernames (
 
 CREATE INDEX IF NOT EXISTS idx_services_domain_platform
     ON Services (domainID, platformID);
+CREATE INDEX IF NOT EXISTS idx_services_platform
+    ON Services (platformID);
 CREATE INDEX IF NOT EXISTS idx_urls_domain
     ON Urls (domainID);
 CREATE INDEX IF NOT EXISTS idx_usernames_service
