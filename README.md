@@ -172,6 +172,13 @@ Use OSINT Beast only with data and targets you are authorized to assess, and fol
 
 This roadmap describes planned work, not a promise or release schedule. Priorities may change as the project develops.
 
+### UI direction
+
+Keep the CLI as the current local and automation interface, and prioritize a
+browser-based UI as the next graphical interface. Do not build separate native
+desktop or mobile applications. The web UI remains planned work and should use
+shared application services rather than duplicating CLI behavior.
+
 ### 1. Stabilize the foundation
 
 - [x] Keep dependency manifests, source modules, schemas, and documentation in their correct files.
