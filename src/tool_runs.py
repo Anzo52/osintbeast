@@ -1,6 +1,6 @@
 from collections.abc import Callable
 
-import database
+import data.utils.database as database
 
 
 def execute_tool_run(

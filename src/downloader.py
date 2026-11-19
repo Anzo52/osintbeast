@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 import requests
 from sqlalchemy import MetaData, Table, create_engine
 
-import database
+import data.utils.database as database
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:

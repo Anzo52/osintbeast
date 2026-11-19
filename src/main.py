@@ -5,85 +5,31 @@ import zlib
 
 from simple_term_menu import TerminalMenu
 
-from database import setup_database, query_database
+from checkers import _run_email_check_menu, _run_username_check_menu
+from data.utils.init_db import init_db
+from menu_utils import _choose_option, _download_tool_menu, _install_tool_menu
+from data.utils.database import query_database
 from downloader import download_tool
 from helix_integration import run_helix, validate_username as validate_helix_username
 from installer import install_tool
 from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username
 from sherlock_integration import run_sherlock, validate_username as validate_sherlock_username
-from tool_registry import TOOL_REGISTRY, get_supported_tools, is_tool_installed
+from tool_registry import get_supported_tools, is_tool_installed
 from tool_runs import execute_tool_run
 
 
-def _choose_option(options, title):
-    choice = TerminalMenu(options, title=title).show()
-    if not isinstance(choice, int) or not 0 <= choice < len(options):
-        return None
-    return choice
-
-
-def _choose_tool(title, tool_names):
-    if not tool_names:
-        print("No tools are available for this action.")
-        return None
-    choice = _choose_option(tool_names, title)
-    return tool_names[choice] if choice is not None else None
-
-
-def _download_tool_menu():
-    tool_name = _choose_tool("Select a tool to download", get_supported_tools())
-    if tool_name:
-        download(tool_name)
-
-
-def _install_tool_menu():
-    installable_tools = [
-        name for name in get_supported_tools()
-        if TOOL_REGISTRY[name]["install_method"] == "pip"
-    ]
-    tool_name = _choose_tool("Select a Python tool to install", installable_tools)
-    if not tool_name:
-        return
-
-    install_source = _choose_option(
-        ["Use downloaded copy", "Choose another folder", "Back"],
-        f"Install {tool_name}",
-    )
-    if install_source == 0:
-        install(tool_name)
-    elif install_source == 1:
-        tool_path = input("Enter the local tool folder: ").strip()
-        if tool_path:
-            install(tool_name, tool_path)
-
-
-def _run_email_check_menu():
-    email = input("Enter the email to check: ").strip()
-    run_holehe_check(email)
-
-
-def _run_username_check_menu(check):
-    username = input("Enter the username to check: ").strip()
-    check(username)
-
-
 def main_menu():
-    options = [
-        "Initialize Database",
-        "List Supported Tools",
-        "Download Tool",
-        "Install Tool",
-        "Run Holehe Check",
-        "Query Database",
-        "Run Maigret Check",
-        "Run Helix Check",
-        "Run Sherlock Check",
-        "Exit",
-    ]
+    options = menu_ops()
     terminal_menu = TerminalMenu(options, title="OSINT Beast Main Menu")
     choice = terminal_menu.show()
 
+    actions = menu_actions()
+    action = actions.get(choice) if isinstance(choice, int) else None
+    if action:
+        action()
+
+def menu_actions():
     actions = {
         0: init_db,
         1: list_supported_tools,
@@ -96,18 +42,22 @@ def main_menu():
         8: lambda: _run_username_check_menu(run_sherlock_check),
         9: lambda: (_ for _ in ()).throw(SystemExit(0)),
     }
-    action = actions.get(choice) if isinstance(choice, int) else None
-    if action:
-        action()
+    return actions
 
-
-def init_db():
-    try:
-        setup_database()
-    except (OSError, sqlite3.Error, UnicodeError) as exc:
-        print(f"Database initialization failed: {exc}")
-        return
-    print("Database initialized successfully.")
+def menu_ops():
+    options = [
+        "Initialize Database",
+        "List Supported Tools",
+        "Download Tool",
+        "Install Tool",
+        "Run Holehe Check",
+        "Query Database",
+        "Run Maigret Check",
+        "Run Helix Check",
+        "Run Sherlock Check",
+        "Exit",
+    ]
+    return options
 
 
 def list_supported_tools():

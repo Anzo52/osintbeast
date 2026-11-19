@@ -3,7 +3,7 @@ from unittest.mock import Mock
 
 import pytest
 
-import database
+import data.utils.database as database
 import main
 import tool_runs
 from holehe_integration import HoleheTimeoutError

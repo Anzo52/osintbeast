@@ -5,7 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
-import database
+import data.utils.database as database
 import main
 
 

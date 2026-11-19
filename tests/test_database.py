@@ -6,9 +6,10 @@ from pathlib import Path
 
 import pytest
 
-import database
+import data.utils.database as database
 import downloader
 import holehe_integration
+import data.utils.init_db as init_db
 import main
 
 
@@ -177,7 +178,7 @@ def test_cli_reports_initialization_failure(monkeypatch, capsys):
         raise sqlite3.OperationalError("unable to open database file")
 
     monkeypatch.setattr(main, "setup_database", fail)
-    main.init_db()
+    init_db.init_db()
 
     assert capsys.readouterr().out == (
         "Database initialization failed: unable to open database file\n"
