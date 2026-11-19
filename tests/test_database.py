@@ -41,6 +41,16 @@ def test_setup_database_loads_both_idempotent_schemas(tmp_path, monkeypatch):
         assert location_types["zip"] == "TEXT"
 
 
+def test_database_paths_resolve_to_source_checkout(monkeypatch):
+    monkeypatch.delenv("OSINTBEAST_DB_PATH", raising=False)
+    project_root = Path(__file__).resolve().parents[1]
+
+    db_file, schema_dir, _, _ = database.setup_database_paths(database.__file__)
+
+    assert db_file == str(project_root / "osintbeast.db")
+    assert schema_dir == project_root / "data" / "schemas"
+
+
 def test_mysql_schemas_are_split_by_domain_and_include_run_history():
     schema_dir = Path(__file__).resolve().parents[1] / "data" / "schemas"
     info_schema = (schema_dir / "mysql-infoschema.sql").read_text(encoding="utf-8")
@@ -153,13 +163,17 @@ def test_holehe_result_uses_initialized_database(tmp_path, monkeypatch):
 def test_database_path_override_is_shared_across_modules(tmp_path):
     env = os.environ.copy()
     env["OSINTBEAST_DB_PATH"] = "custom.db"
-    env["PYTHONPATH"] = str(Path(database.__file__).resolve().parent)
+    project_root = Path(database.__file__).resolve().parents[2]
+    env["PYTHONPATH"] = os.pathsep.join(
+        (str(project_root / "src"), str(project_root))
+    )
     subprocess.run(
         [
             sys.executable,
             "-c",
             (
-                "import database, downloader, holehe_integration; "
+                "import data.utils.database as database; "
+                "import downloader, holehe_integration; "
                 "database.setup_database(); "
                 "assert database.DB_FILE == downloader.DB_FILE; "
                 "holehe_integration.save_tool_result('holehe', 'test', 'result'); "
