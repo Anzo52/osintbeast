@@ -15,7 +15,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from data.utils.downloader_config import INSERTABLE_TABLES, SCHEMA, TOOL_REPOSITORIES
+from data.utils.downloader_config import (  # noqa: E402
+    INSERTABLE_TABLES,
+    TOOL_REPOSITORIES,
+)
 
 DB_FILE = database.DB_FILE
 

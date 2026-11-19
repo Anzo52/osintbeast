@@ -33,9 +33,9 @@ def menu_actions():
     actions = {
         0: init_db,
         1: list_supported_tools,
-        2: _download_tool_menu,
-        3: _install_tool_menu,
-        4: _run_email_check_menu,
+        2: lambda: _download_tool_menu(download),
+        3: lambda: _install_tool_menu(install),
+        4: lambda: _run_email_check_menu(run_holehe_check),
         5: query_menu,
         6: lambda: _run_username_check_menu(run_maigret_check),
         7: lambda: _run_username_check_menu(run_helix_check),

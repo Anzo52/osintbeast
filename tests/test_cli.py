@@ -7,6 +7,7 @@ import pytest
 
 import data.utils.database as database
 import main
+import menu_utils
 
 
 def test_list_supported_tools_shows_current_installation_status(monkeypatch, capsys):
@@ -103,6 +104,7 @@ def test_menu_remains_usable_after_failure(
             return next(choices)
 
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
+    monkeypatch.setattr(menu_utils, "TerminalMenu", FakeMenu)
     monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
     monkeypatch.setattr(
         main,
@@ -158,6 +160,24 @@ def test_helix_menu_action_dispatches_username(monkeypatch):
     runner.assert_called_once_with("@user")
 
 
+def test_holehe_menu_action_dispatches_email(monkeypatch):
+    class FakeMenu:
+        def __init__(self, options, title):
+            assert "Run Holehe Check" in options
+
+        def show(self):
+            return 4
+
+    runner = Mock()
+    monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
+    monkeypatch.setattr("builtins.input", lambda prompt: " person@example.com ")
+    monkeypatch.setattr(main, "run_holehe_check", runner)
+
+    main.main_menu()
+
+    runner.assert_called_once_with("person@example.com")
+
+
 def test_sherlock_menu_action_dispatches_username(monkeypatch):
     class FakeMenu:
         def __init__(self, options, title):
@@ -192,6 +212,7 @@ def test_download_menu_selects_registered_tool_without_typing(monkeypatch):
 
     download = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
+    monkeypatch.setattr(menu_utils, "TerminalMenu", FakeMenu)
     monkeypatch.setattr(main, "download", download)
     monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("unexpected text prompt"))
 
@@ -230,6 +251,7 @@ def test_install_menu_selects_pip_tool_and_default_source(monkeypatch):
 
     install = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
+    monkeypatch.setattr(menu_utils, "TerminalMenu", FakeMenu)
     monkeypatch.setattr(main, "install", install)
     monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("unexpected text prompt"))
 
@@ -254,6 +276,7 @@ def test_query_menu_offers_recent_runs_without_custom_sql(monkeypatch):
             return 0
 
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
+    monkeypatch.setattr(menu_utils, "TerminalMenu", FakeMenu)
     monkeypatch.setattr(main, "query", query)
 
     main.query_menu()

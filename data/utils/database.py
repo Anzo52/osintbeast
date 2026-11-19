@@ -1,39 +1,57 @@
 import os
 import sqlite3
+import sys
 from contextlib import closing
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-# Keep the checkout default independent of the current working directory.
-def setup_database_paths(__file__):
-    DB_FILE = str(
-    Path(
-        os.environ.get(
-            "OSINTBEAST_DB_PATH",
-            str(
-                Path(__file__).resolve().parent.parent
-                / "data"
-                / "databases"
-                / "osintbeast.db"
-            ),
-        )
-    ).expanduser().resolve()
-)
+# Keep source-checkout paths independent of the current working directory.
+def setup_database_paths(module_file):
+    module_path = Path(module_file).resolve()
+    project_root = module_path.parents[2]
+    checkout_schema_dir = module_path.parent.parent / "schemas"
     try:
-        SCHEMA_DIR = Path(__file__).resolve().parent.parent / "data" / "schemas"
-        if not SCHEMA_DIR.is_dir():
-            SCHEMA_DIR = files("osintbeast_schemas")
-    except ModuleNotFoundError:
-        raise ModuleNotFoundError("Database schema resources are not installed.")
-    SCHEMA_FILES = ("sqlite-infoschema.sql", "sqlite-toolschema.sql")
+        if checkout_schema_dir.is_dir():
+            schema_dir = checkout_schema_dir
+            default_db_file = project_root / "osintbeast.db"
+        else:
+            schema_dir = files("osintbeast_schemas")
+            default_db_file = _user_data_directory() / "osintbeast.db"
+    except ModuleNotFoundError as exc:
+        raise ModuleNotFoundError(
+            "Database schema resources are not installed."
+        ) from exc
+    db_file = str(
+        Path(
+            os.environ.get("OSINTBEAST_DB_PATH", str(default_db_file))
+        ).expanduser().resolve()
+    )
+    schema_files = ("sqlite-infoschema.sql", "sqlite-toolschema.sql")
 
-# SQL identifiers cannot be bound as query parameters, so table names are
-# restricted to this fixed set and columns are checked against the live schema.
-    INSERTABLE_TABLES = frozenset(
-    {"Platforms", "Names", "Locations", "Domains", "Services", "Urls", "Usernames", "ToolCatalog", "ToolResults"}
-)
-    return DB_FILE,SCHEMA_DIR,SCHEMA_FILES,INSERTABLE_TABLES
+    # SQL identifiers cannot be bound, so restrict them to a fixed allowlist.
+    insertable_tables = frozenset(
+        {
+            "Platforms", "Names", "Locations", "Domains", "Services", "Urls",
+            "Usernames", "ToolCatalog", "ToolResults",
+        }
+    )
+    return db_file, schema_dir, schema_files, insertable_tables
+
+
+def _user_data_directory():
+    if os.name == "nt":
+        base_dir = Path(
+            os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming"
+        )
+    elif sys.platform == "darwin":
+        base_dir = Path.home() / "Library" / "Application Support"
+    else:
+        base_dir = Path(
+            os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share"
+        )
+    return base_dir / "osintbeast"
+
 
 DB_FILE, SCHEMA_DIR, SCHEMA_FILES, INSERTABLE_TABLES = setup_database_paths(__file__)
 
