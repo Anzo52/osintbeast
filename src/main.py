@@ -18,7 +18,7 @@ from tool_runs import execute_tool_run
 
 def _choose_option(options, title):
     choice = TerminalMenu(options, title=title).show()
-    if choice is None or not 0 <= choice < len(options):
+    if not isinstance(choice, int) or not 0 <= choice < len(options):
         return None
     return choice
 
@@ -29,6 +29,43 @@ def _choose_tool(title, tool_names):
         return None
     choice = _choose_option(tool_names, title)
     return tool_names[choice] if choice is not None else None
+
+
+def _download_tool_menu():
+    tool_name = _choose_tool("Select a tool to download", get_supported_tools())
+    if tool_name:
+        download(tool_name)
+
+
+def _install_tool_menu():
+    installable_tools = [
+        name for name in get_supported_tools()
+        if TOOL_REGISTRY[name]["install_method"] == "pip"
+    ]
+    tool_name = _choose_tool("Select a Python tool to install", installable_tools)
+    if not tool_name:
+        return
+
+    install_source = _choose_option(
+        ["Use downloaded copy", "Choose another folder", "Back"],
+        f"Install {tool_name}",
+    )
+    if install_source == 0:
+        install(tool_name)
+    elif install_source == 1:
+        tool_path = input("Enter the local tool folder: ").strip()
+        if tool_path:
+            install(tool_name, tool_path)
+
+
+def _run_email_check_menu():
+    email = input("Enter the email to check: ").strip()
+    run_holehe_check(email)
+
+
+def _run_username_check_menu(check):
+    username = input("Enter the username to check: ").strip()
+    check(username)
 
 
 def main_menu():
@@ -47,47 +84,21 @@ def main_menu():
     terminal_menu = TerminalMenu(options, title="OSINT Beast Main Menu")
     choice = terminal_menu.show()
 
-    if choice == 0:
-        init_db()
-    elif choice == 1:
-        list_supported_tools()
-    elif choice == 2:
-        tool_name = _choose_tool("Select a tool to download", get_supported_tools())
-        if tool_name:
-            download(tool_name)
-    elif choice == 3:
-        installable_tools = [
-            name for name in get_supported_tools()
-            if TOOL_REGISTRY[name]["install_method"] == "pip"
-        ]
-        tool_name = _choose_tool("Select a Python tool to install", installable_tools)
-        if tool_name:
-            install_source = _choose_option(
-                ["Use downloaded copy", "Choose another folder", "Back"],
-                f"Install {tool_name}",
-            )
-            if install_source == 0:
-                install(tool_name)
-            elif install_source == 1:
-                tool_path = input("Enter the local tool folder: ").strip()
-                if tool_path:
-                    install(tool_name, tool_path)
-    elif choice == 4:
-        email = input("Enter the email to check: ").strip()
-        run_holehe_check(email)
-    elif choice == 5:
-        query_menu()
-    elif choice == 6:
-        username = input("Enter the username to check: ").strip()
-        run_maigret_check(username)
-    elif choice == 7:
-        username = input("Enter the username to check: ").strip()
-        run_helix_check(username)
-    elif choice == 8:
-        username = input("Enter the username to check: ").strip()
-        run_sherlock_check(username)
-    elif choice == 9:
-        raise SystemExit(0)
+    actions = {
+        0: init_db,
+        1: list_supported_tools,
+        2: _download_tool_menu,
+        3: _install_tool_menu,
+        4: _run_email_check_menu,
+        5: query_menu,
+        6: lambda: _run_username_check_menu(run_maigret_check),
+        7: lambda: _run_username_check_menu(run_helix_check),
+        8: lambda: _run_username_check_menu(run_sherlock_check),
+        9: lambda: (_ for _ in ()).throw(SystemExit(0)),
+    }
+    action = actions.get(choice) if isinstance(choice, int) else None
+    if action:
+        action()
 
 
 def init_db():
