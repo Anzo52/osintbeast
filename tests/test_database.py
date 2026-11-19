@@ -10,7 +10,6 @@ import data.utils.database as database
 import downloader
 import holehe_integration
 import data.utils.init_db as init_db
-import main
 
 
 def test_setup_database_loads_both_idempotent_schemas(tmp_path, monkeypatch):
