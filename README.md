@@ -131,11 +131,15 @@ schema objects, including the new run-history table in existing databases. It
 does not migrate or repair incompatible existing tables.
 
 To use a different location, set `OSINTBEAST_DB_PATH` before starting the
-application. The parent directory must already exist and be writable. For an
-installed package, set this variable to a writable location outside the
-installation directory. Relative paths are resolved against the working
-directory at startup. Initialization errors are reported in the menu; check
-the path and permissions before retrying.
+application. For a source checkout, the default remains the repository-root
+`osintbeast.db`. For an installed package, the default is a per-user data
+directory: `%APPDATA%\osintbeast` on Windows,
+`~/Library/Application Support/osintbeast` on macOS, or
+`$XDG_DATA_HOME/osintbeast` on Linux (falling back to
+`~/.local/share/osintbeast`). The database directory is created as needed.
+Custom relative paths are resolved against the working directory at startup.
+Initialization errors are reported in the menu; check the path and permissions
+before retrying.
 
 ```bash
 # Linux/macOS, for example
@@ -150,7 +154,7 @@ Install development dependencies and run tests from the repository root:
 ```bash
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
-python -m ruff check --select E4,E7,E9,F src tests
+python -m ruff check --select E4,E7,E9,F src data tests
 ```
 
 Tests should mock network requests and external tool execution; normal test runs should not contact third-party services or perform real scans. Keep database and subprocess behavior covered by focused tests.

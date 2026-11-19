@@ -51,6 +51,35 @@ def test_database_paths_resolve_to_source_checkout(monkeypatch):
     assert schema_dir == project_root / "data" / "schemas"
 
 
+def test_installed_database_defaults_to_user_data_directory(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("OSINTBEAST_DB_PATH", raising=False)
+    if os.name == "nt":
+        user_data_root = tmp_path / "AppData"
+        monkeypatch.setenv("APPDATA", str(user_data_root))
+        expected_root = user_data_root / "osintbeast"
+    elif sys.platform == "darwin":
+        home = tmp_path / "home"
+        monkeypatch.setattr(Path, "home", lambda: home)
+        expected_root = home / "Library" / "Application Support" / "osintbeast"
+    else:
+        user_data_root = tmp_path / "xdg-data"
+        monkeypatch.setenv("XDG_DATA_HOME", str(user_data_root))
+        expected_root = user_data_root / "osintbeast"
+
+    installed_module = tmp_path / "site-packages" / "data" / "utils" / "database.py"
+    installed_module.parent.mkdir(parents=True)
+    schema_resources = tmp_path / "schema-resources"
+    schema_resources.mkdir()
+    monkeypatch.setattr(database, "files", lambda _: schema_resources)
+
+    db_file, schema_dir, _, _ = database.setup_database_paths(installed_module)
+
+    assert db_file == str(expected_root / "osintbeast.db")
+    assert schema_dir == schema_resources
+
+
 def test_mysql_schemas_are_split_by_domain_and_include_run_history():
     schema_dir = Path(__file__).resolve().parents[1] / "data" / "schemas"
     info_schema = (schema_dir / "mysql-infoschema.sql").read_text(encoding="utf-8")
@@ -191,7 +220,7 @@ def test_cli_reports_initialization_failure(monkeypatch, capsys):
     def fail():
         raise sqlite3.OperationalError("unable to open database file")
 
-    monkeypatch.setattr(main, "setup_database", fail)
+    monkeypatch.setattr(init_db, "setup_database", fail)
     init_db.init_db()
 
     assert capsys.readouterr().out == (
