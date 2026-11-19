@@ -64,6 +64,7 @@ INSERTABLE_TABLES = frozenset({
 
 TOOL_REPOSITORIES = {
     "holehe": "https://github.com/megadose/holehe",
+    "helix": "https://github.com/thalha-a9/helix",
     "sherlock": "https://github.com/sherlock-project/sherlock",
     "maigret": "https://github.com/soxoj/maigret",
     "amass": "https://github.com/owasp-amass/amass",
