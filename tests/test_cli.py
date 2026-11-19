@@ -163,10 +163,10 @@ def test_helix_menu_action_dispatches_username(monkeypatch):
 def test_holehe_menu_action_dispatches_email(monkeypatch):
     class FakeMenu:
         def __init__(self, options, title):
-            assert "Run Holehe Check" in options
+            self.options = options
 
         def show(self):
-            return 4
+            return self.options.index("Run Holehe Check")
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
