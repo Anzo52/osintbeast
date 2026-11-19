@@ -158,6 +158,24 @@ def test_helix_menu_action_dispatches_username(monkeypatch):
     runner.assert_called_once_with("@user")
 
 
+def test_holehe_menu_action_dispatches_email(monkeypatch):
+    class FakeMenu:
+        def __init__(self, options, title):
+            assert "Run Holehe Check" in options
+
+        def show(self):
+            return 4
+
+    runner = Mock()
+    monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
+    monkeypatch.setattr("builtins.input", lambda prompt: " person@example.com ")
+    monkeypatch.setattr(main, "run_holehe_check", runner)
+
+    main.main_menu()
+
+    runner.assert_called_once_with("person@example.com")
+
+
 def test_sherlock_menu_action_dispatches_username(monkeypatch):
     class FakeMenu:
         def __init__(self, options, title):

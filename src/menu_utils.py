@@ -1,6 +1,5 @@
 from simple_term_menu import TerminalMenu
 
-from main import download, install
 from tool_registry import TOOL_REGISTRY, get_supported_tools
 
 
@@ -19,13 +18,13 @@ def _choose_tool(title, tool_names):
     return tool_names[choice] if choice is not None else None
 
 
-def _download_tool_menu():
+def _download_tool_menu(download):
     tool_name = _choose_tool("Select a tool to download", get_supported_tools())
     if tool_name:
         download(tool_name)
 
 
-def _install_tool_menu():
+def _install_tool_menu(install):
     installable_tools = [
         name for name in get_supported_tools()
         if TOOL_REGISTRY[name]["install_method"] == "pip"

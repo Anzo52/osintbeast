@@ -1,9 +1,6 @@
-from main import run_holehe_check
-
-
-def _run_email_check_menu():
+def _run_email_check_menu(check):
     email = input("Enter the email to check: ").strip()
-    run_holehe_check(email)
+    check(email)
 
 
 def _run_username_check_menu(check):
