@@ -2,7 +2,7 @@ import json
 import re
 import sqlite3
 
-import database
+import data.utils.database as database
 
 HOLEHE_TIMEOUT_SECONDS = 300
 

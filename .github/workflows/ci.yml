@@ -34,11 +34,11 @@ jobs:
         run: python -m pytest -q
 
       - name: Run Ruff
-        run: python -m ruff check --select E4,E7,E9,F src tests
+        run: python -m ruff check --select E4,E7,E9,F src data tests
 
-      - name: Verify installed database schemas
+      - name: Verify installed CLI and database schemas
         run: |
           python -m pip wheel --no-deps --wheel-dir "$RUNNER_TEMP/wheels" .
           python -m pip install --no-deps --target "$RUNNER_TEMP/osintbeast-install" "$RUNNER_TEMP"/wheels/osintbeast-*.whl
           cd "$RUNNER_TEMP"
-          OSINTBEAST_DB_PATH="$RUNNER_TEMP/osintbeast-test.db" PYTHONPATH="$RUNNER_TEMP/osintbeast-install" python -c "import database, maigret_integration, tool_runs; database.setup_database(); database.setup_database(); assert len(database.query_database(\"SELECT name FROM sqlite_master WHERE name IN ('ToolResults', 'ToolRuns')\")) == 2"
+          OSINTBEAST_DB_PATH="$RUNNER_TEMP/osintbeast-test.db" PYTHONPATH="$RUNNER_TEMP/osintbeast-install" python -c "import main, checkers, menu_utils, maigret_integration, tool_runs; import data.utils.database as database; database.setup_database(); database.setup_database(); assert len(database.query_database(\"SELECT name FROM sqlite_master WHERE name IN ('ToolResults', 'ToolRuns')\")) == 2"

@@ -1,6 +1,6 @@
 from collections.abc import Callable
 
-import database
+import data.utils.database as database
 
 
 def execute_tool_run(
@@ -8,6 +8,8 @@ def execute_tool_run(
 ) -> tuple[str, str]:
     """Persist the run outcome; propagate persistence errors to the caller."""
     run_id = database.start_tool_run(tool_name, query_text)
+    if run_id is None:
+        raise RuntimeError("Failed to start tool run.")
     try:
         output = runner(query_text)
     except TimeoutError as exc:

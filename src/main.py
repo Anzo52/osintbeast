@@ -5,33 +5,46 @@ import zlib
 
 from simple_term_menu import TerminalMenu
 
-from database import setup_database, query_database
+from checkers import _run_email_check_menu, _run_username_check_menu
+from data.utils.init_db import init_db
+from menu_utils import _choose_option, _download_tool_menu, _install_tool_menu
+from data.utils.database import query_database
 from downloader import download_tool
 from helix_integration import run_helix, validate_username as validate_helix_username
 from installer import install_tool
 from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username
 from sherlock_integration import run_sherlock, validate_username as validate_sherlock_username
-from tool_registry import TOOL_REGISTRY, get_supported_tools, is_tool_installed
+from tool_registry import get_supported_tools, is_tool_installed
 from tool_runs import execute_tool_run
 
 
-def _choose_option(options, title):
-    choice = TerminalMenu(options, title=title).show()
-    if choice is None or not 0 <= choice < len(options):
-        return None
-    return choice
-
-
-def _choose_tool(title, tool_names):
-    if not tool_names:
-        print("No tools are available for this action.")
-        return None
-    choice = _choose_option(tool_names, title)
-    return tool_names[choice] if choice is not None else None
-
-
 def main_menu():
+    options = menu_ops()
+    terminal_menu = TerminalMenu(options, title="OSINT Beast Main Menu")
+    choice = terminal_menu.show()
+
+    actions = menu_actions()
+    action = actions.get(choice) if isinstance(choice, int) else None
+    if action:
+        action()
+
+def menu_actions():
+    actions = {
+        0: init_db,
+        1: list_supported_tools,
+        2: lambda: _download_tool_menu(download),
+        3: lambda: _install_tool_menu(install),
+        4: lambda: _run_email_check_menu(run_holehe_check),
+        5: query_menu,
+        6: lambda: _run_username_check_menu(run_maigret_check),
+        7: lambda: _run_username_check_menu(run_helix_check),
+        8: lambda: _run_username_check_menu(run_sherlock_check),
+        9: lambda: (_ for _ in ()).throw(SystemExit(0)),
+    }
+    return actions
+
+def menu_ops():
     options = [
         "Initialize Database",
         "List Supported Tools",
@@ -44,59 +57,7 @@ def main_menu():
         "Run Sherlock Check",
         "Exit",
     ]
-    terminal_menu = TerminalMenu(options, title="OSINT Beast Main Menu")
-    choice = terminal_menu.show()
-
-    if choice == 0:
-        init_db()
-    elif choice == 1:
-        list_supported_tools()
-    elif choice == 2:
-        tool_name = _choose_tool("Select a tool to download", get_supported_tools())
-        if tool_name:
-            download(tool_name)
-    elif choice == 3:
-        installable_tools = [
-            name for name in get_supported_tools()
-            if TOOL_REGISTRY[name]["install_method"] == "pip"
-        ]
-        tool_name = _choose_tool("Select a Python tool to install", installable_tools)
-        if tool_name:
-            install_source = _choose_option(
-                ["Use downloaded copy", "Choose another folder", "Back"],
-                f"Install {tool_name}",
-            )
-            if install_source == 0:
-                install(tool_name)
-            elif install_source == 1:
-                tool_path = input("Enter the local tool folder: ").strip()
-                if tool_path:
-                    install(tool_name, tool_path)
-    elif choice == 4:
-        email = input("Enter the email to check: ").strip()
-        run_holehe_check(email)
-    elif choice == 5:
-        query_menu()
-    elif choice == 6:
-        username = input("Enter the username to check: ").strip()
-        run_maigret_check(username)
-    elif choice == 7:
-        username = input("Enter the username to check: ").strip()
-        run_helix_check(username)
-    elif choice == 8:
-        username = input("Enter the username to check: ").strip()
-        run_sherlock_check(username)
-    elif choice == 9:
-        raise SystemExit(0)
-
-
-def init_db():
-    try:
-        setup_database()
-    except (OSError, sqlite3.Error, UnicodeError) as exc:
-        print(f"Database initialization failed: {exc}")
-        return
-    print("Database initialized successfully.")
+    return options
 
 
 def list_supported_tools():

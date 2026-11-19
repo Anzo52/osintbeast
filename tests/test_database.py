@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-import database
+import data.utils.database as database
 import downloader
 import holehe_integration
-import main
+import data.utils.init_db as init_db
 
 
 def test_setup_database_loads_both_idempotent_schemas(tmp_path, monkeypatch):
@@ -38,6 +38,45 @@ def test_setup_database_loads_both_idempotent_schemas(tmp_path, monkeypatch):
         assert location_types["addressNum"] == "TEXT"
         assert location_types["apt"] == "TEXT"
         assert location_types["zip"] == "TEXT"
+
+
+def test_database_paths_resolve_to_source_checkout(monkeypatch):
+    monkeypatch.delenv("OSINTBEAST_DB_PATH", raising=False)
+    project_root = Path(__file__).resolve().parents[1]
+
+    db_file, schema_dir, _, _ = database.setup_database_paths(database.__file__)
+
+    assert db_file == str(project_root / "osintbeast.db")
+    assert schema_dir == project_root / "data" / "schemas"
+
+
+def test_installed_database_defaults_to_user_data_directory(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delenv("OSINTBEAST_DB_PATH", raising=False)
+    if os.name == "nt":
+        user_data_root = tmp_path / "AppData"
+        monkeypatch.setenv("APPDATA", str(user_data_root))
+        expected_root = user_data_root / "osintbeast"
+    elif sys.platform == "darwin":
+        home = tmp_path / "home"
+        monkeypatch.setattr(Path, "home", lambda: home)
+        expected_root = home / "Library" / "Application Support" / "osintbeast"
+    else:
+        user_data_root = tmp_path / "xdg-data"
+        monkeypatch.setenv("XDG_DATA_HOME", str(user_data_root))
+        expected_root = user_data_root / "osintbeast"
+
+    installed_module = tmp_path / "site-packages" / "data" / "utils" / "database.py"
+    installed_module.parent.mkdir(parents=True)
+    schema_resources = tmp_path / "schema-resources"
+    schema_resources.mkdir()
+    monkeypatch.setattr(database, "files", lambda _: schema_resources)
+
+    db_file, schema_dir, _, _ = database.setup_database_paths(installed_module)
+
+    assert db_file == str(expected_root / "osintbeast.db")
+    assert schema_dir == schema_resources
 
 
 def test_mysql_schemas_are_split_by_domain_and_include_run_history():
@@ -152,13 +191,17 @@ def test_holehe_result_uses_initialized_database(tmp_path, monkeypatch):
 def test_database_path_override_is_shared_across_modules(tmp_path):
     env = os.environ.copy()
     env["OSINTBEAST_DB_PATH"] = "custom.db"
-    env["PYTHONPATH"] = str(Path(database.__file__).resolve().parent)
+    project_root = Path(database.__file__).resolve().parents[2]
+    env["PYTHONPATH"] = os.pathsep.join(
+        (str(project_root / "src"), str(project_root))
+    )
     subprocess.run(
         [
             sys.executable,
             "-c",
             (
-                "import database, downloader, holehe_integration; "
+                "import data.utils.database as database; "
+                "import downloader, holehe_integration; "
                 "database.setup_database(); "
                 "assert database.DB_FILE == downloader.DB_FILE; "
                 "holehe_integration.save_tool_result('holehe', 'test', 'result'); "
@@ -176,8 +219,8 @@ def test_cli_reports_initialization_failure(monkeypatch, capsys):
     def fail():
         raise sqlite3.OperationalError("unable to open database file")
 
-    monkeypatch.setattr(main, "setup_database", fail)
-    main.init_db()
+    monkeypatch.setattr(init_db, "setup_database", fail)
+    init_db.init_db()
 
     assert capsys.readouterr().out == (
         "Database initialization failed: unable to open database file\n"
