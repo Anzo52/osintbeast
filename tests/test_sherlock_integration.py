@@ -1,6 +1,8 @@
 import builtins
 import json
+import os
 import sys
+import time
 import types
 from unittest.mock import Mock
 
@@ -67,6 +69,7 @@ def test_run_sherlock_uses_bundled_non_nsfw_sites(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "sherlock_project.sites", sites)
     monkeypatch.setattr(sherlock_integration, "files", lambda _: tmp_path)
 
+    sherlock_integration._search("user")
     output = json.loads(sherlock_integration.run_sherlock(" user "))
 
     assert output == [
@@ -97,6 +100,49 @@ def test_run_sherlock_rejects_result_without_status(monkeypatch):
 
     with pytest.raises(RuntimeError, match="without status"):
         sherlock_integration.run_sherlock("user")
+
+
+def test_run_sherlock_propagates_request_timeout(monkeypatch):
+    def timeout(_):
+        raise TimeoutError("request timed out")
+
+    monkeypatch.setattr(sherlock_integration, "_search", timeout)
+
+    with pytest.raises(TimeoutError, match="request timed out"):
+        sherlock_integration.run_sherlock("user")
+
+
+def test_run_sherlock_timeout_stops_worker_and_allows_next_run(
+    monkeypatch, tmp_path
+):
+    pid_file = tmp_path / "worker.pid"
+
+    def slow_search(_):
+        pid_file.write_text(str(os.getpid()))
+        time.sleep(10)
+
+    monkeypatch.setattr(sherlock_integration, "_search", slow_search)
+    monkeypatch.setattr(sherlock_integration, "SHERLOCK_TIMEOUT_SECONDS", 0.5)
+
+    with pytest.raises(TimeoutError, match="overall limit"):
+        sherlock_integration.run_sherlock("user")
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)
+
+    status = Mock(status="Claimed", context=None)
+    monkeypatch.setattr(
+        sherlock_integration,
+        "_search",
+        lambda _: {
+            "Example": {
+                "status": status,
+                "url_user": "https://example.test/user",
+                "http_status": 200,
+            }
+        },
+    )
+    assert json.loads(sherlock_integration.run_sherlock("user"))[0]["site"] == "Example"
 
 
 def test_missing_sherlock_dependency_is_actionable(monkeypatch):
