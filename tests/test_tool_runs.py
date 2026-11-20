@@ -4,6 +4,7 @@ from unittest.mock import Mock
 import pytest
 
 import data.utils.database as database
+import checkers
 import main
 import tool_runs
 from holehe_integration import HoleheTimeoutError
@@ -218,7 +219,7 @@ def test_maigret_menu_action_dispatches_username(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr("builtins.input", lambda prompt: " user ")
+    monkeypatch.setattr(checkers.getpass, "getpass", lambda prompt: " user ")
     monkeypatch.setattr(main, "run_maigret_check", runner)
     main.main_menu()
     runner.assert_called_once_with("user")
