@@ -57,6 +57,7 @@ py-modules = [
     "tool_runs",
     "tool_registry",
     "web",
+    "web_ui",
 ]
 
 [tool.setuptools.package-data]

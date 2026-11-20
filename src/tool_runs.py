@@ -4,10 +4,14 @@ import data.utils.database as database
 
 
 def execute_tool_run_with_id(
-    tool_name: str, query_text: str, runner: Callable[[str], str]
+    tool_name: str,
+    query_text: str,
+    runner: Callable[[str], str],
+    run_id: int | None = None,
 ) -> tuple[int, str, str]:
     """Persist the run outcome; propagate persistence errors to the caller."""
-    run_id = database.start_tool_run(tool_name, query_text)
+    if run_id is None:
+        run_id = database.start_tool_run(tool_name, query_text)
     if run_id is None:
         raise RuntimeError("Failed to start tool run.")
     try:
@@ -25,8 +29,13 @@ def execute_tool_run_with_id(
 
 
 def execute_tool_run(
-    tool_name: str, query_text: str, runner: Callable[[str], str]
+    tool_name: str,
+    query_text: str,
+    runner: Callable[[str], str],
+    run_id: int | None = None,
 ) -> tuple[str, str]:
     """Persist a run outcome and return its status and result or error."""
-    _, status, value = execute_tool_run_with_id(tool_name, query_text, runner)
+    _, status, value = execute_tool_run_with_id(
+        tool_name, query_text, runner, run_id=run_id
+    )
     return status, value

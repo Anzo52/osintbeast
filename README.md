@@ -141,6 +141,9 @@ Custom relative paths are resolved against the working directory at startup.
 Initialization errors are reported in the menu; check the path and permissions
 before retrying.
 
+For deployment, backups, upgrades, and schema-migration expectations, see the
+[operations guide](doc/OPERATIONS.md).
+
 ```bash
 # Linux/macOS, for example
 export OSINTBEAST_DB_PATH="$HOME/osintbeast.db"
@@ -173,6 +176,22 @@ Authenticated clients can launch a run with `POST /api/runs` and retrieve
 status and saved output from `GET /api/runs/<run_id>` and
 `GET /api/results/<result_id>`. Requests use a `Bearer` authorization token.
 
+## Browser interface
+
+Start the local browser interface with:
+
+```bash
+python -m web_ui
+```
+
+Open `http://127.0.0.1:8000`. The interface initializes the local database and
+supports authorized runs with Holehe, Maigret, Helix, and Sherlock; tools in the
+registry without a runnable integration are not offered. Confirm authorization
+before each run. Runs execute through the existing validators, integrations,
+and persistence service, and their status and saved output are available in
+the recent-runs view. Keep the interface bound to loopback: it has no login or
+remote-access authentication, and its database and results may contain
+sensitive information.
 ## Responsible use and privacy
 
 Use OSINT Beast only with data and targets you are authorized to assess, and follow applicable laws, provider terms, and organizational policies. Tool output may contain personal or sensitive information. Protect the local database, restrict access to it, and remove data when it is no longer needed. Validate inputs and avoid exposing sensitive values in logs, process arguments, or shared environments.
@@ -241,7 +260,7 @@ shared application services rather than duplicating CLI behavior.
 
 - [ ] Complete and test MySQL schema and database support behind a storage interface.
 - [x] Add a first-party run integration for Sherlock; Sublist3r and Amass remain candidates, with documented inputs, outputs, and safety requirements.
-- [ ] Document deployment, backup, upgrade, and migration procedures.
+- [x] Document deployment, backup, upgrade, and migration procedures.
 
 ## License
 
