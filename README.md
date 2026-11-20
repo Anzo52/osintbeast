@@ -120,6 +120,11 @@ statuses. Use **Query Database** to inspect either table.
 Inputs, results, and errors can contain sensitive data. They are stored in
 plain text in the local database; restrict its permissions and delete records
 when no longer needed. Searches send the supplied input to third-party sites.
+On the first initialization after upgrading, existing tool queries are replaced
+with `[redacted]`, and case-insensitive direct and URL-encoded matches of each
+query are removed from its result and error text. Other sensitive information
+may remain in those texts, and new records are still stored in plain text.
+Backups and SQLite journal files may also contain the original values.
 
 ### Database initialization
 
@@ -127,8 +132,9 @@ Select **Initialize Database** from the menu. In a source checkout, the default
 database is `osintbeast.db` in the repository root, regardless of the current
 working directory. Initialization creates missing tables and indexes in one
 transaction; running it again preserves existing records and recreates missing
-schema objects, including the new run-history table in existing databases. It
-does not migrate or repair incompatible existing tables.
+schema objects, including the new run-history table in existing databases. The
+legacy tool-record redaction runs once per database; it does not repair
+incompatible existing tables.
 
 To use a different location, set `OSINTBEAST_DB_PATH` before starting the
 application. For a source checkout, the default remains the repository-root

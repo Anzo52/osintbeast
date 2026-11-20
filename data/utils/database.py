@@ -1,10 +1,12 @@
 import os
+import re
 import sqlite3
 import sys
 from contextlib import closing
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping, Optional
+from urllib.parse import quote, quote_plus
 
 # Keep source-checkout paths independent of the current working directory.
 def setup_database_paths(module_file):
@@ -65,7 +67,7 @@ def connect_db() -> sqlite3.Connection:
 
 
 def setup_database() -> None:
-    """Create missing schema objects atomically without replacing existing data."""
+    """Create schema objects and migrate legacy tool records atomically."""
     schemas = []
     for schema_name in SCHEMA_FILES:
         schema_path = SCHEMA_DIR.joinpath(schema_name)
@@ -75,6 +77,43 @@ def setup_database() -> None:
 
     with closing(connect_db()) as conn, conn:
         conn.executescript("BEGIN IMMEDIATE;\n" + "\n".join(schemas))
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS OsintBeastMigrations (name TEXT PRIMARY KEY)"
+        )
+        if not conn.execute(
+            "SELECT 1 FROM OsintBeastMigrations WHERE name = ?",
+            ("redact_legacy_tool_records",),
+        ).fetchone():
+            _redact_legacy_tool_records(conn)
+            conn.execute(
+                "INSERT INTO OsintBeastMigrations (name) VALUES (?)",
+                ("redact_legacy_tool_records",),
+            )
+
+
+def _redact_legacy_tool_records(conn: sqlite3.Connection) -> None:
+    def redact(text: Optional[str], query: str) -> Optional[str]:
+        if text is None or not query or query == "[redacted]":
+            return text
+        variants = {query, quote(query, safe=""), quote_plus(query)}
+        for variant in sorted(variants, key=len, reverse=True):
+            text = re.sub(re.escape(variant), lambda _: "[redacted]", text, flags=re.IGNORECASE)
+        return text
+
+    for row_id, query, result in conn.execute(
+        "SELECT resultID, queryText, resultText FROM ToolResults"
+    ):
+        conn.execute(
+            "UPDATE ToolResults SET queryText = ?, resultText = ? WHERE resultID = ?",
+            ("[redacted]", redact(result, query), row_id),
+        )
+    for row_id, query, result, error in conn.execute(
+        "SELECT runID, queryText, resultText, errorText FROM ToolRuns"
+    ):
+        conn.execute(
+            "UPDATE ToolRuns SET queryText = ?, resultText = ?, errorText = ? WHERE runID = ?",
+            ("[redacted]", redact(result, query), redact(error, query), row_id),
+        )
 
 
 def insert_data(table: str, data: Mapping[str, Any]) -> None:

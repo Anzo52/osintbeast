@@ -8,7 +8,7 @@ from simple_term_menu import TerminalMenu
 from checkers import _run_email_check_menu, _run_username_check_menu
 from data.utils.init_db import init_db
 from menu_utils import _choose_option, _download_tool_menu, _install_tool_menu
-from data.utils.database import query_database
+from data.utils.database import query_database, setup_database
 from downloader import download_tool
 from helix_integration import run_helix, validate_username as validate_helix_username
 from installer import install_tool
@@ -143,6 +143,12 @@ def query_menu():
         ],
         "Choose database view",
     )
+    if choice in (0, 1):
+        try:
+            setup_database()
+        except (OSError, sqlite3.Error, UnicodeError) as exc:
+            print(f"Database initialization failed: {exc}")
+            return
     if choice == 0:
         query(
             "SELECT runID, toolName, queryText, status, startedAt, finishedAt, "
