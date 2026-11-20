@@ -12,11 +12,13 @@ def execute_tool_run(
         raise RuntimeError("Failed to start tool run.")
     try:
         output = runner(query_text)
+        if not isinstance(output, str):
+            raise RuntimeError(f"{tool_name} returned non-text output.")
     except TimeoutError as exc:
         message = str(exc) or f"{tool_name} exceeded its time limit."
         database.finish_tool_run(run_id, "timed_out", error_text=message)
         return "timed_out", message
-    except (RuntimeError, OSError, ImportError, ValueError) as exc:
+    except Exception as exc:
         message = str(exc) or f"{tool_name} failed ({type(exc).__name__})."
         database.finish_tool_run(run_id, "failed", error_text=message)
         return "failed", message

@@ -111,9 +111,13 @@ completed, not that every site was reachable or every match is confirmed.
 
 The CLI validates input before recording a run. Valid attempts are stored in
 `ToolRuns` with the tool, input, status (`running`, `success`, `failed`, or
-`timed_out`), UTC start and finish timestamps, and either output or an error.
-A `running` record can remain after interruption or a database-write failure.
-Successful outputs are also saved to the existing `ToolResults` table.
+`timed_out`), and a UTC `startedAt` timestamp. A run starts as `running`, with
+`finishedAt`, `resultText`, and `errorText` unset. Every terminal run has a UTC
+`finishedAt`; `success` requires the raw tool output in `resultText` and no
+`errorText`, while `failed` and `timed_out` require an `errorText` and no
+`resultText`. Successful outputs are also saved to the existing `ToolResults`
+table; failures and timeouts are never stored there. A `running` record can
+remain after interruption or a database-write failure.
 Existing `ToolResults` rows are preserved but do not gain historical run
 statuses. Use **Query Database** to inspect either table.
 
