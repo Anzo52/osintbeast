@@ -7,16 +7,19 @@ import zlib
 
 from simple_term_menu import TerminalMenu
 
-from checkers import _run_email_check_menu, _run_username_check_menu
 from backend_services import get_recent_tool_runs, get_saved_tool_results
+from checkers import _run_email_check_menu, _run_username_check_menu
+from data.utils.database import export_tool_runs_json, get_tool_run
 from data.utils.init_db import init_db
-from menu_utils import _choose_option, _download_tool_menu, _install_tool_menu
 from downloader import download_tool
-from helix_integration import run_helix, validate_username as validate_helix_username
-from installer import install_tool
+from helix_integration import run_helix
+from helix_integration import validate_username as validate_helix_username
 from holehe_integration import run_holehe, validate_email
+from installer import install_tool
 from maigret_integration import run_maigret, validate_username
-from sherlock_integration import run_sherlock, validate_username as validate_sherlock_username
+from menu_utils import _choose_option, _download_tool_menu, _install_tool_menu
+from sherlock_integration import run_sherlock
+from sherlock_integration import validate_username as validate_sherlock_username
 from tool_registry import get_supported_tools, is_tool_installed
 from tool_runs import execute_tool_run
 
@@ -42,7 +45,8 @@ def menu_actions():
         6: lambda: _run_username_check_menu(run_maigret_check),
         7: lambda: _run_username_check_menu(run_helix_check),
         8: lambda: _run_username_check_menu(run_sherlock_check),
-        9: lambda: (_ for _ in ()).throw(SystemExit(0)),
+        10: history_menu,
+        11: lambda: (_ for _ in ()).throw(SystemExit(0)),
     }
     return actions
 
@@ -57,6 +61,7 @@ def menu_ops():
         "Run Maigret Check",
         "Run Helix Check",
         "Run Sherlock Check",
+        "Run History",
         "Exit",
     ]
     return options
@@ -160,6 +165,55 @@ def query_menu():
         return query_view("runs")
     elif choice == 1:
         return query_view("results")
+
+
+def history_menu():
+    """Browse recent runs, inspect one, or export selected runs."""
+    try:
+        choice = _choose_option(
+            [
+                "Next/Recent Runs",
+                "Inspect Run",
+                "Export Run(s)",
+                "Back",
+            ],
+            "Run history",
+        )
+        if choice == 0:
+            rows = get_recent_tool_runs()
+            for row in rows:
+                print(f"Run #{row[0]} · {row[1]} · {row[2]} · {row[3]}")
+            return 0
+        if choice == 1:
+            raw_id = input("Run ID: ").strip()
+            run_id = int(raw_id)
+            row = get_tool_run(run_id)
+            if row is None:
+                print("Run not found.")
+            else:
+                print(f"Run #{row[0]} · {row[1]} · {row[2]} · {row[3]}")
+                print(f"Result: {row[4]}")
+                print(f"Error: {row[5]}")
+                print(f"Started: {row[6]}")
+                print(f"Finished: {row[7]}")
+            return 0
+        if choice == 2:
+            raw_ids = input("Run IDs (comma-separated): ").strip()
+            run_ids = [int(value.strip()) for value in raw_ids.split(",") if value.strip()]
+            destination = input("Export destination: ").strip()
+            answer = input("Include sensitive fields? [y/N]: ").strip().lower()
+            include_sensitive = answer in {"y", "yes"}
+            path = export_tool_runs_json(
+                run_ids,
+                destination,
+                include_sensitive=include_sensitive,
+            )
+            print(f"Exported run history to {path}")
+            return 0
+        return 0
+    except (sqlite3.Error, OSError, OverflowError, ValueError) as exc:
+        print(f"History operation failed: {exc}")
+        return 1
 
 
 def _cli_initialize_database(_args):

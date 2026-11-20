@@ -1,10 +1,14 @@
+import json
 import os
 import sqlite3
 import sys
+import tempfile
+from collections.abc import Mapping
 from contextlib import closing
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any
+
 
 # Keep source-checkout paths independent of the current working directory.
 def setup_database_paths(module_file):
@@ -119,7 +123,7 @@ def query_database(query: str, parameters: tuple[Any, ...] = ()) -> list[tuple[A
 
 
 def save_tool_result(
-    tool_name: str, query_text: str, result_text: Optional[str]
+    tool_name: str, query_text: str, result_text: str | None
 ):
     """Persist a tool run and return its result row ID."""
     with closing(connect_db()) as conn, conn:
@@ -142,15 +146,42 @@ def list_tool_results(limit: int = 100) -> list[tuple[Any, ...]]:
         ).fetchall()
 
 
-def list_tool_runs(limit: int = 100) -> list[tuple[Any, ...]]:
-    """Return recent tool runs, newest first, with a bounded page size."""
+def list_tool_runs(
+    limit: int = 100,
+    tool: str | None = None,
+    status: str | None = None,
+    cursor: int | None = None,
+) -> list[tuple[Any, ...]]:
+    """Return a bounded, newest-first run page using stable run-ID cursors."""
     _validate_list_limit(limit)
+    if tool is not None and (not isinstance(tool, str) or not tool):
+        raise ValueError("tool must be a non-empty string")
+    if status is not None and status not in {"running", "success", "failed", "timed_out"}:
+        raise ValueError("Invalid run status")
+    if cursor is not None:
+        cursor = _validate_run_id(cursor)
+
+    clauses = []
+    parameters: list[Any] = []
+    if tool is not None:
+        clauses.append("toolName = ?")
+        parameters.append(tool)
+    if status is not None:
+        clauses.append("status = ?")
+        parameters.append(status)
+    if cursor is not None:
+        clauses.append("runID < ?")
+        parameters.append(cursor)
+    where = " WHERE " + " AND ".join(clauses) if clauses else ""
+    parameters.append(limit)
     with closing(connect_db()) as conn:
         return conn.execute(
             """SELECT runID, toolName, queryText, status, startedAt, finishedAt,
                       errorText
-               FROM ToolRuns ORDER BY runID DESC LIMIT ?""",
-            (limit,),
+               FROM ToolRuns"""
+            + where
+            + " ORDER BY runID DESC LIMIT ?",
+            tuple(parameters),
         ).fetchall()
 
 
@@ -159,8 +190,9 @@ def _validate_list_limit(limit: int) -> None:
         raise ValueError("limit must be between 1 and 500")
 
 
-def get_tool_run(run_id: int) -> Optional[tuple[Any, ...]]:
+def get_tool_run(run_id: int) -> tuple[Any, ...] | None:
     """Return a run and its persisted result or error, if it exists."""
+    run_id = _validate_run_id(run_id)
     with closing(connect_db()) as conn:
         return conn.execute(
             """SELECT runID, toolName, queryText, status, resultText, errorText,
@@ -168,6 +200,98 @@ def get_tool_run(run_id: int) -> Optional[tuple[Any, ...]]:
                FROM ToolRuns WHERE runID = ?""",
             (run_id,),
         ).fetchone()
+
+
+SQLITE_MAX_INTEGER = (1 << 63) - 1
+
+
+def _validate_run_id(run_id: int) -> int:
+    if (
+        not isinstance(run_id, int)
+        or isinstance(run_id, bool)
+        or run_id < 1
+        or run_id > SQLITE_MAX_INTEGER
+    ):
+        raise ValueError("run ID must be a positive SQLite integer")
+    return run_id
+
+
+def export_tool_runs_json(
+    run_ids,
+    destination,
+    *,
+    include_sensitive: bool = False,
+) -> str:
+    """Atomically export selected runs as JSON with restrictive permissions."""
+    if type(include_sensitive) is not bool:
+        raise ValueError("include_sensitive must be a boolean")
+    if not isinstance(run_ids, (list, tuple)) or not run_ids:
+        raise ValueError("At least one run ID is required")
+    ids = tuple(_validate_run_id(run_id) for run_id in run_ids)
+
+    placeholders = ", ".join("?" for _ in ids)
+    with closing(connect_db()) as conn:
+        rows = conn.execute(
+            """SELECT runID, toolName, queryText, status, resultText, errorText,
+                      startedAt, finishedAt
+               FROM ToolRuns WHERE runID IN ("""
+            + placeholders
+            + ") ORDER BY runID DESC",
+            ids,
+        ).fetchall()
+
+    found = {row[0] for row in rows}
+    missing = [run_id for run_id in ids if run_id not in found]
+    if missing:
+        raise ValueError(f"Run ID not found: {missing[0]}")
+
+    exported = []
+    for row in rows:
+        if include_sensitive:
+            input_value = row[2]
+            result_value = row[4]
+            error_value = row[5]
+        else:
+            input_value = "[redacted]"
+            result_value = "[redacted]" if row[4] is not None else None
+            error_value = "[redacted]" if row[5] is not None else None
+        exported.append({
+            "id": row[0],
+            "tool": row[1],
+            "input": input_value,
+            "status": row[3],
+            "result": result_value,
+            "error": error_value,
+            "started_at": row[6],
+            "finished_at": row[7],
+        })
+
+    path = Path(destination).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        raise FileExistsError(f"Export destination already exists: {path}")
+
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        os.chmod(temporary, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as export_file:
+            json.dump(exported, export_file, ensure_ascii=False, indent=2)
+            export_file.write("\n")
+            export_file.flush()
+            os.fsync(export_file.fileno())
+        os.link(temporary, path)
+        os.unlink(temporary)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+    return str(path)
 
 
 def start_tool_run(tool_name: str, query_text: str):
@@ -181,8 +305,8 @@ def start_tool_run(tool_name: str, query_text: str):
 
 
 def finish_tool_run(
-    run_id: int, status: str, result_text: Optional[str] = None,
-    error_text: Optional[str] = None,
+    run_id: int, status: str, result_text: str | None = None,
+    error_text: str | None = None,
 ) -> None:
     """Finish a run and retain successful results in the legacy results table."""
     if status not in {"success", "failed", "timed_out"}:
