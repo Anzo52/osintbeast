@@ -17,10 +17,10 @@ recorded outcomes:
 
 | Tool | Input | Availability |
 | --- | --- | --- |
-| Holehe | Email address | Included in the standard installation |
-| Maigret | Username | Optional: `python -m pip install -e ".[maigret]"` |
-| Helix OSINT | Username | Optional: `python -m pip install -e ".[helix]"` |
-| Sherlock | Username | Optional: `python -m pip install -e ".[sherlock]"` |
+| Holehe | Sensitive email address; in-process Python API | Included in the standard installation |
+| Maigret | Sensitive username; in-process Python API | Optional: `python -m pip install -e ".[maigret]"` |
+| Helix OSINT | Sensitive username; in-process Python API | Optional: `python -m pip install -e ".[helix]"` |
+| Sherlock | Sensitive username; in-process Python API | Optional: `python -m pip install -e ".[sherlock]"` |
 
 ### Registered tools planned for integration
 
@@ -30,8 +30,8 @@ future integrations, not implemented features:
 
 | Tool | Registry support | Planned status |
 | --- | --- | --- |
-| Sublist3r | Download and Python-package installation | Run integration not implemented |
-| Amass | Download only; requires manual binary installation | Run integration not implemented |
+| Sublist3r | Download and Python-package installation | Run integration not implemented; future runs must use stdin/private pipe |
+| Amass | Download only; requires manual binary installation | Run integration not implemented; future runs must use stdin/private pipe |
 
 Being registered does not mean a tool can be run from the OSINT Beast menu.
 See the [development roadmap](#development-roadmap) for broader planned work.
@@ -109,17 +109,20 @@ Partial results are not saved when the overall search times out. Individual
 site failures appear as `Unknown` results; a successful run means the search
 completed, not that every site was reachable or every match is confirmed.
 
-The CLI validates input before recording a run. Valid attempts are stored in
-`ToolRuns` with the tool, input, status (`running`, `success`, `failed`, or
-`timed_out`), UTC start and finish timestamps, and either output or an error.
-A `running` record can remain after interruption or a database-write failure.
-Successful outputs are also saved to the existing `ToolResults` table.
-Existing `ToolResults` rows are preserved but do not gain historical run
-statuses. Use **Query Database** to inspect either table.
+The CLI validates input before recording a run and uses a non-echoing prompt.
+Holehe, Maigret, Helix, and Sherlock receive sensitive input through their
+in-process Python APIs, not process arguments. Their run records use a
+`[redacted]` query; direct and URL-encoded occurrences of the input are also
+redacted from saved and displayed results and errors. A `running` record can
+remain after interruption or a database-write failure. Existing
+`ToolResults` rows are preserved but do not gain historical run statuses.
 
-Inputs, results, and errors can contain sensitive data. They are stored in
-plain text in the local database; restrict its permissions and delete records
-when no longer needed. Searches send the supplied input to third-party sites.
+Sublist3r and Amass do not yet have run integrations. Any future integration
+that needs an external process must pass sensitive input through standard input
+(for example, `subprocess.run(..., input=value, text=True)`), never an argument,
+environment variable, log, or echoed prompt. If a tool cannot accept a private
+input channel, it must not be integrated until a safe mechanism is available.
+Searches send the supplied input to third-party sites.
 
 ### Database initialization
 
