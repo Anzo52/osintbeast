@@ -251,9 +251,10 @@ supports authorized runs with Holehe, Maigret, Helix, and Sherlock; tools in the
 registry without a runnable integration are not offered. Confirm authorization
 before each run. Runs execute through the existing validators, integrations,
 and persistence service, and their status and saved output are available in
-the recent-runs view. Keep the interface bound to loopback: it has no login or
-remote-access authentication, and its database and results may contain
-sensitive information.
+the recent-runs view. At most two browser runs can be active at once; additional
+requests are rejected until a run finishes. Keep the interface bound to
+loopback: it has no login or remote-access authentication, and its database
+and results may contain sensitive information.
 
 ## Responsible use and privacy
 

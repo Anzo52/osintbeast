@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from unittest.mock import Mock
 
+import backend_services
 import data.utils.database as database
 import web_ui
 from sherlock_integration import validate_username
@@ -185,5 +186,57 @@ def test_terminal_tool_error_is_available_for_review(tmp_path, monkeypatch):
         assert detail["error"] == "dependency missing"
         assert detail["result"] is None
     finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_browser_runs_are_bounded_and_capacity_recovers(tmp_path, monkeypatch):
+    release = threading.Event()
+    both_started = threading.Event()
+    lock = threading.Lock()
+    started = []
+
+    def runner(username):
+        with lock:
+            started.append(username)
+            if len(started) == 2:
+                both_started.set()
+        assert release.wait(5)
+        return "output"
+
+    monkeypatch.setattr(web_ui, "RUN_SERVICE", backend_services.BackgroundRunService(2))
+    server, base_url = _server(tmp_path, monkeypatch, runner)
+    payload = {"tool": "sherlock", "input": "alice", "authorized": True}
+    try:
+        first_status, first = _request(f"{base_url}/api/runs", payload)
+        second_status, second = _request(f"{base_url}/api/runs", payload)
+        assert first_status == second_status == 202
+        assert first["id"] != second["id"]
+        assert both_started.wait(2)
+
+        status, body = _request(f"{base_url}/api/runs", payload)
+        assert status == 503
+        assert "Too many runs" in body["error"]
+        assert len(database.list_tool_runs()) == 2
+        assert len(started) == 2
+
+        release.set()
+        deadline = time.monotonic() + 2
+        while True:
+            status, third = _request(f"{base_url}/api/runs", payload)
+            if status == 202 or time.monotonic() >= deadline:
+                break
+            assert status == 503
+            time.sleep(0.01)
+        assert status == 202
+        assert third["id"] not in (first["id"], second["id"])
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            if all(row[3] != "running" for row in database.list_tool_runs()):
+                break
+            time.sleep(0.01)
+        assert all(row[3] == "success" for row in database.list_tool_runs())
+    finally:
+        release.set()
         server.shutdown()
         server.server_close()

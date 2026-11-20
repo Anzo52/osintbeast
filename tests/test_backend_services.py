@@ -99,3 +99,42 @@ def test_history_menu_reports_database_errors(monkeypatch, capsys):
         "Database query failed: database unavailable. "
         "Initialize the database and check its permissions.\n"
     )
+
+
+def test_background_service_records_start_failure_and_releases_capacity(
+    initialized_db, monkeypatch
+):
+    service = backend_services.BackgroundRunService(max_workers=1)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            backend_services.threading, "Thread",
+            Mock(side_effect=RuntimeError("thread unavailable")),
+        )
+        with pytest.raises(backend_services.RunStartError):
+            service.submit("sherlock", "alice", Mock())
+
+    rows = database.list_tool_runs()
+    assert len(rows) == 1
+    assert rows[0][3] == "failed"
+    assert rows[0][6] == "The tool run could not be started."
+    run_id = service.submit("sherlock", "bob", Mock(return_value="output"))
+    assert run_id != rows[0][0]
+    assert service._slots.acquire(timeout=2)
+    service._slots.release()
+
+
+def test_background_service_releases_capacity_when_database_start_fails(
+    initialized_db, monkeypatch
+):
+    service = backend_services.BackgroundRunService(max_workers=1)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            database, "start_tool_run",
+            Mock(side_effect=sqlite3.OperationalError("database unavailable")),
+        )
+        with pytest.raises(sqlite3.OperationalError):
+            service.submit("sherlock", "alice", Mock())
+
+    assert service.submit("sherlock", "bob", Mock(return_value="output"))
+    assert service._slots.acquire(timeout=2)
+    service._slots.release()

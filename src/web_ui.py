@@ -3,17 +3,18 @@
 import json
 import ipaddress
 import sqlite3
-import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 import data.utils.database as database
+from backend_services import BackgroundRunService, RunCapacityError, RunStartError
 from helix_integration import run_helix, validate_username as validate_helix_username
 from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username
 from sherlock_integration import run_sherlock, validate_username as validate_sherlock_username
 from tool_registry import get_tool_metadata
-from tool_runs import execute_tool_run
+
+RUN_SERVICE = BackgroundRunService()
 
 RUNNABLE_TOOLS = {
     "holehe": ("email", validate_email, lambda value: run_holehe(value)["output"]),
@@ -159,20 +160,6 @@ INDEX_HTML = """<!doctype html>
 </body>
 </html>
 """
-
-
-def _run_in_background(run_id, tool_name, query_text, runner):
-    try:
-        execute_tool_run(tool_name, query_text, runner, run_id=run_id)
-    except Exception as exc:
-        try:
-            database.finish_tool_run(
-                run_id,
-                "failed",
-                error_text=str(exc) or "The tool run could not be completed.",
-            )
-        except (sqlite3.Error, ValueError):
-            pass
 
 
 class WebHandler(BaseHTTPRequestHandler):
@@ -331,22 +318,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 return
             input_kind, validator, runner = tool
             query_text = validator(payload.get("input"))
-            run_id = database.start_tool_run(tool_name, query_text)
-            thread = threading.Thread(
-                target=_run_in_background,
-                args=(run_id, tool_name, query_text, runner),
-                daemon=True,
-            )
-            try:
-                thread.start()
-            except RuntimeError:
-                database.finish_tool_run(
-                    run_id,
-                    "failed",
-                    error_text="The tool run could not be started.",
-                )
-                self._send_json(503, {"error": "The tool run could not be started."})
-                return
+            run_id = RUN_SERVICE.submit(tool_name, query_text, runner)
             self._send_json(202, {
                 "id": run_id,
                 "tool": tool_name,
@@ -358,6 +330,8 @@ class WebHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Request body must contain valid JSON."})
         except ValueError as exc:
             self._send_json(400, {"error": str(exc)})
+        except (RunCapacityError, RunStartError) as exc:
+            self._send_json(503, {"error": str(exc)})
         except sqlite3.Error:
             self._send_json(500, {"error": "Could not access the run database."})
 
