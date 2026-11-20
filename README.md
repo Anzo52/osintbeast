@@ -251,9 +251,23 @@ supports authorized runs with Holehe, Maigret, Helix, and Sherlock; tools in the
 registry without a runnable integration are not offered. Confirm authorization
 before each run. Runs execute through the existing validators, integrations,
 and persistence service, and their status and saved output are available in
-the recent-runs view. Keep the interface bound to loopback: it has no login or
-remote-access authentication, and its database and results may contain
-sensitive information.
+the recent-runs view.
+
+Configure separate operator and viewer tokens before starting the server:
+
+```bash
+export OSINTBEAST_OPERATOR_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export OSINTBEAST_VIEWER_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+python -m web_ui
+```
+
+Send a configured token using HTTP bearer authentication. Operators may launch
+runs and read results; viewers may only read results. Missing, invalid, or
+unauthorized credentials are rejected. The browser prompts for an access token
+and keeps it only in session storage for the current tab. The server refuses
+to start unless both tokens are configured and refuses any bind address outside
+IPv4 or IPv6 loopback. Do not expose the server through a tunnel or reverse
+proxy; keep its database and results restricted to authorized local users.
 
 ## Responsible use and privacy
 
