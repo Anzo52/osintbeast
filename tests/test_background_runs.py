@@ -105,6 +105,20 @@ def test_process_start_failure_is_recorded(service, monkeypatch):
     assert (run["status"], run["errorText"]) == ("failed", "Background worker failed.")
 
 
+def test_thread_start_and_persistence_failure_is_retried(service, monkeypatch):
+    finish = database.finish_tool_run
+    monkeypatch.setattr(database, "finish_tool_run", Mock(side_effect=OSError("unavailable")))
+    monkeypatch.setattr(background_runs.threading.Thread, "start", Mock(side_effect=RuntimeError("start")))
+    with pytest.raises(RuntimeError, match="start"):
+        service.submit("maigret", "user")
+    run_id = database.list_tool_runs()[0][0]
+    with pytest.raises(RuntimeError, match="Could not persist"):
+        service.status(run_id)
+    monkeypatch.setattr(database, "finish_tool_run", finish)
+    run = service.status(run_id)
+    assert (run["status"], run["errorText"]) == ("failed", "Could not start background worker.")
+
+
 def test_persistence_failure_is_reported_and_retried(service, monkeypatch):
     finish = database.finish_tool_run
     monkeypatch.setattr(database, "finish_tool_run", Mock(side_effect=OSError("database unavailable")))
@@ -143,7 +157,9 @@ def test_worker_wraps_mocked_execution(monkeypatch, result, limit, prefix):
     monkeypatch.setitem(background_runs._TOOLS, "maigret", (lambda value: value, runner))
     connection = Mock()
     background_runs._worker(connection, "maigret", "user", limit)
-    assert connection.send_bytes.call_args.args[0].startswith(prefix)
+    payload = connection.send_bytes.call_args.args[0]
+    assert payload.startswith(prefix)
+    assert len(payload) <= limit + 1
     runner.assert_called_once_with("user")
     connection.close.assert_called_once()
 

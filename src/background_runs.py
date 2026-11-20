@@ -118,9 +118,13 @@ class BackgroundRuns:
                 thread.start()
             except BaseException:
                 del self._jobs[run_id]
-                database.finish_tool_run(
-                    run_id, "failed", error_text="Could not start background worker."
-                )
+                self._pending[run_id] = ("failed", "Could not start background worker.")
+                try:
+                    self._persist(run_id, *self._pending[run_id])
+                except Exception:
+                    _LOG.exception("Could not persist background run startup failure")
+                else:
+                    del self._pending[run_id]
                 raise
         return run_id
 
@@ -170,6 +174,7 @@ class BackgroundRuns:
         process = None
         receiver = sender = None
         status, value = "failed", "Background worker failed."
+        completed = False
         try:
             if not cancel.is_set():
                 receiver, sender = self._context.Pipe(duplex=False)
@@ -183,10 +188,7 @@ class BackgroundRuns:
                 deadline = time.monotonic() + self.limits.timeout_seconds
                 while not cancel.is_set():
                     remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        status, value = "timed_out", "Background run exceeded its time limit."
-                        break
-                    if receiver.poll(min(remaining, 0.05)):
+                    if receiver.poll(max(0, min(remaining, 0.05))):
                         try:
                             payload = receiver.recv_bytes(self.limits.max_output_bytes + 1)
                         except (EOFError, OSError):
@@ -194,6 +196,10 @@ class BackgroundRuns:
                         if payload and payload[:1] in (b"S", b"F", b"T"):
                             status = {b"S": "success", b"F": "failed", b"T": "timed_out"}[payload[:1]]
                             value = payload[1:].decode("utf-8", errors="replace")
+                            completed = True
+                        break
+                    if remaining <= 0:
+                        status, value = "timed_out", "Background run exceeded its time limit."
                         break
                     if not process.is_alive():
                         break
@@ -211,7 +217,7 @@ class BackgroundRuns:
             if sender is not None:
                 sender.close()
             with self._lock:
-                if cancel.is_set():
+                if cancel.is_set() and not completed:
                     status, value = "failed", "Run cancelled."
                 try:
                     self._persist(run_id, status, value)
