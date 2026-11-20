@@ -43,7 +43,13 @@ COMMIT;
 ```
 
 These statements clear only run history and tool results, not other structured
-records. To remove all local data in this database, close the application and
+records. SQL deletion is not secure erasure: sensitive values may remain
+recoverable in unused database pages. After committing, `VACUUM;` can rebuild
+the live database to remove deleted content; this does not securely erase
+storage, sidecar files, snapshots, or backups. Continue protecting the database
+and its copies after cleanup.
+
+To remove all local data in this database, close the application and
 delete the database file and any associated `-wal`, `-shm`, or `-journal`
 sidecar files. Do not remove SQLite files while the application is running.
 Deleting a file may not securely erase its contents from the storage device,
