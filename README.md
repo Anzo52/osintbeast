@@ -181,6 +181,10 @@ There is no waiting queue: `CapacityError` explicitly rejects submissions when
 all slots are occupied. Execution occurs in child processes, which are stopped
 on timeout or cancellation; tool failures and unexpected worker exits are
 recorded as failures. Call `close()` during orderly application shutdown.
+If saving an outcome fails, the service retains it in memory and keeps its
+capacity slot reserved. Calling `status(run_id)` retries the write and raises
+`RuntimeError` if it still cannot be saved; retry after restoring database
+access. Pending outcomes are lost if the application process exits.
 
 These limits apply per service instance, not across web server processes or
 hosts. Use a single application process or an external coordinator to enforce

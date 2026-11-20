@@ -105,6 +105,28 @@ def test_process_start_failure_is_recorded(service, monkeypatch):
     assert (run["status"], run["errorText"]) == ("failed", "Background worker failed.")
 
 
+def test_persistence_failure_is_reported_and_retried(service, monkeypatch):
+    finish = database.finish_tool_run
+    monkeypatch.setattr(database, "finish_tool_run", Mock(side_effect=OSError("database unavailable")))
+    run_id = service.submit("maigret", "user")
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            service.status(run_id)
+        except RuntimeError as exc:
+            assert "Could not persist" in str(exc)
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("Persistence failure was not reported")
+    with pytest.raises(background_runs.CapacityError):
+        service.submit("maigret", "another")
+    monkeypatch.setattr(database, "finish_tool_run", finish)
+    assert service.status(run_id)["status"] == "success"
+    assert len(database.list_tool_results()) == 1
+    assert wait_for_run(service, service.submit("maigret", "another"))["status"] == "success"
+
+
 @pytest.mark.parametrize(
     ("result", "limit", "prefix"),
     [

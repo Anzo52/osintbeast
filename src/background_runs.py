@@ -93,6 +93,7 @@ class BackgroundRuns:
         self._context = multiprocessing.get_context("spawn")
         self._lock = threading.Lock()
         self._jobs = {}
+        self._pending = {}
         self._closed = False
 
     def submit(self, tool_name: str, query: str) -> int:
@@ -104,7 +105,7 @@ class BackgroundRuns:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Background run service is closed.")
-            if len(self._jobs) >= self.limits.max_concurrent:
+            if len(self._jobs) + len(self._pending) >= self.limits.max_concurrent:
                 raise CapacityError("Background run capacity reached.")
             run_id = database.start_tool_run(tool_name, query)
             cancel = threading.Event()
@@ -124,6 +125,14 @@ class BackgroundRuns:
         return run_id
 
     def status(self, run_id: int):
+        with self._lock:
+            if run_id in self._pending:
+                status, value = self._pending[run_id]
+                try:
+                    self._persist(run_id, status, value)
+                except Exception as exc:
+                    raise RuntimeError("Could not persist background run outcome.") from exc
+                del self._pending[run_id]
         return database.get_tool_run(run_id)
 
     def cancel(self, run_id: int) -> bool:
@@ -142,6 +151,13 @@ class BackgroundRuns:
                 cancel.set()
         for _, thread in jobs:
             thread.join()
+
+    @staticmethod
+    def _persist(run_id, status, value):
+        if status == "success":
+            database.finish_tool_run(run_id, status, result_text=value)
+        else:
+            database.finish_tool_run(run_id, status, error_text=value)
 
     def _supervise(self, run_id, tool_name, query, cancel):
         process = None
@@ -191,11 +207,9 @@ class BackgroundRuns:
                 if cancel.is_set():
                     status, value = "failed", "Run cancelled."
                 try:
-                    if status == "success":
-                        database.finish_tool_run(run_id, status, result_text=value)
-                    else:
-                        database.finish_tool_run(run_id, status, error_text=value)
+                    self._persist(run_id, status, value)
                 except Exception:
                     _LOG.exception("Could not persist background run outcome")
+                    self._pending[run_id] = (status, value)
                 finally:
                     self._jobs.pop(run_id, None)
