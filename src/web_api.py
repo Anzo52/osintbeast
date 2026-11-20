@@ -78,6 +78,8 @@ def _authorized_role(authorization, tokens):
 
 def _make_handler(tokens):
     class ApiHandler(BaseHTTPRequestHandler):
+        timeout = 10
+
         def _send_json(
             self, status, payload, authenticate=False, close_connection=False
         ):

@@ -1,6 +1,7 @@
 import http.client
 import json
 import threading
+from unittest.mock import Mock
 
 import pytest
 
@@ -80,6 +81,33 @@ def test_server_requires_tokens_and_rejects_non_loopback_bind(monkeypatch):
         web_api.create_server()
     with pytest.raises(ValueError, match="loopback"):
         web_api.create_server(host="0.0.0.0", tokens=TOKENS)
+
+
+def test_request_handler_has_finite_timeout():
+    assert web_api._make_handler(TOKENS).timeout == 10
+
+
+@pytest.mark.parametrize(
+    "raw_tokens",
+    [
+        "{",
+        "[]",
+        json.dumps({"short": "operator"}),
+        json.dumps({OPERATOR_TOKEN: "admin"}),
+        json.dumps({OPERATOR_TOKEN: 1}),
+    ],
+)
+def test_server_rejects_invalid_environment_tokens_before_listening(
+    monkeypatch, raw_tokens
+):
+    monkeypatch.setenv("OSINTBEAST_API_TOKENS", raw_tokens)
+    listener = Mock()
+    monkeypatch.setattr(web_api, "ThreadingHTTPServer", listener)
+
+    with pytest.raises(ValueError):
+        web_api.create_server()
+
+    listener.assert_not_called()
 
 
 def test_api_rejects_missing_and_invalid_credentials(api_server):
