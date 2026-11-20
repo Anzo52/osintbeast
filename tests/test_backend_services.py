@@ -95,4 +95,7 @@ def test_history_menu_reports_database_errors(monkeypatch, capsys):
 
     main.query_menu()
 
-    assert capsys.readouterr().out == "Database query failed: database unavailable\n"
+    assert capsys.readouterr().out == (
+        "Database query failed: database unavailable. "
+        "Initialize the database and check its permissions.\n"
+    )

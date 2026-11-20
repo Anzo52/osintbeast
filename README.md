@@ -64,10 +64,32 @@ This indicates presence, not whether the tool or all its dependencies work.
 Use the arrow keys and Enter to choose a tool to download or install; installing
 uses the default `tools/<name>` download folder. A custom installation folder is
 available as an alternate menu choice. Database views include recent runs and
-saved results, alongside a custom SQL option. Type only the information that
-cannot be selected in advance, such as a username, email address, custom folder,
-or custom SQL query. Errors are reported in the menu so you can correct the
-input or environment and try again.
+saved results. Type only the information that cannot be selected in advance,
+such as a username, email address, or custom folder. Errors are reported in the
+menu so you can correct the input or environment and try again.
+
+### Command-line commands
+
+The installed `osintbeast` command also accepts direct commands. Run
+`osintbeast --help` or `osintbeast <command> --help` for complete usage. With
+no command, it opens the interactive menu.
+
+```text
+osintbeast init-db
+osintbeast list-tools
+osintbeast download TOOL
+osintbeast install TOOL [--path DIRECTORY]
+osintbeast check-email EMAIL
+osintbeast check-username {maigret,helix,sherlock} USERNAME
+osintbeast query {runs,results}
+```
+
+Email checks accept a practical email address such as `person@example.com`.
+Username checks accept ASCII letters, digits, dots, underscores, and hyphens;
+Maigret and Sherlock allow up to 100 characters, while Helix allows up to 50
+and optionally accepts a leading `@`. The `query` command displays recent
+runs or saved results; it does not accept arbitrary SQL. Invalid inputs and
+failed operations print a corrective message and return a nonzero status.
 
 ### Running checks
 
