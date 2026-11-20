@@ -91,7 +91,9 @@ python -m pip install -e ".[sherlock]"
 ```
 
 Select **Run Holehe Check**, **Run Maigret Check**, **Run Helix Check**, or
-**Run Sherlock Check** in the menu. Sherlock uses its bundled site list and
+**Run Sherlock Check** in the menu. Email and username entry is hidden and
+requires a terminal that can disable echo; otherwise the check is cancelled.
+Sherlock uses its bundled site list and
 skips sites marked NSFW. It sends a username to many public sites; each request
 has a 15-second timeout, so a full search may take longer. Use it only for
 authorized targets. Helix uses its built-in site list through the in-process
