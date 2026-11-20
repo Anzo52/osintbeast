@@ -5,10 +5,10 @@ import zlib
 
 from simple_term_menu import TerminalMenu
 
+from backend_services import get_recent_tool_runs, get_saved_tool_results
 from checkers import _run_email_check_menu, _run_username_check_menu
 from data.utils.init_db import init_db
 from menu_utils import _choose_option, _download_tool_menu, _install_tool_menu
-from data.utils.database import query_database
 from downloader import download_tool
 from helix_integration import run_helix, validate_username as validate_helix_username
 from installer import install_tool
@@ -126,37 +126,26 @@ def run_sherlock_check(username):
     _run_check("sherlock", username, validate_sherlock_username, run_sherlock)
 
 
-def query(query_text):
-    try:
-        result = query_database(query_text)
-    except sqlite3.Error as exc:
-        print(f"Database query failed: {exc}")
-        return
-    print(f"Query result: {result}")
-
-
 def query_menu():
     choice = _choose_option(
         [
             "Recent Tool Runs",
             "Saved Tool Results",
-            "Enter a Custom SQL Query",
             "Back",
         ],
         "Choose database view",
     )
-    if choice == 0:
-        query(
-            "SELECT runID, toolName, queryText, status, startedAt, finishedAt, "
-            "errorText FROM ToolRuns ORDER BY runID DESC LIMIT 20"
-        )
-    elif choice == 1:
-        query(
-            "SELECT resultID, toolName, queryText, resultText, createdAt "
-            "FROM ToolResults ORDER BY resultID DESC LIMIT 20"
-        )
-    elif choice == 2:
-        query(input("Enter your SQL query: ").strip())
+    try:
+        if choice == 0:
+            result = get_recent_tool_runs()
+        elif choice == 1:
+            result = get_saved_tool_results()
+        else:
+            return
+    except sqlite3.Error as exc:
+        print(f"Database query failed: {exc}")
+        return
+    print(f"Query result: {result}")
 
 
 if __name__ == "__main__":

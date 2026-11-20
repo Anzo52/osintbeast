@@ -1,3 +1,4 @@
+import sqlite3
 import subprocess
 import zipfile
 import zlib
@@ -88,23 +89,11 @@ def test_install_reports_errors(monkeypatch, capsys, error):
     assert capsys.readouterr().out == f"Installation failed: {error}\n"
 
 
-def test_query_reports_sqlite_error(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "test.db"))
-    database.setup_database()
-
-    main.query("SELECT * FROM missing_table")
-
-    assert capsys.readouterr().out == (
-        "Database query failed: no such table: missing_table\n"
-    )
-
-
 @pytest.mark.parametrize(
     ("choices", "inputs", "failure"),
     [
         ([2, 2, 1], [], "Download failed: Unable to download repository archive"),
         ([3, 1, 0, 1], [], "Installation failed: Tool 'holehe' is not supported."),
-        ([5, 2, 1], ["SELECT * FROM missing_table"], "Database query failed: no such table: missing_table"),
     ],
 )
 def test_menu_remains_usable_after_failure(
@@ -147,17 +136,17 @@ def test_menu_remains_usable_after_failure(
 def test_successful_actions_keep_their_output(monkeypatch, capsys):
     monkeypatch.setattr(main, "download_tool", lambda *args, **kwargs: "tools/holehe")
     monkeypatch.setattr(main, "install_tool", lambda *args, **kwargs: None)
-    monkeypatch.setattr(main, "query_database", lambda query: [(1,)])
-    monkeypatch.setattr("builtins.input", lambda prompt: "")
+    monkeypatch.setattr(main, "get_recent_tool_runs", lambda: [])
 
     main.download("holehe")
     main.install("holehe")
-    main.query("SELECT 1")
+    monkeypatch.setattr(main, "_choose_option", lambda options, title: 0)
+    main.query_menu()
 
     assert capsys.readouterr().out == (
         "holehe downloaded successfully to tools/holehe.\n"
         "holehe installed successfully.\n"
-        "Query result: [(1,)]\n"
+        "Query result: []\n"
     )
 
 
@@ -279,25 +268,45 @@ def test_install_menu_selects_pip_tool_and_default_source(monkeypatch):
     install.assert_called_once_with("helix")
 
 
-def test_query_menu_offers_recent_runs_without_custom_sql(monkeypatch):
-    query = Mock()
+@pytest.mark.parametrize(
+    ("choice", "service_name"),
+    [(0, "get_recent_tool_runs"), (1, "get_saved_tool_results")],
+)
+def test_query_menu_offers_history_views_without_custom_sql(
+    monkeypatch, choice, service_name
+):
+    service = Mock(return_value=[])
 
     class FakeMenu:
         def __init__(self, options, title):
             assert options == [
                 "Recent Tool Runs",
                 "Saved Tool Results",
-                "Enter a Custom SQL Query",
                 "Back",
             ]
 
         def show(self):
-            return 0
+            return choice
 
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
     monkeypatch.setattr(menu_utils, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr(main, "query", query)
+    monkeypatch.setattr(main, service_name, service)
 
     main.query_menu()
 
-    assert query.call_args.args[0].startswith("SELECT runID, toolName, queryText, status")
+    service.assert_called_once_with()
+
+
+def test_query_menu_reports_sqlite_error(monkeypatch, capsys):
+    monkeypatch.setattr(
+        main,
+        "get_recent_tool_runs",
+        Mock(side_effect=sqlite3.OperationalError("database unavailable")),
+    )
+    monkeypatch.setattr(main, "_choose_option", lambda options, title: 0)
+
+    main.query_menu()
+
+    assert capsys.readouterr().out == (
+        "Database query failed: database unavailable\n"
+    )

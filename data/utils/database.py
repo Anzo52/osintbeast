@@ -131,28 +131,60 @@ def save_tool_result(
         return cursor.lastrowid
 
 
-def list_tool_results(limit: int = 100) -> list[tuple[Any, ...]]:
-    """Return recent tool runs, newest first, with a bounded page size."""
-    if not 1 <= limit <= 500:
-        raise ValueError("limit must be between 1 and 500")
+def list_tool_results(
+    limit: int = 100, max_result_text_chars: Optional[int] = None
+) -> list[tuple[Any, ...]]:
+    """Return saved results, optionally truncating result text in the query."""
+    _validate_list_limit(limit)
+    if max_result_text_chars is not None and (
+        not isinstance(max_result_text_chars, int)
+        or isinstance(max_result_text_chars, bool)
+        or max_result_text_chars < 1
+    ):
+        raise ValueError("max_result_text_chars must be a positive integer")
+    result_text = "resultText"
+    parameters: tuple[Any, ...]
+    if max_result_text_chars is None:
+        parameters = (limit,)
+    else:
+        truncation_marker = "… [truncated]"
+        result_text = (
+            "CASE WHEN length(resultText) > ? "
+            "THEN substr(resultText, 1, max(0, ? - length(?))) "
+            "|| substr(?, 1, ?) "
+            "ELSE resultText END"
+        )
+        parameters = (
+            max_result_text_chars,
+            max_result_text_chars,
+            truncation_marker,
+            truncation_marker,
+            max_result_text_chars,
+            limit,
+        )
     with closing(connect_db()) as conn:
         return conn.execute(
-            """SELECT resultID, toolName, queryText, resultText, createdAt
-               FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
-            (limit,),
+            f"""SELECT resultID, toolName, queryText, {result_text}, createdAt
+                FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
+            parameters,
         ).fetchall()
 
 
 def list_tool_runs(limit: int = 100) -> list[tuple[Any, ...]]:
     """Return recent tool runs, newest first, with a bounded page size."""
-    if not 1 <= limit <= 500:
-        raise ValueError("limit must be between 1 and 500")
+    _validate_list_limit(limit)
     with closing(connect_db()) as conn:
         return conn.execute(
-            """SELECT runID, toolName, queryText, status, startedAt, finishedAt
+            """SELECT runID, toolName, queryText, status, startedAt, finishedAt,
+                      errorText
                FROM ToolRuns ORDER BY runID DESC LIMIT ?""",
             (limit,),
         ).fetchall()
+
+
+def _validate_list_limit(limit: int) -> None:
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
+        raise ValueError("limit must be between 1 and 500")
 
 
 def get_tool_run(run_id: int) -> Optional[tuple[Any, ...]]:

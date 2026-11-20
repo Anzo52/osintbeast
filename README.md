@@ -63,11 +63,10 @@ current interpreter, or whether the Amass executable is available on `PATH`.
 This indicates presence, not whether the tool or all its dependencies work.
 Use the arrow keys and Enter to choose a tool to download or install; installing
 uses the default `tools/<name>` download folder. A custom installation folder is
-available as an alternate menu choice. Database views include recent runs and
-saved results, alongside a custom SQL option. Type only the information that
-cannot be selected in advance, such as a username, email address, custom folder,
-or custom SQL query. Errors are reported in the menu so you can correct the
-input or environment and try again.
+available as an alternate menu choice. The database views show recent runs and
+saved results. Type only the information that cannot be selected in advance,
+such as a username, email address, or custom folder. Errors are reported in the
+menu so you can correct the input or environment and try again.
 
 ### Running checks
 
@@ -130,7 +129,8 @@ Every terminal run has a UTC `finishedAt`; `success` requires saved output in
 `resultText` and no `errorText`, while `failed` and `timed_out` require an
 `errorText` and no `resultText`. Successful outputs are also saved to the
 existing `ToolResults` table; failures and timeouts are never stored there.
-Use **Query Database** to inspect either table.
+Use **Query Database** to view recent runs and saved results. The saved-results
+view shows up to 20 rows and truncates result text longer than 16,384 characters.
 
 Sublist3r and Amass do not yet have run integrations. Any future integration
 that needs an external process must pass sensitive input through standard input
