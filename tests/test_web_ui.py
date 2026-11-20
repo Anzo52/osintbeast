@@ -85,10 +85,10 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
 
         assert status == 200
         assert detail["status"] == "success"
-        assert detail["result"] == f"alice: {output}"
+        assert detail["result"] == f"[redacted]: {output}"
         assert database.query_database(
             "SELECT toolName, queryText, resultText FROM ToolResults"
-        ) == [("sherlock", "alice", f"alice: {output}")]
+        ) == [("sherlock", "[redacted]", f"[redacted]: {output}")]
 
         status, recent = _request(f"{base_url}/api/runs?limit=1")
         assert status == 200

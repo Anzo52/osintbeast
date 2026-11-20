@@ -163,7 +163,9 @@ INDEX_HTML = """<!doctype html>
 
 def _run_in_background(run_id, tool_name, query_text, runner):
     try:
-        execute_tool_run(tool_name, query_text, runner, run_id=run_id)
+        execute_tool_run(
+            tool_name, query_text, runner, run_id=run_id, sensitive_input=True
+        )
     except Exception as exc:
         try:
             database.finish_tool_run(
@@ -331,7 +333,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 return
             input_kind, validator, runner = tool
             query_text = validator(payload.get("input"))
-            run_id = database.start_tool_run(tool_name, query_text)
+            run_id = database.start_tool_run(tool_name, "[redacted]")
             thread = threading.Thread(
                 target=_run_in_background,
                 args=(run_id, tool_name, query_text, runner),

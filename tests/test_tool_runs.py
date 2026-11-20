@@ -56,6 +56,31 @@ def test_success_run_preserves_legacy_results(initialized_db, tool):
     ) == [(tool, "test", "output")]
 
 
+def test_short_username_redaction_preserves_unrelated_json_data(initialized_db):
+    output = (
+        '{"a": "a", "username": "a", "http_status": 200, '
+        '"status": "available", "description": "marathon"}'
+    )
+
+    assert tool_runs.execute_tool_run(
+        "sherlock", "a", lambda _: output, sensitive_input=True
+    ) == (
+        "success",
+        '{\n  "a": "[redacted]",\n  "username": "[redacted]",\n  "http_status": 200,\n'
+        '  "status": "available",\n  "description": "marathon"\n}',
+    )
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolRuns"
+    ) == [("[redacted]", '{\n  "a": "[redacted]",\n  "username": "[redacted]",\n  "http_status": 200,\n'
+                        '  "status": "available",\n  "description": "marathon"\n}')]
+
+
+def test_short_username_redaction_only_replaces_complete_text_tokens():
+    assert tool_runs._redact_sensitive_value(
+        "a and abc; x_a; https://example.test/a", "a"
+    ) == "[redacted] and abc; x_a; https://example.test/[redacted]"
+
+
 def test_finish_is_atomic_if_legacy_result_insert_fails(initialized_db):
     run_id = database.start_tool_run("maigret", "test")
     with database.connect_db() as conn:
@@ -167,7 +192,7 @@ def test_cli_saves_success(
     runner.assert_called_once_with(query_text)
     assert f"{tool.capitalize()} check saved to the database." in capsys.readouterr().out
     assert database.query_database("SELECT toolName, queryText, status FROM ToolRuns") == [
-        (tool, query_text, "success")
+        (tool, "[redacted]", "success")
     ]
 
 
