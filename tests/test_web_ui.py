@@ -107,6 +107,30 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
         server.server_close()
 
 
+def test_web_run_views_show_migrated_legacy_records(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "web.db"))
+    database.setup_database()
+    with database.connect_db() as conn:
+        conn.execute("DELETE FROM OsintBeastMigrations")
+        conn.execute(
+            "INSERT INTO ToolRuns (toolName, queryText, status, errorText) "
+            "VALUES ('holehe', 'private@example.com', 'failed', 'private%40example.com')"
+        )
+
+    server, base_url = _server(tmp_path, monkeypatch, Mock())
+    try:
+        status, recent = _request(f"{base_url}/api/runs")
+        assert status == 200
+        assert recent[0]["input"] == "[redacted]"
+        status, detail = _request(f"{base_url}/api/runs/{recent[0]['id']}")
+        assert status == 200
+        assert detail["input"] == "[redacted]"
+        assert detail["error"] == "[redacted]"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_validation_and_authorization_failures_do_not_launch(
     tmp_path, monkeypatch
 ):

@@ -114,12 +114,16 @@ and optional integrations. Start OSINT Beast and select **Initialize
 Database** before using the upgraded version with existing data.
 
 Initialization is repeatable and transactional. It creates missing tables
-and indexes without replacing existing records. It is not a general-purpose
+and indexes and, once per database, redacts legacy tool queries and their
+direct and URL-encoded occurrences in results and errors. It preserves other
+record fields and does not sanitize unrelated sensitive values or new records.
+Existing backups and SQLite journals may still contain the original data.
+It is not a general-purpose
 schema migration: it does not alter or repair existing tables whose columns
 or definitions are incompatible with the current code. In particular, do not
 assume that every database from every prior or future version is compatible.
-The application has no versioned migration framework or automatic downgrade
-support.
+The application has no general-purpose versioned migration framework or
+automatic downgrade support.
 
 Keep the verified backup until you have checked that the upgraded CLI can
 read the data you need. If initialization or normal operations report a schema

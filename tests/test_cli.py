@@ -1,3 +1,4 @@
+import sqlite3
 import subprocess
 import zipfile
 import zlib
@@ -296,7 +297,45 @@ def test_query_menu_offers_recent_runs_without_custom_sql(monkeypatch):
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
     monkeypatch.setattr(menu_utils, "TerminalMenu", FakeMenu)
     monkeypatch.setattr(main, "query", query)
+    monkeypatch.setattr(main, "setup_database", Mock())
 
     main.query_menu()
 
     assert query.call_args.args[0].startswith("SELECT runID, toolName, queryText, status")
+
+
+@pytest.mark.parametrize("choice", [0, 1])
+def test_saved_views_migrate_legacy_records(tmp_path, monkeypatch, capsys, choice):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "legacy.db"))
+    database.setup_database()
+    with database.connect_db() as conn:
+        conn.execute("DELETE FROM OsintBeastMigrations")
+        conn.execute(
+            "INSERT INTO ToolResults (toolName, queryText, resultText) "
+            "VALUES ('holehe', 'private@example.com', 'private@example.com result')"
+        )
+        conn.execute(
+            "INSERT INTO ToolRuns (toolName, queryText, status, errorText) "
+            "VALUES ('holehe', 'private@example.com', 'failed', 'private@example.com error')"
+        )
+    monkeypatch.setattr(main, "_choose_option", lambda *args: choice)
+
+    main.query_menu()
+
+    output = capsys.readouterr().out
+    assert "private@example.com" not in output
+    assert "[redacted]" in output
+
+
+def test_saved_view_does_not_query_if_migration_fails(monkeypatch, capsys):
+    monkeypatch.setattr(main, "_choose_option", lambda *args: 0)
+    monkeypatch.setattr(
+        main, "setup_database", Mock(side_effect=sqlite3.OperationalError("failed"))
+    )
+    query = Mock()
+    monkeypatch.setattr(main, "query", query)
+
+    main.query_menu()
+
+    query.assert_not_called()
+    assert "Database initialization failed" in capsys.readouterr().out
