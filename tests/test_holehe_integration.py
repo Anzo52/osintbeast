@@ -5,7 +5,12 @@ import holehe_integration
 
 @pytest.mark.parametrize(
     "email",
-    ["user@example.com", " first.last+tag@sub.example.co.uk ", "user@exämple.com"],
+    [
+        "user@example.com",
+        " first.last+tag@sub.example.co.uk ",
+        "user@exämple.com",
+        "a" * 64 + "@example.com",
+    ],
 )
 def test_validate_email_accepts_well_formed_addresses(email):
     assert holehe_integration.validate_email(email) == email.strip()

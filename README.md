@@ -201,7 +201,7 @@ shared application services rather than duplicating CLI behavior.
 - [x] Keep dependency manifests, source modules, schemas, and documentation in their correct files.
 - [x] Declare Python 3.10+ support and bounded dependency ranges in `pyproject.toml`.
 - [x] Make database initialization reliable and repeatable across supported environments.
-- [ ] Expand automated coverage for database operations, CLI behavior, validation, timeouts, and failures.
+- [x] Expand automated coverage for database operations, CLI behavior, validation, timeouts, and failures.
 - [x] Add continuous integration to run tests and basic static checks on changes.
 
 ### 2. Harden tool execution and data handling
