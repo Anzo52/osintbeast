@@ -12,6 +12,7 @@ class ToolMetadata(TypedDict):
     install_method: str
     install_target: str
     notes: str
+    input_mechanism: str
 
 
 TOOL_REGISTRY: dict[str, ToolMetadata] = {
@@ -21,6 +22,7 @@ TOOL_REGISTRY: dict[str, ToolMetadata] = {
         "install_method": "pip",
         "install_target": "holehe",
         "notes": "Checks whether an email is registered on public sites.",
+        "input_mechanism": "in-process Python API",
     },
     "sherlock": {
         "repo": "https://github.com/sherlock-project/sherlock",
@@ -28,6 +30,7 @@ TOOL_REGISTRY: dict[str, ToolMetadata] = {
         "install_method": "pip",
         "install_target": "sherlock-project",
         "notes": "Searches for usernames across social networks.",
+        "input_mechanism": "in-process Python API",
     },
     "maigret": {
         "repo": "https://github.com/soxoj/maigret",
@@ -35,6 +38,7 @@ TOOL_REGISTRY: dict[str, ToolMetadata] = {
         "install_method": "pip",
         "install_target": "maigret",
         "notes": "Searches for usernames and enriches public profiles.",
+        "input_mechanism": "in-process Python API",
     },
     "amass": {
         "repo": "https://github.com/owasp-amass/amass",
@@ -42,6 +46,7 @@ TOOL_REGISTRY: dict[str, ToolMetadata] = {
         "install_method": "binary",
         "install_target": "amass",
         "notes": "Performs passive subdomain and attack-surface discovery.",
+        "input_mechanism": "not integrated; future runs require stdin/private pipe",
     },
     "sublist3r": {
         "repo": "https://github.com/aboul3la/Sublist3r",
@@ -49,6 +54,7 @@ TOOL_REGISTRY: dict[str, ToolMetadata] = {
         "install_method": "pip",
         "install_target": "Sublist3r",
         "notes": "Enumerates subdomains using public sources.",
+        "input_mechanism": "not integrated; future runs require stdin/private pipe",
     },
     "helix": {
         "repo": "https://github.com/thalha-a9/helix",
@@ -56,6 +62,7 @@ TOOL_REGISTRY: dict[str, ToolMetadata] = {
         "install_method": "pip",
         "install_target": "helix-osint",
         "notes": "Searches for usernames across social networks.",
+        "input_mechanism": "in-process Python API",
     },
 }
 

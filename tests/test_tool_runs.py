@@ -1,8 +1,10 @@
+import logging
 import sqlite3
 from unittest.mock import Mock
 
 import pytest
 
+import checkers
 import data.utils.database as database
 import main
 import tool_runs
@@ -167,7 +169,7 @@ def test_cli_saves_success(
     runner.assert_called_once_with(query_text)
     assert f"{tool.capitalize()} check saved to the database." in capsys.readouterr().out
     assert database.query_database("SELECT toolName, queryText, status FROM ToolRuns") == [
-        (tool, query_text, "success")
+        (tool, "[redacted]", "success")
     ]
 
 
@@ -178,6 +180,85 @@ def test_cli_reports_and_records_failure(initialized_db, monkeypatch, capsys):
     assert database.query_database("SELECT status, errorText FROM ToolRuns") == [
         ("failed", "dependency missing")
     ]
+
+
+def test_sensitive_values_are_redacted_from_output_and_run_records(
+    initialized_db, monkeypatch, capsys
+):
+    sensitive_value = "person@example.com"
+
+    def run_with_output(value):
+        print(f"Starting lookup for {value}")
+        logging.warning("Lookup requested for %s", value)
+        return f"Found {value} ({value.replace('@', '%40')})"
+
+    monkeypatch.setattr(
+        main,
+        "run_holehe",
+        Mock(side_effect=lambda value: {"output": run_with_output(value)}),
+    )
+
+    main.run_holehe_check(sensitive_value)
+
+    output = capsys.readouterr().out
+    assert sensitive_value not in output
+    assert "[redacted]" in output
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolRuns"
+    ) == [("[redacted]", "Found [redacted] ([redacted])")]
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolResults"
+    ) == [("[redacted]", "Found [redacted] ([redacted])")]
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, TypeError])
+def test_sensitive_values_are_redacted_from_errors(
+    initialized_db, monkeypatch, capsys, error_type
+):
+    sensitive_value = "person@example.com"
+    monkeypatch.setattr(
+        main,
+        "run_holehe",
+        Mock(side_effect=error_type(f"request failed for {sensitive_value}")),
+    )
+
+    main.run_holehe_check(sensitive_value)
+
+    output = capsys.readouterr().out
+    assert sensitive_value not in output
+    assert database.query_database(
+        "SELECT queryText, errorText FROM ToolRuns"
+    ) == [("[redacted]", "request failed for [redacted]")]
+
+
+@pytest.mark.parametrize(
+    ("menu", "prompt", "value"),
+    [
+        (
+            checkers._run_email_check_menu,
+            "Enter the email to check: ",
+            "person@example.com",
+        ),
+        (
+            checkers._run_username_check_menu,
+            "Enter the username to check: ",
+            "private_user",
+        ),
+    ],
+)
+def test_sensitive_inputs_use_non_echoing_prompts(monkeypatch, menu, prompt, value):
+    seen = []
+    monkeypatch.setattr(
+        checkers,
+        "getpass",
+        lambda actual_prompt: seen.append(actual_prompt) or value,
+    )
+    runner = Mock()
+
+    menu(runner)
+
+    assert seen == [prompt]
+    runner.assert_called_once_with(value)
 
 
 def test_database_failure_after_execution_is_reported(initialized_db, monkeypatch, capsys):
@@ -218,7 +299,7 @@ def test_maigret_menu_action_dispatches_username(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr("builtins.input", lambda prompt: " user ")
+    monkeypatch.setattr(checkers, "getpass", lambda prompt: " user ")
     monkeypatch.setattr(main, "run_maigret_check", runner)
     main.main_menu()
     runner.assert_called_once_with("user")

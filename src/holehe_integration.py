@@ -1,6 +1,7 @@
 import json
 import re
 import sqlite3
+from urllib.parse import quote, quote_plus
 
 import data.utils.database as database
 
@@ -92,6 +93,12 @@ def run_holehe(email: str):
 
 
 def save_tool_result(tool_name: str, query_text: str, result_text: str):
+    variants = {query_text, quote(query_text, safe=""), quote_plus(query_text)}
+    for variant in sorted(variants, key=len, reverse=True):
+        if variant:
+            result_text = re.sub(
+                re.escape(variant), "[redacted]", result_text, flags=re.IGNORECASE
+            )
     conn = sqlite3.connect(database.DB_FILE)
     try:
         conn.execute(
@@ -105,7 +112,7 @@ def save_tool_result(tool_name: str, query_text: str, result_text: str):
         )
         conn.execute(
             "INSERT INTO ToolResults (toolName, queryText, resultText) VALUES (?, ?, ?)",
-            (tool_name, query_text, result_text),
+            (tool_name, "[redacted]", result_text),
         )
         conn.commit()
     finally:
