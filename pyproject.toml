@@ -45,6 +45,7 @@ package-dir = {"" = "src", "osintbeast_schemas" = "data/schemas", "data.utils" =
 packages = ["osintbeast_schemas", "data.utils"]
 py-modules = [
     "checkers",
+    "backend_services",
     "downloader",
     "holehe_integration",
     "helix_integration",
