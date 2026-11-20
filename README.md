@@ -195,6 +195,23 @@ tests are skipped.
 GitHub Actions runs the test suite and Ruff checks on Python 3.10–3.13 for pushes and pull requests.
 It also installs the Maigret extra so its offline API-contract tests run.
 
+## Browser interface
+
+Start the local browser interface with:
+
+```bash
+python -m web_ui
+```
+
+Open `http://127.0.0.1:8000`. The interface initializes the local database and
+supports authorized runs with Holehe, Maigret, Helix, and Sherlock; tools in the
+registry without a runnable integration are not offered. Confirm authorization
+before each run. Runs execute through the existing validators, integrations,
+and persistence service, and their status and saved output are available in
+the recent-runs view. Keep the interface bound to loopback: it has no login or
+remote-access authentication, and its database and results may contain
+sensitive information.
+
 ## Responsible use and privacy
 
 Use OSINT Beast only with data and targets you are authorized to assess, and follow applicable laws, provider terms, and organizational policies. Tool output may contain personal or sensitive information. Protect the local database, restrict access to it, and remove data when it is no longer needed. Validate inputs and avoid exposing sensitive values in logs, process arguments, or shared environments.

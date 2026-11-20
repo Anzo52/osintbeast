@@ -58,6 +58,7 @@ py-modules = [
     "sherlock_integration",
     "tool_runs",
     "tool_registry",
+    "web_ui",
 ]
 
 [tool.setuptools.package-data]
