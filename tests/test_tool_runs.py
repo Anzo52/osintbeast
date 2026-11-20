@@ -1,8 +1,12 @@
+import json
+import logging
 import sqlite3
+import warnings
 from unittest.mock import Mock
 
 import pytest
 
+import checkers
 import data.utils.database as database
 import main
 import tool_runs
@@ -20,10 +24,11 @@ def initialized_db(tmp_path, monkeypatch):
     [
         ("holehe", RuntimeError("missing dependency"), "failed"),
         ("maigret", ValueError("invalid site database"), "failed"),
-        ("maigret", OSError("network error"), "failed"),
+        ("helix", KeyError("missing field"), "failed"),
         ("sherlock", RuntimeError("missing dependency"), "failed"),
         ("holehe", HoleheTimeoutError("timeout"), "timed_out"),
         ("maigret", TimeoutError(), "timed_out"),
+        ("helix", TimeoutError("timed out"), "timed_out"),
         ("sherlock", TimeoutError(), "timed_out"),
     ],
 )
@@ -42,7 +47,7 @@ def test_failed_runs_are_recorded(initialized_db, tool, error, status):
     assert database.list_tool_results() == []
 
 
-@pytest.mark.parametrize("tool", ["holehe", "maigret", "sherlock"])
+@pytest.mark.parametrize("tool", ["holehe", "maigret", "helix", "sherlock"])
 def test_success_run_preserves_legacy_results(initialized_db, tool):
     assert tool_runs.execute_tool_run(tool, "test", lambda _: "output") == (
         "success", "output"
@@ -54,6 +59,17 @@ def test_success_run_preserves_legacy_results(initialized_db, tool):
     assert database.query_database(
         "SELECT toolName, queryText, resultText FROM ToolResults"
     ) == [(tool, "test", "output")]
+
+
+def test_non_text_output_is_recorded_as_a_failure(initialized_db):
+    status, message = tool_runs.execute_tool_run("helix", "test", lambda _: None)
+
+    assert status == "failed"
+    assert message == "helix returned non-text output."
+    assert database.query_database(
+        "SELECT status, resultText, errorText, finishedAt IS NOT NULL FROM ToolRuns"
+    ) == [("failed", None, message, 1)]
+    assert database.list_tool_results() == []
 
 
 def test_finish_is_atomic_if_legacy_result_insert_fails(initialized_db):
@@ -167,7 +183,7 @@ def test_cli_saves_success(
     runner.assert_called_once_with(query_text)
     assert f"{tool.capitalize()} check saved to the database." in capsys.readouterr().out
     assert database.query_database("SELECT toolName, queryText, status FROM ToolRuns") == [
-        (tool, query_text, "success")
+        (tool, "[redacted]", "success")
     ]
 
 
@@ -178,6 +194,180 @@ def test_cli_reports_and_records_failure(initialized_db, monkeypatch, capsys):
     assert database.query_database("SELECT status, errorText FROM ToolRuns") == [
         ("failed", "dependency missing")
     ]
+
+
+def test_sensitive_values_are_redacted_from_output_and_run_records(
+    initialized_db, monkeypatch, capsys
+):
+    sensitive_value = "person@example.com"
+
+    def run_with_output(value):
+        print(f"Starting lookup for {value}")
+        logging.warning("Lookup requested for %s", value)
+        return f"Found {value} ({value.replace('@', '%40')})"
+
+    monkeypatch.setattr(
+        main,
+        "run_holehe",
+        Mock(side_effect=lambda value: {"output": run_with_output(value)}),
+    )
+
+    main.run_holehe_check(sensitive_value)
+
+    output = capsys.readouterr().out
+    assert sensitive_value not in output
+    assert "[redacted]" in output
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolRuns"
+    ) == [("[redacted]", "Found [redacted] ([redacted])")]
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolResults"
+    ) == [("[redacted]", "Found [redacted] ([redacted])")]
+
+
+def test_sensitive_json_redaction_preserves_schema_and_mixed_encoding(initialized_db):
+    sensitive_value = "person/name@example.com"
+    result = json.dumps(
+        [
+            {
+                "site": "Example",
+                "url": "https://example.test/person/name%40example.com",
+                "status": "not found",
+                "http_status": 200,
+            }
+        ],
+        indent=2,
+    )
+
+    outcome, output = tool_runs.execute_tool_run(
+        "sherlock",
+        sensitive_value,
+        lambda _: result,
+        sensitive_input=True,
+    )
+
+    record = json.loads(output)[0]
+    assert outcome == "success"
+    assert record == {
+        "site": "Example",
+        "url": "https://example.test/[redacted]",
+        "status": "not found",
+        "http_status": 200,
+    }
+
+
+def test_short_username_redaction_preserves_numeric_json_fields(initialized_db):
+    result = json.dumps(
+        [
+            {
+                "site": "Example",
+                "url": "https://example.test/2",
+                "status": "not found",
+                "http_status": 200,
+            }
+        ],
+        indent=2,
+    )
+
+    outcome, output = tool_runs.execute_tool_run(
+        "sherlock",
+        "2",
+        lambda _: result,
+        sensitive_input=True,
+    )
+
+    record = json.loads(output)[0]
+    assert outcome == "success"
+    assert record == {
+        "site": "Example",
+        "url": "https://example.test/[redacted]",
+        "status": "not found",
+        "http_status": 200,
+    }
+
+
+@pytest.mark.parametrize("error_type", [RuntimeError, TypeError])
+def test_sensitive_values_are_redacted_from_errors(
+    initialized_db, monkeypatch, capsys, error_type
+):
+    sensitive_value = "person@example.com"
+    monkeypatch.setattr(
+        main,
+        "run_holehe",
+        Mock(side_effect=error_type(f"request failed for {sensitive_value}")),
+    )
+
+    main.run_holehe_check(sensitive_value)
+
+    output = capsys.readouterr().out
+    assert sensitive_value not in output
+    assert database.query_database(
+        "SELECT queryText, errorText FROM ToolRuns"
+    ) == [("[redacted]", "request failed for [redacted]")]
+
+
+@pytest.mark.parametrize(
+    ("menu", "prompt", "value"),
+    [
+        (
+            checkers._run_email_check_menu,
+            "Enter the email to check: ",
+            "person@example.com",
+        ),
+        (
+            checkers._run_username_check_menu,
+            "Enter the username to check: ",
+            "private_user",
+        ),
+    ],
+)
+def test_sensitive_inputs_use_non_echoing_prompts(
+    monkeypatch, capsys, menu, prompt, value
+):
+    seen = []
+    monkeypatch.setattr(
+        checkers,
+        "getpass",
+        lambda actual_prompt: seen.append(actual_prompt) or value,
+    )
+    runner = Mock()
+
+    menu(runner)
+
+    assert seen == [prompt]
+    runner.assert_called_once_with(value)
+    assert value not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("menu", "value"),
+    [
+        (checkers._run_email_check_menu, "person@example.com"),
+        (checkers._run_username_check_menu, "private_user"),
+    ],
+)
+def test_sensitive_prompt_refuses_echoing_fallback(monkeypatch, capsys, menu, value):
+    input_calls = []
+
+    def insecure_getpass(_prompt):
+        warnings.warn("terminal echo is enabled", checkers.GetPassWarning)
+        return input("fallback: ")
+
+    def fallback_input(_prompt):
+        input_calls.append(True)
+        return value
+
+    monkeypatch.setattr(checkers, "getpass", insecure_getpass)
+    monkeypatch.setattr("builtins.input", fallback_input)
+    runner = Mock()
+
+    menu(runner)
+
+    output = capsys.readouterr().out
+    assert "Unable to securely read sensitive input" in output
+    assert value not in output
+    assert input_calls == []
+    runner.assert_not_called()
 
 
 def test_database_failure_after_execution_is_reported(initialized_db, monkeypatch, capsys):
@@ -208,6 +398,26 @@ def test_cli_reports_timeout_without_claiming_success(initialized_db, monkeypatc
     assert database.list_tool_results() == []
 
 
+def test_cli_can_start_another_run_after_timeout(initialized_db, monkeypatch, capsys):
+    monkeypatch.setattr(
+        main,
+        "run_maigret",
+        Mock(side_effect=[TimeoutError("Maigret exceeded its time limit"), "output"]),
+    )
+
+    main.run_maigret_check("user")
+    main.run_maigret_check("user")
+
+    assert capsys.readouterr().out == (
+        "Maigret timed out: Maigret exceeded its time limit\n"
+        "output\n"
+        "Maigret check saved to the database.\n"
+    )
+    assert database.query_database(
+        "SELECT status FROM ToolRuns ORDER BY runID"
+    ) == [("timed_out",), ("success",)]
+
+
 def test_maigret_menu_action_dispatches_username(monkeypatch):
     class FakeMenu:
         def __init__(self, options, title):
@@ -218,7 +428,7 @@ def test_maigret_menu_action_dispatches_username(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr("builtins.input", lambda prompt: " user ")
+    monkeypatch.setattr(checkers, "getpass", lambda prompt: " user ")
     monkeypatch.setattr(main, "run_maigret_check", runner)
     main.main_menu()
     runner.assert_called_once_with("user")
