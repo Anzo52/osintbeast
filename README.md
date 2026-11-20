@@ -141,6 +141,9 @@ Custom relative paths are resolved against the working directory at startup.
 Initialization errors are reported in the menu; check the path and permissions
 before retrying.
 
+For deployment, backups, upgrades, and schema-migration expectations, see the
+[operations guide](doc/OPERATIONS.md).
+
 ```bash
 # Linux/macOS, for example
 export OSINTBEAST_DB_PATH="$HOME/osintbeast.db"
@@ -232,7 +235,7 @@ shared application services rather than duplicating CLI behavior.
 
 - [ ] Complete and test MySQL schema and database support behind a storage interface.
 - [x] Add a first-party run integration for Sherlock; Sublist3r and Amass remain candidates, with documented inputs, outputs, and safety requirements.
-- [ ] Document deployment, backup, upgrade, and migration procedures.
+- [x] Document deployment, backup, upgrade, and migration procedures.
 
 ## License
 
