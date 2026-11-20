@@ -63,12 +63,14 @@ def execute_tool_run(
     tool_name: str,
     query_text: str,
     runner: Callable[[str], str],
+    run_id: int | None = None,
     *,
     sensitive_input: bool = False,
 ) -> tuple[str, str]:
     """Persist the run outcome; propagate persistence errors to the caller."""
     stored_query = "[redacted]" if sensitive_input else query_text
-    run_id = database.start_tool_run(tool_name, stored_query)
+    if run_id is None:
+        run_id = database.start_tool_run(tool_name, stored_query)
     if run_id is None:
         raise RuntimeError("Failed to start tool run.")
     try:
