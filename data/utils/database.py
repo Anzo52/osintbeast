@@ -159,6 +159,17 @@ def _validate_list_limit(limit: int) -> None:
         raise ValueError("limit must be between 1 and 500")
 
 
+def get_tool_run(run_id: int) -> Optional[tuple[Any, ...]]:
+    """Return a run and its persisted result or error, if it exists."""
+    with closing(connect_db()) as conn:
+        return conn.execute(
+            """SELECT runID, toolName, queryText, status, resultText, errorText,
+                      startedAt, finishedAt
+               FROM ToolRuns WHERE runID = ?""",
+            (run_id,),
+        ).fetchone()
+
+
 def start_tool_run(tool_name: str, query_text: str):
     """Create a running record before starting an external check."""
     with closing(connect_db()) as conn, conn:

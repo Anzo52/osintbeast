@@ -5,6 +5,7 @@ from unittest.mock import Mock
 
 import pytest
 
+import checkers
 import data.utils.database as database
 import main
 import menu_utils
@@ -154,7 +155,7 @@ def test_helix_menu_action_dispatches_username(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr("builtins.input", lambda prompt: " @user ")
+    monkeypatch.setattr(checkers, "getpass", lambda prompt: " @user ")
     monkeypatch.setattr(main, "run_helix_check", runner)
 
     main.main_menu()
@@ -172,7 +173,7 @@ def test_holehe_menu_action_dispatches_email(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr("builtins.input", lambda prompt: " person@example.com ")
+    monkeypatch.setattr(checkers, "getpass", lambda prompt: " person@example.com ")
     monkeypatch.setattr(main, "run_holehe_check", runner)
 
     main.main_menu()
@@ -190,7 +191,7 @@ def test_sherlock_menu_action_dispatches_username(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr("builtins.input", lambda prompt: " user ")
+    monkeypatch.setattr(checkers, "getpass", lambda prompt: " user ")
     monkeypatch.setattr(main, "run_sherlock_check", runner)
 
     main.main_menu()

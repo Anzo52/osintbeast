@@ -95,7 +95,9 @@ def _run_check(tool_name, query_text, validator, runner):
         print(f"Input error: {exc}")
         return
     try:
-        status, value = execute_tool_run(tool_name, query_text, runner)
+        status, value = execute_tool_run(
+            tool_name, query_text, runner, sensitive_input=True
+        )
     except sqlite3.Error as exc:
         print(f"Could not record {tool_name} run: {exc}. Initialize the database and check its permissions.")
         return
