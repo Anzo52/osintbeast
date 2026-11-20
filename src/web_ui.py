@@ -13,7 +13,7 @@ from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username
 from sherlock_integration import run_sherlock, validate_username as validate_sherlock_username
 from tool_registry import get_tool_metadata
-from tool_runs import execute_tool_run
+from tool_runs import REDACTED, execute_tool_run
 
 RUNNABLE_TOOLS = {
     "holehe": ("email", validate_email, lambda value: run_holehe(value)["output"]),
@@ -163,13 +163,15 @@ INDEX_HTML = """<!doctype html>
 
 def _run_in_background(run_id, tool_name, query_text, runner):
     try:
-        execute_tool_run(tool_name, query_text, runner, run_id=run_id)
-    except Exception as exc:
+        execute_tool_run(
+            tool_name, query_text, runner, run_id=run_id, sensitive_input=True
+        )
+    except Exception:
         try:
             database.finish_tool_run(
                 run_id,
                 "failed",
-                error_text=str(exc) or "The tool run could not be completed.",
+                error_text=REDACTED,
             )
         except (sqlite3.Error, ValueError):
             pass
@@ -331,7 +333,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 return
             input_kind, validator, runner = tool
             query_text = validator(payload.get("input"))
-            run_id = database.start_tool_run(tool_name, query_text)
+            run_id = database.start_tool_run(tool_name, REDACTED)
             thread = threading.Thread(
                 target=_run_in_background,
                 args=(run_id, tool_name, query_text, runner),
@@ -350,7 +352,7 @@ class WebHandler(BaseHTTPRequestHandler):
             self._send_json(202, {
                 "id": run_id,
                 "tool": tool_name,
-                "input": query_text,
+                "input": REDACTED,
                 "input_kind": input_kind,
                 "status": "running",
             })

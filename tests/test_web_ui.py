@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import data.utils.database as database
 import web_ui
 from sherlock_integration import validate_username
+from tool_runs import REDACTED
 
 
 def _request(url, payload=None, headers=None):
@@ -68,7 +69,7 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
         )
         assert status == 202
         assert launched["status"] == "running"
-        assert launched["input"] == "alice"
+        assert launched["input"] == REDACTED
 
         assert runner_started.wait(1)
         status, running = _request(f"{base_url}/api/runs/{launched['id']}")
@@ -85,10 +86,10 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
 
         assert status == 200
         assert detail["status"] == "success"
-        assert detail["result"] == f"alice: {output}"
+        assert detail["result"] == REDACTED
         assert database.query_database(
             "SELECT toolName, queryText, resultText FROM ToolResults"
-        ) == [("sherlock", "alice", f"alice: {output}")]
+        ) == [("sherlock", REDACTED, REDACTED)]
 
         status, recent = _request(f"{base_url}/api/runs?limit=1")
         assert status == 200
@@ -182,7 +183,7 @@ def test_terminal_tool_error_is_available_for_review(tmp_path, monkeypatch):
 
         assert status == 200
         assert detail["status"] == "failed"
-        assert detail["error"] == "dependency missing"
+        assert detail["error"] == REDACTED
         assert detail["result"] is None
     finally:
         server.shutdown()

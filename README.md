@@ -110,16 +110,18 @@ site failures appear as `Unknown` results; a successful run means the search
 completed, not that every site was reachable or every match is confirmed.
 
 The CLI validates input before recording a run. Valid attempts are stored in
-`ToolRuns` with the tool, input, status (`running`, `success`, `failed`, or
-`timed_out`), UTC start and finish timestamps, and either output or an error.
+`ToolRuns` with the tool, status (`running`, `success`, `failed`, or
+`timed_out`), and UTC start and finish timestamps. Integrated tool inputs,
+outputs, and errors are recorded as `[redacted]`; the CLI displays the actual
+output or error during the run.
 A `running` record can remain after interruption or a database-write failure.
-Successful outputs are also saved to the existing `ToolResults` table.
+Successful runs are also saved to the existing `ToolResults` table.
 Existing `ToolResults` rows are preserved but do not gain historical run
 statuses. Use **Query Database** to inspect either table.
 
-Inputs, results, and errors can contain sensitive data. They are stored in
-plain text in the local database; restrict its permissions and delete records
-when no longer needed. Searches send the supplied input to third-party sites.
+Older records and other database entries may contain sensitive data in plain
+text; restrict database permissions and delete records when no longer needed.
+Searches send the supplied input to third-party sites.
 
 ### Database initialization
 
@@ -179,8 +181,9 @@ Open `http://127.0.0.1:8000`. The interface initializes the local database and
 supports authorized runs with Holehe, Maigret, Helix, and Sherlock; tools in the
 registry without a runnable integration are not offered. Confirm authorization
 before each run. Runs execute through the existing validators, integrations,
-and persistence service, and their status and saved output are available in
-the recent-runs view. Keep the interface bound to loopback: it has no login or
+and persistence service. The recent-runs view shows status but redacts inputs,
+results, and errors, so actual output is not available there. Keep the interface
+bound to loopback: it has no login or
 remote-access authentication, and its database and results may contain
 sensitive information.
 
