@@ -2,6 +2,8 @@ import asyncio
 import json
 import re
 
+from tool_runs import redact_sensitive_data
+
 HELIX_TIMEOUT_SECONDS = 300
 HELIX_REPORT_SCHEMA = "helix.scan.v1"
 
@@ -44,6 +46,8 @@ def run_helix(username: str) -> str:
     if not isinstance(report, dict) or report.get("schema") != HELIX_REPORT_SCHEMA:
         raise RuntimeError("Helix returned an invalid or unsupported report.")
     try:
-        return json.dumps(report, ensure_ascii=False, indent=2)
+        return json.dumps(
+            redact_sensitive_data(report, username), ensure_ascii=False, indent=2
+        )
     except (TypeError, ValueError) as exc:
         raise RuntimeError("Helix returned a report that could not be serialized.") from exc
