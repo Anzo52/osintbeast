@@ -201,3 +201,29 @@ def finish_tool_run(
                    SELECT toolName, queryText, resultText FROM ToolRuns WHERE runID = ?""",
                 (run_id,),
             )
+
+
+def get_tool_run(run_id: int) -> Optional[dict[str, Any]]:
+    """Return non-sensitive status fields for one run."""
+    with closing(connect_db()) as conn:
+        row = conn.execute(
+            """SELECT runID, toolName, status, startedAt, finishedAt
+               FROM ToolRuns WHERE runID = ?""",
+            (run_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return dict(zip(("run_id", "tool", "status", "started_at", "finished_at"), row))
+
+
+def get_tool_result(result_id: int) -> Optional[dict[str, Any]]:
+    """Return one saved result without exposing its original query text."""
+    with closing(connect_db()) as conn:
+        row = conn.execute(
+            """SELECT resultID, toolName, resultText, createdAt
+               FROM ToolResults WHERE resultID = ?""",
+            (result_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return dict(zip(("result_id", "tool", "result", "created_at"), row))
