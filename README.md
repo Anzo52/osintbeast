@@ -93,10 +93,10 @@ python -m pip install -e ".[sherlock]"
 Select **Run Holehe Check**, **Run Maigret Check**, **Run Helix Check**, or
 **Run Sherlock Check** in the menu. Sherlock uses its bundled site list and
 skips sites marked NSFW. It sends a username to many public sites; each request
-has a 15-second timeout, so a full search may take longer. Use it only for
-authorized targets. Helix uses its built-in site list through the in-process
-API; the broader optional source collections are not enabled by this menu
-integration. Helix accepts up to
+has a 15-second timeout, and the full scan has a 300-second overall timeout.
+Use it only for authorized targets. Helix uses its built-in site list through
+the in-process API; the broader optional source collections are not enabled by
+this menu integration. Helix accepts up to
 50 ASCII letters, digits, dots, underscores, and hyphens (with an optional leading `@`).
 The scan has a 300-second overall timeout.
 Maigret accepts

@@ -386,6 +386,26 @@ def test_cli_reports_timeout_without_claiming_success(initialized_db, monkeypatc
     assert database.list_tool_results() == []
 
 
+def test_cli_can_start_another_run_after_timeout(initialized_db, monkeypatch, capsys):
+    monkeypatch.setattr(
+        main,
+        "run_maigret",
+        Mock(side_effect=[TimeoutError("Maigret exceeded its time limit"), "output"]),
+    )
+
+    main.run_maigret_check("user")
+    main.run_maigret_check("user")
+
+    assert capsys.readouterr().out == (
+        "Maigret timed out: Maigret exceeded its time limit\n"
+        "output\n"
+        "Maigret check saved to the database.\n"
+    )
+    assert database.query_database(
+        "SELECT status FROM ToolRuns ORDER BY runID"
+    ) == [("timed_out",), ("success",)]
+
+
 def test_maigret_menu_action_dispatches_username(monkeypatch):
     class FakeMenu:
         def __init__(self, options, title):
