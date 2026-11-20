@@ -1,4 +1,3 @@
-import sqlite3
 import subprocess
 import zipfile
 import zlib
@@ -6,6 +5,7 @@ import zlib
 from simple_term_menu import TerminalMenu
 
 from checkers import _run_email_check_menu, _run_username_check_menu
+import data.utils.database as database
 from data.utils.init_db import init_db
 from menu_utils import _choose_option, _download_tool_menu, _install_tool_menu
 from data.utils.database import query_database
@@ -96,7 +96,7 @@ def _run_check(tool_name, query_text, validator, runner):
         return
     try:
         status, value = execute_tool_run(tool_name, query_text, runner)
-    except sqlite3.Error as exc:
+    except database.DATABASE_ERRORS as exc:
         print(f"Could not record {tool_name} run: {exc}. Initialize the database and check its permissions.")
         return
     if status == "success":
@@ -127,7 +127,7 @@ def run_sherlock_check(username):
 def query(query_text):
     try:
         result = query_database(query_text)
-    except sqlite3.Error as exc:
+    except database.DATABASE_ERRORS as exc:
         print(f"Database query failed: {exc}")
         return
     print(f"Query result: {result}")
