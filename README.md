@@ -164,6 +164,15 @@ tests are skipped.
 GitHub Actions runs the test suite and Ruff checks on Python 3.10–3.13 for pushes and pull requests.
 It also installs the Maigret extra so its offline API-contract tests run.
 
+## Web API
+
+The optional web API requires an `OSINTBEAST_API_TOKEN`; it rejects all API
+requests when no token is configured. Start it locally with
+`OSINTBEAST_API_TOKEN=<token> python -m flask --app web:create_app run`.
+Authenticated clients can launch a run with `POST /api/runs` and retrieve
+status and saved output from `GET /api/runs/<run_id>` and
+`GET /api/results/<result_id>`. Requests use a `Bearer` authorization token.
+
 ## Responsible use and privacy
 
 Use OSINT Beast only with data and targets you are authorized to assess, and follow applicable laws, provider terms, and organizational policies. Tool output may contain personal or sensitive information. Protect the local database, restrict access to it, and remove data when it is no longer needed. Validate inputs and avoid exposing sensitive values in logs, process arguments, or shared environments.
