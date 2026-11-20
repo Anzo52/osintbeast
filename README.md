@@ -117,9 +117,11 @@ Successful outputs are also saved to the existing `ToolResults` table.
 Existing `ToolResults` rows are preserved but do not gain historical run
 statuses. Use **Query Database** to inspect either table.
 
-Inputs, results, and errors can contain sensitive data. They are stored in
-plain text in the local database; restrict its permissions and delete records
-when no longer needed. Searches send the supplied input to third-party sites.
+Sensitive inputs are stored as `[redacted]`; complete occurrences of the input
+are also redacted from result text and errors, while unrelated substrings and
+JSON keys or numeric fields are preserved. Restrict access to the local
+database and delete records when no longer needed. Searches send the supplied
+input to third-party sites.
 
 ### Database initialization
 

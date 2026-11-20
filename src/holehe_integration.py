@@ -3,6 +3,7 @@ import re
 import sqlite3
 
 import data.utils.database as database
+from tool_runs import _redact_sensitive_value
 
 HOLEHE_TIMEOUT_SECONDS = 300
 
@@ -92,6 +93,7 @@ def run_holehe(email: str):
 
 
 def save_tool_result(tool_name: str, query_text: str, result_text: str):
+    result_text = _redact_sensitive_value(result_text, query_text)
     conn = sqlite3.connect(database.DB_FILE)
     try:
         conn.execute(
@@ -105,7 +107,7 @@ def save_tool_result(tool_name: str, query_text: str, result_text: str):
         )
         conn.execute(
             "INSERT INTO ToolResults (toolName, queryText, resultText) VALUES (?, ?, ?)",
-            (tool_name, query_text, result_text),
+            (tool_name, "[redacted]", result_text),
         )
         conn.commit()
     finally:
