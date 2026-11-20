@@ -153,6 +153,18 @@ def start_tool_run(tool_name: str, query_text: str):
         return cursor.lastrowid
 
 
+def get_tool_run(run_id: int) -> Optional[dict[str, Any]]:
+    """Return one run by ID, or None if it does not exist."""
+    with closing(connect_db()) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            """SELECT runID, toolName, queryText, status, resultText, errorText,
+                      startedAt, finishedAt FROM ToolRuns WHERE runID = ?""",
+            (run_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+
 def finish_tool_run(
     run_id: int, status: str, result_text: Optional[str] = None,
     error_text: Optional[str] = None,
