@@ -76,11 +76,16 @@ def _stop_worker(worker):
         worker.join()
 
 
-def run_sherlock(username: str) -> str:
+def run_sherlock(username: str, *, process_context=None, worker_target=None) -> str:
     username = validate_username(username)
-    receiver, sender = multiprocessing.Pipe(duplex=False)
-    worker = multiprocessing.Process(
-        target=_search_worker,
+    context = (
+        process_context
+        if process_context is not None
+        else multiprocessing.get_context()
+    )
+    receiver, sender = context.Pipe(duplex=False)
+    worker = context.Process(
+        target=worker_target if worker_target is not None else _search_worker,
         args=(username, sender),
         daemon=True,
     )
