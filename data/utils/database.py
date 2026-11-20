@@ -143,6 +143,29 @@ def list_tool_results(limit: int = 100) -> list[tuple[Any, ...]]:
         ).fetchall()
 
 
+def list_tool_runs(limit: int = 100) -> list[tuple[Any, ...]]:
+    """Return recent tool runs, newest first, with a bounded page size."""
+    if not 1 <= limit <= 500:
+        raise ValueError("limit must be between 1 and 500")
+    with closing(connect_db()) as conn:
+        return conn.execute(
+            """SELECT runID, toolName, queryText, status, startedAt, finishedAt
+               FROM ToolRuns ORDER BY runID DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+
+
+def get_tool_run(run_id: int) -> Optional[tuple[Any, ...]]:
+    """Return a run and its persisted result or error, if it exists."""
+    with closing(connect_db()) as conn:
+        return conn.execute(
+            """SELECT runID, toolName, queryText, status, resultText, errorText,
+                      startedAt, finishedAt
+               FROM ToolRuns WHERE runID = ?""",
+            (run_id,),
+        ).fetchone()
+
+
 def start_tool_run(tool_name: str, query_text: str):
     """Create a running record before starting an external check."""
     with closing(connect_db()) as conn, conn:

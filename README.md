@@ -145,6 +145,9 @@ Custom relative paths are resolved against the working directory at startup.
 Initialization errors are reported in the menu; check the path and permissions
 before retrying.
 
+For deployment, backups, upgrades, and schema-migration expectations, see the
+[operations guide](doc/OPERATIONS.md).
+
 ```bash
 # Linux/macOS, for example
 export OSINTBEAST_DB_PATH="$HOME/osintbeast.db"
@@ -167,6 +170,23 @@ tests are skipped.
 
 GitHub Actions runs the test suite and Ruff checks on Python 3.10–3.13 for pushes and pull requests.
 It also installs the Maigret extra so its offline API-contract tests run.
+
+## Browser interface
+
+Start the local browser interface with:
+
+```bash
+python -m web_ui
+```
+
+Open `http://127.0.0.1:8000`. The interface initializes the local database and
+supports authorized runs with Holehe, Maigret, Helix, and Sherlock; tools in the
+registry without a runnable integration are not offered. Confirm authorization
+before each run. Runs execute through the existing validators, integrations,
+and persistence service, and their status and saved output are available in
+the recent-runs view. Keep the interface bound to loopback: it has no login or
+remote-access authentication, and its database and results may contain
+sensitive information.
 
 ## Responsible use and privacy
 
@@ -236,7 +256,7 @@ shared application services rather than duplicating CLI behavior.
 
 - [ ] Complete and test MySQL schema and database support behind a storage interface.
 - [x] Add a first-party run integration for Sherlock; Sublist3r and Amass remain candidates, with documented inputs, outputs, and safety requirements.
-- [ ] Document deployment, backup, upgrade, and migration procedures.
+- [x] Document deployment, backup, upgrade, and migration procedures.
 
 ## License
 

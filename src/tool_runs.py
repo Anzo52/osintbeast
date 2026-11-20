@@ -4,10 +4,14 @@ import data.utils.database as database
 
 
 def execute_tool_run(
-    tool_name: str, query_text: str, runner: Callable[[str], str]
+    tool_name: str,
+    query_text: str,
+    runner: Callable[[str], str],
+    run_id: int | None = None,
 ) -> tuple[str, str]:
     """Persist the run outcome; propagate persistence errors to the caller."""
-    run_id = database.start_tool_run(tool_name, query_text)
+    if run_id is None:
+        run_id = database.start_tool_run(tool_name, query_text)
     if run_id is None:
         raise RuntimeError("Failed to start tool run.")
     try:
