@@ -1,8 +1,8 @@
+import os
 import sqlite3
 import subprocess
 import zipfile
 import zlib
-from pathlib import Path
 
 from simple_term_menu import TerminalMenu
 
@@ -222,7 +222,12 @@ def export_selected_runs():
     ).strip().casefold() in {"y", "yes"}
     try:
         content = export_tool_runs_json(run_ids, include_sensitive=include_sensitive)
-        with Path(output_path).open("x", encoding="utf-8") as export_file:
+        with open(
+            output_path,
+            "x",
+            encoding="utf-8",
+            opener=lambda path, flags: os.open(path, flags, 0o600),
+        ) as export_file:
             export_file.write(content + "\n")
     except (OSError, ValueError, sqlite3.Error) as exc:
         print(f"Could not export runs: {exc}")
@@ -260,7 +265,7 @@ def run_history_menu():
             offset = 0
             try:
                 list_tool_runs(tool_name=tool_name, status=status)
-            except ValueError as exc:
+            except (ValueError, sqlite3.Error) as exc:
                 print(f"Invalid history filter: {exc}")
                 tool_name = status = None
             show_run_history(tool_name, status, offset)

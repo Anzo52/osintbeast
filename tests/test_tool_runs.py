@@ -218,7 +218,38 @@ def test_export_selected_runs_creates_json_with_explicit_sensitive_opt_in(
     exported = json.loads(output_path.read_text(encoding="utf-8"))
     assert exported[0]["input"] == "person@example.com"
     assert exported[0]["result"] == result
+    assert output_path.stat().st_mode & 0o077 == 0
     assert f"Exported 1 run(s) to {output_path}." in capsys.readouterr().out
+
+    original_content = output_path.read_bytes()
+    answers = iter([str(run_id), str(output_path), "yes"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    main.export_selected_runs()
+
+    assert output_path.read_bytes() == original_content
+    assert "Could not export runs:" in capsys.readouterr().out
+
+
+def test_history_menu_filter_handles_sqlite_errors(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "missing.db"))
+    choices = iter([1, 6])
+    answers = iter(["holehe", "success"])
+
+    class FakeMenu:
+        def __init__(self, options, title):
+            assert title == "Run History"
+
+        def show(self):
+            return next(choices)
+
+    monkeypatch.setattr("menu_utils.TerminalMenu", FakeMenu)
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+
+    main.run_history_menu()
+
+    output = capsys.readouterr().out
+    assert "Invalid history filter: no such table: ToolRuns" in output
+    assert output.count("Run history query failed: no such table: ToolRuns") == 2
 
 
 @pytest.mark.parametrize(
