@@ -86,6 +86,16 @@ def test_failure_and_timeout_are_recorded(client, monkeypatch, error, status):
     assert saved["error"] == str(error)
 
 
+def test_unexpected_runner_failure_is_recorded_without_leaking_details(client, monkeypatch):
+    monkeypatch.setattr(api.maigret_integration, "run_maigret", Mock(side_effect=TypeError("private")))
+    response = client("POST", "/runs", {"tool": "maigret", "query": "user", "authorized": True})
+    assert response["status"] == 201
+    saved = client("GET", response["headers"]["Location"])["body"]
+    assert saved["status"] == "failed"
+    assert saved["error"] == "maigret failed unexpectedly."
+    assert saved["result"] is None
+
+
 @pytest.mark.parametrize(
     ("body", "status", "code"),
     [
@@ -132,8 +142,28 @@ def test_request_protocol_errors_and_missing_run(client):
     assert client("POST", "/runs", CONTENT_LENGTH="4097")["status"] == 413
     assert client("POST", "/runs", CONTENT_LENGTH="2")["body"]["error"]["code"] == "invalid_json"
     assert client("POST", "/runs", **{"wsgi.input": io.BytesIO(b"{"), "CONTENT_LENGTH": "1"})["status"] == 400
+    nested = b"[" * 1500 + b"]" * 1500
+    response = client("POST", "/runs", **{"wsgi.input": io.BytesIO(nested), "CONTENT_LENGTH": str(len(nested))})
+    assert response["body"]["error"]["code"] in {"invalid_json", "invalid_request"}
     for path in ["/runs/1", "/runs/0", "/runs/-1", "/runs/9223372036854775808", "/runs/1/../../"]:
         assert client("GET", path)["status"] == 404
+
+
+def test_json_recursion_error_is_reported_as_invalid_json(monkeypatch):
+    def fail(_):
+        raise RecursionError()
+
+    monkeypatch.setattr(api.json, "loads", fail)
+    app = api.create_app("test-token")
+    response = {}
+    environ = {
+        "REQUEST_METHOD": "POST", "PATH_INFO": "/runs",
+        "CONTENT_TYPE": "application/json", "CONTENT_LENGTH": "2",
+        "HTTP_AUTHORIZATION": "Bearer " + "test-token", "wsgi.input": io.BytesIO(b"{}"),
+    }
+    body = b"".join(app(environ, lambda status, headers: response.update(status=status)))
+    assert response["status"].startswith("400")
+    assert b'"invalid_json"' in body
 
 
 def test_storage_errors_are_consistent_and_redacted(client, monkeypatch):
@@ -146,3 +176,11 @@ def test_storage_errors_are_consistent_and_redacted(client, monkeypatch):
     response = client("GET", "/runs/1")
     assert response["status"] == 500
     assert "private path" not in str(response["body"])
+
+
+def test_unexpected_service_errors_are_redacted(client, monkeypatch):
+    monkeypatch.setattr(api.tool_runs, "execute_tool_run_with_id", Mock(side_effect=TypeError("private")))
+    response = client("POST", "/runs", {"tool": "maigret", "query": "user", "authorized": True})
+    assert response["status"] == 500
+    assert response["body"]["error"]["code"] == "internal_error"
+    assert "private" not in str(response["body"])

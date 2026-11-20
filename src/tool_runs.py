@@ -28,5 +28,9 @@ def execute_tool_run_with_id(
         message = str(exc) or f"{tool_name} failed ({type(exc).__name__})."
         database.finish_tool_run(run_id, "failed", error_text=message)
         return run_id, "failed", message
+    except Exception:
+        message = f"{tool_name} failed unexpectedly."
+        database.finish_tool_run(run_id, "failed", error_text=message)
+        return run_id, "failed", message
     database.finish_tool_run(run_id, "success", result_text=output)
     return run_id, "success", output

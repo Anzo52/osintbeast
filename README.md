@@ -9,6 +9,7 @@ OSINT Beast is a Python command-line framework for organizing authorized open-so
 - Initialize a local SQLite database for OSINT records and tool metadata.
 - Run Holehe email checks and optional Maigret, Helix OSINT, and Sherlock username checks, with recorded outcomes.
 - Query stored database records from the CLI.
+- Launch authorized checks and retrieve their status and results through a local API.
 
 ### Integrated tools
 
@@ -146,6 +147,79 @@ before retrying.
 export OSINTBEAST_DB_PATH="$HOME/osintbeast.db"
 # Windows PowerShell: $env:OSINTBEAST_DB_PATH = "$HOME\osintbeast.db"
 ```
+
+## Local API
+
+Install the package with `python -m pip install -e .` and any desired tool
+extras as described above. Set a strong, secret `OSINTBEAST_API_TOKEN` (for example, generate one with
+`python -c "import secrets; print(secrets.token_urlsafe(32))"`), then run:
+
+```bash
+python -m api
+```
+
+The server initializes the SQLite schema and listens on `127.0.0.1:8000`.
+It is a minimal local, single-operator server, not a production internet-facing
+deployment. Every request must include an `Authorization` header using the
+`Bearer` scheme and the configured token. Anyone with the token can
+start runs and read **all** stored runs, including those
+created by the CLI. Keep the token and database private. Do not expose this
+server directly to an untrusted network; a deployment needs HTTPS, access
+controls, resource limits, and an appropriate production WSGI server.
+The WSGI application factory is `api.create_app(token)`.
+
+All responses are JSON with `Cache-Control: no-store`. The API does not expose
+SQL, command execution, installation, or configurable tool options.
+
+### `POST /runs`
+
+Send `Content-Type: application/json` with a body of at most 4096 bytes:
+
+```json
+{"tool": "maigret", "query": "example_user", "authorized": true}
+```
+
+`authorized` must be the JSON boolean `true`, confirming that the caller is
+authorized to assess the target. `tool` must be one of `holehe`, `maigret`,
+`helix`, or `sherlock` (case and surrounding whitespace are normalized).
+`query` is an email for Holehe or a username for the other tools, validated
+and normalized by the same integration as the CLI. No additional fields or
+options are accepted. Optional integrations must be installed separately.
+
+Execution is **synchronous**: the request waits for the tool and persistence
+to finish. The bundled single-threaded server cannot handle other requests
+while a scan is running. On a recorded outcome, including a tool failure or timeout, it
+returns `201 Created`, `Location: /runs/<run_id>`, and, for example:
+
+```json
+{"run_id": 1, "status": "success"}
+```
+
+Statuses are `running`, `success`, `failed`, or `timed_out`. Interruption or a
+storage failure can leave a `running` record; a storage error does not imply
+that a scan did not run. Clients should not automatically retry such requests.
+
+### `GET /runs/<run_id>`
+
+The positive integer ID identifies the same persisted run returned by POST.
+Example `200 OK` response:
+
+```json
+{"run_id": 1, "tool": "maigret", "query": "example_user",
+ "status": "success", "result": "tool output", "error": null,
+ "started_at": "2026-01-01 12:00:00", "finished_at": "2026-01-01 12:01:00"}
+```
+
+Timestamps are UTC. `result` is a string on success and otherwise null;
+`error` is a string for failed or timed-out runs and otherwise null.
+`finished_at` is null while running. Outputs and errors may contain sensitive
+data, as can the query itself.
+
+Errors use `{"error": {"code": "...", "message": "..."}}`: `400` for invalid
+requests, JSON, tools, or queries; `401` for a missing or invalid token; `403`
+when authorization is not confirmed; `404` for an unknown endpoint or run;
+`413` for an oversized body; `415` for an unsupported content type; and `500`
+for storage or unexpected internal failures. Validation errors do not create a run.
 
 ## Development and tests
 

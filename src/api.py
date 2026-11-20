@@ -78,7 +78,7 @@ def create_app(token):
                 if len(body) != length:
                     raise ValueError("Incomplete body")
                 request = json.loads(body.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError):
+            except (UnicodeDecodeError, ValueError, RecursionError):
                 return _error(start_response, "400 Bad Request", "invalid_json",
                               "Request body must be valid JSON.")
             if not isinstance(request, dict) or set(request) != {"tool", "query", "authorized"}:
@@ -103,6 +103,9 @@ def create_app(token):
             except (sqlite3.Error, RuntimeError):
                 return _error(start_response, "500 Internal Server Error", "storage_error",
                               "Could not record the run.")
+            except Exception:
+                return _error(start_response, "500 Internal Server Error", "internal_error",
+                              "Could not complete the request.")
             return _response(start_response, "201 Created", {"run_id": run_id, "status": status},
                              [("Location", f"/runs/{run_id}")])
 
@@ -116,6 +119,9 @@ def create_app(token):
             except sqlite3.Error:
                 return _error(start_response, "500 Internal Server Error", "storage_error",
                               "Could not retrieve the run.")
+            except Exception:
+                return _error(start_response, "500 Internal Server Error", "internal_error",
+                              "Could not complete the request.")
             if row is None:
                 return _error(start_response, "404 Not Found", "not_found", "Run not found.")
             keys = ("run_id", "tool", "query", "status", "result", "error", "started_at", "finished_at")
