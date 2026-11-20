@@ -132,15 +132,42 @@ def save_tool_result(
 
 
 def list_tool_results(limit: int = 100) -> list[tuple[Any, ...]]:
-    """Return recent tool runs, newest first, with a bounded page size."""
-    if not 1 <= limit <= 500:
-        raise ValueError("limit must be between 1 and 500")
+    """Return saved tool results, newest first, with a bounded page size."""
+    _validate_list_limit(limit)
     with closing(connect_db()) as conn:
         return conn.execute(
             """SELECT resultID, toolName, queryText, resultText, createdAt
                FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
             (limit,),
         ).fetchall()
+
+
+def list_tool_runs(limit: int = 100) -> list[tuple[Any, ...]]:
+    """Return recent tool runs, newest first, with a bounded page size."""
+    _validate_list_limit(limit)
+    with closing(connect_db()) as conn:
+        return conn.execute(
+            """SELECT runID, toolName, queryText, status, startedAt, finishedAt,
+                      errorText
+               FROM ToolRuns ORDER BY runID DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+
+
+def _validate_list_limit(limit: int) -> None:
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
+        raise ValueError("limit must be between 1 and 500")
+
+
+def get_tool_run(run_id: int) -> Optional[tuple[Any, ...]]:
+    """Return a run and its persisted result or error, if it exists."""
+    with closing(connect_db()) as conn:
+        return conn.execute(
+            """SELECT runID, toolName, queryText, status, resultText, errorText,
+                      startedAt, finishedAt
+               FROM ToolRuns WHERE runID = ?""",
+            (run_id,),
+        ).fetchone()
 
 
 def start_tool_run(tool_name: str, query_text: str):
@@ -151,18 +178,6 @@ def start_tool_run(tool_name: str, query_text: str):
             (tool_name, query_text),
         )
         return cursor.lastrowid
-
-
-def get_tool_run(run_id: int) -> Optional[dict[str, Any]]:
-    """Return one run by ID, or None if it does not exist."""
-    with closing(connect_db()) as conn:
-        conn.row_factory = sqlite3.Row
-        row = conn.execute(
-            """SELECT runID, toolName, queryText, status, resultText, errorText,
-                      startedAt, finishedAt FROM ToolRuns WHERE runID = ?""",
-            (run_id,),
-        ).fetchone()
-        return dict(row) if row is not None else None
 
 
 def finish_tool_run(

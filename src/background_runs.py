@@ -133,7 +133,14 @@ class BackgroundRuns:
                 except Exception as exc:
                     raise RuntimeError("Could not persist background run outcome.") from exc
                 del self._pending[run_id]
-        return database.get_tool_run(run_id)
+        row = database.get_tool_run(run_id)
+        if row is None:
+            return None
+        return dict(zip(
+            ("runID", "toolName", "queryText", "status", "resultText", "errorText",
+             "startedAt", "finishedAt"),
+            row,
+        ))
 
     def cancel(self, run_id: int) -> bool:
         with self._lock:
