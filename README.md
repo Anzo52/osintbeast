@@ -206,6 +206,7 @@ shared application services rather than duplicating CLI behavior.
 - [ ] Prefer supported in-process integrations or private input mechanisms for sensitive values.
 - [ ] Ensure long-running operations time out gracefully and return control to the CLI.
 - [ ] Standardize run status, timestamps, errors, and result persistence.
+- [ ] Parse tool output into normalized findings while preserving raw output and reporting malformed or unsupported formats explicitly.
 - [ ] Document retention, local database permissions, and sensitive-output handling.
 - [ ] Keep downloads and installation constrained to reviewed registry entries and safe paths.
 
