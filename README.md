@@ -120,6 +120,9 @@ statuses. Use **Query Database** to inspect either table.
 Inputs, results, and errors can contain sensitive data. They are stored in
 plain text in the local database; restrict its permissions and delete records
 when no longer needed. Searches send the supplied input to third-party sites.
+See the [local data retention and privacy guide](doc/data-retention-and-privacy.md)
+for exactly what is retained, how to restrict database and backup access, and
+safe practices for viewing, removing, and sharing sensitive output.
 
 ### Database initialization
 
@@ -164,9 +167,14 @@ tests are skipped.
 GitHub Actions runs the test suite and Ruff checks on Python 3.10–3.13 for pushes and pull requests.
 It also installs the Maigret extra so its offline API-contract tests run.
 
-## Responsible use and privacy
+## Responsible use
 
-Use OSINT Beast only with data and targets you are authorized to assess, and follow applicable laws, provider terms, and organizational policies. Tool output may contain personal or sensitive information. Protect the local database, restrict access to it, and remove data when it is no longer needed. Validate inputs and avoid exposing sensitive values in logs, process arguments, or shared environments.
+Use OSINT Beast only with data and targets you are authorized to assess, and
+follow applicable laws, provider terms, and organizational policies. Tool
+output may contain personal or sensitive information; follow the
+[local data retention and privacy guide](doc/data-retention-and-privacy.md).
+Validate inputs and avoid exposing sensitive values in logs, process
+arguments, or shared environments.
 
 ## Project layout
 
