@@ -40,14 +40,16 @@ BEGIN;
 DELETE FROM ToolRuns;
 DELETE FROM ToolResults;
 COMMIT;
+VACUUM;
 ```
 
-These statements clear only run history and tool results, not other structured
-records. SQL deletion is not secure erasure: sensitive values may remain
-recoverable in unused database pages. After committing, `VACUUM;` can rebuild
-the live database to remove deleted content; this does not securely erase
-storage, sidecar files, snapshots, or backups. Continue protecting the database
-and its copies after cleanup.
+These statements logically clear only run history and tool results, not other
+structured records. `COMMIT;` makes the deletions permanent; it is not secure
+erasure. With SQLite's `secure_delete` setting off, sensitive values may remain
+recoverable in unused database pages. The following `VACUUM;` rebuilds the live
+database after the commit to remove deleted content, but it does not securely
+erase storage, sidecar files, snapshots, or backups. Continue protecting the
+database and its copies after cleanup.
 
 To remove all local data in this database, close the application and
 delete the database file and any associated `-wal`, `-shm`, or `-journal`
