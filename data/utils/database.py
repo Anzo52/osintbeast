@@ -132,9 +132,8 @@ def save_tool_result(
 
 
 def list_tool_results(limit: int = 100) -> list[tuple[Any, ...]]:
-    """Return recent tool runs, newest first, with a bounded page size."""
-    if not 1 <= limit <= 500:
-        raise ValueError("limit must be between 1 and 500")
+    """Return saved tool results, newest first, with a bounded page size."""
+    _validate_list_limit(limit)
     with closing(connect_db()) as conn:
         return conn.execute(
             """SELECT resultID, toolName, queryText, resultText, createdAt
@@ -145,14 +144,19 @@ def list_tool_results(limit: int = 100) -> list[tuple[Any, ...]]:
 
 def list_tool_runs(limit: int = 100) -> list[tuple[Any, ...]]:
     """Return recent tool runs, newest first, with a bounded page size."""
-    if not 1 <= limit <= 500:
-        raise ValueError("limit must be between 1 and 500")
+    _validate_list_limit(limit)
     with closing(connect_db()) as conn:
         return conn.execute(
-            """SELECT runID, toolName, queryText, status, startedAt, finishedAt
+            """SELECT runID, toolName, queryText, status, startedAt, finishedAt,
+                      errorText
                FROM ToolRuns ORDER BY runID DESC LIMIT ?""",
             (limit,),
         ).fetchall()
+
+
+def _validate_list_limit(limit: int) -> None:
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
+        raise ValueError("limit must be between 1 and 500")
 
 
 def get_tool_run(run_id: int) -> Optional[tuple[Any, ...]]:

@@ -88,23 +88,11 @@ def test_install_reports_errors(monkeypatch, capsys, error):
     assert capsys.readouterr().out == f"Installation failed: {error}\n"
 
 
-def test_query_reports_sqlite_error(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "test.db"))
-    database.setup_database()
-
-    main.query("SELECT * FROM missing_table")
-
-    assert capsys.readouterr().out == (
-        "Database query failed: no such table: missing_table\n"
-    )
-
-
 @pytest.mark.parametrize(
     ("choices", "inputs", "failure"),
     [
         ([2, 2, 1], [], "Download failed: Unable to download repository archive"),
         ([3, 1, 0, 1], [], "Installation failed: Tool 'holehe' is not supported."),
-        ([5, 2, 1], ["SELECT * FROM missing_table"], "Database query failed: no such table: missing_table"),
     ],
 )
 def test_menu_remains_usable_after_failure(
@@ -147,17 +135,13 @@ def test_menu_remains_usable_after_failure(
 def test_successful_actions_keep_their_output(monkeypatch, capsys):
     monkeypatch.setattr(main, "download_tool", lambda *args, **kwargs: "tools/holehe")
     monkeypatch.setattr(main, "install_tool", lambda *args, **kwargs: None)
-    monkeypatch.setattr(main, "query_database", lambda query: [(1,)])
-    monkeypatch.setattr("builtins.input", lambda prompt: "")
 
     main.download("holehe")
     main.install("holehe")
-    main.query("SELECT 1")
 
     assert capsys.readouterr().out == (
         "holehe downloaded successfully to tools/holehe.\n"
         "holehe installed successfully.\n"
-        "Query result: [(1,)]\n"
     )
 
 
@@ -280,14 +264,13 @@ def test_install_menu_selects_pip_tool_and_default_source(monkeypatch):
 
 
 def test_query_menu_offers_recent_runs_without_custom_sql(monkeypatch):
-    query = Mock()
+    get_recent_tool_runs = Mock(return_value=[])
 
     class FakeMenu:
         def __init__(self, options, title):
             assert options == [
                 "Recent Tool Runs",
                 "Saved Tool Results",
-                "Enter a Custom SQL Query",
                 "Back",
             ]
 
@@ -296,8 +279,8 @@ def test_query_menu_offers_recent_runs_without_custom_sql(monkeypatch):
 
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
     monkeypatch.setattr(menu_utils, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr(main, "query", query)
+    monkeypatch.setattr(main, "get_recent_tool_runs", get_recent_tool_runs)
 
     main.query_menu()
 
-    assert query.call_args.args[0].startswith("SELECT runID, toolName, queryText, status")
+    get_recent_tool_runs.assert_called_once_with()
