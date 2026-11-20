@@ -117,6 +117,12 @@ redacted from saved and displayed results and errors. A `running` record can
 remain after interruption or a database-write failure. Existing
 `ToolResults` rows are preserved but do not gain historical run statuses.
 
+Inputs, results, and errors can contain sensitive data. They are stored in
+plain text in the local database; restrict its permissions and delete records
+when no longer needed. See the [local data retention and privacy guide](doc/data-retention-and-privacy.md)
+for exactly what is retained, how to restrict database and backup access, and
+safe practices for viewing, removing, and sharing sensitive output.
+
 Valid attempts are stored in `ToolRuns` with the tool, input, status (`running`,
 `success`, `failed`, or `timed_out`), and a UTC `startedAt` timestamp. A run
 starts as `running`, with `finishedAt`, `resultText`, and `errorText` unset.
@@ -198,7 +204,12 @@ sensitive information.
 
 ## Responsible use and privacy
 
-Use OSINT Beast only with data and targets you are authorized to assess, and follow applicable laws, provider terms, and organizational policies. Tool output may contain personal or sensitive information. Protect the local database, restrict access to it, and remove data when it is no longer needed. Validate inputs and avoid exposing sensitive values in logs, process arguments, or shared environments.
+Use OSINT Beast only with data and targets you are authorized to assess, and
+follow applicable laws, provider terms, and organizational policies. Tool
+output may contain personal or sensitive information; follow the
+[local data retention and privacy guide](doc/data-retention-and-privacy.md).
+Validate inputs and avoid exposing sensitive values in logs, process
+arguments, or shared environments.
 
 ## Project layout
 
