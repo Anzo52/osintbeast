@@ -1,6 +1,7 @@
 """Local browser interface for launching and reviewing authorized tool runs."""
 
 import json
+import ipaddress
 import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -177,6 +178,48 @@ def _run_in_background(run_id, tool_name, query_text, runner):
 class WebHandler(BaseHTTPRequestHandler):
     server_version = "OSINTBeast"
 
+    def _has_local_host(self):
+        host_header = self.headers.get("Host", "")
+        try:
+            host = urlsplit(f"//{host_header}")
+            hostname = host.hostname
+            port = host.port
+        except ValueError:
+            return False
+        if (
+            not hostname
+            or host.username
+            or host.password
+            or host.path
+            or host.query
+            or host.fragment
+            or port != self.server.server_port
+        ):
+            return False
+        if hostname.lower() == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            return False
+
+    def _has_same_origin(self):
+        origin = self.headers.get("Origin", "")
+        host = self.headers.get("Host", "")
+        try:
+            parsed = urlsplit(origin)
+        except ValueError:
+            return False
+        return (
+            parsed.scheme == "http"
+            and parsed.netloc.lower() == host.lower()
+            and not parsed.path
+            and not parsed.query
+            and not parsed.fragment
+            and not parsed.username
+            and not parsed.password
+        )
+
     def _send(self, status, body, content_type):
         encoded = body.encode("utf-8")
         self.send_response(status)
@@ -214,6 +257,9 @@ class WebHandler(BaseHTTPRequestHandler):
         return payload
 
     def do_GET(self):
+        if not self._has_local_host():
+            self._send_json(403, {"error": "Use the local interface host."})
+            return
         path = urlsplit(self.path)
         try:
             if path.path == "/":
@@ -255,6 +301,15 @@ class WebHandler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": "Could not access the run database."})
 
     def do_POST(self):
+        if not self._has_local_host():
+            self._send_json(403, {"error": "Use the local interface host."})
+            return
+        if not self._has_same_origin():
+            self._send_json(403, {"error": "Run requests must come from this interface."})
+            return
+        if self.headers.get_content_type() != "application/json":
+            self._send_json(415, {"error": "Run requests must use application/json."})
+            return
         if urlsplit(self.path).path != "/api/runs":
             self._send_json(404, {"error": "Not found."})
             return

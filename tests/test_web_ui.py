@@ -3,6 +3,7 @@ import threading
 import time
 from http.server import ThreadingHTTPServer
 from urllib.error import HTTPError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from unittest.mock import Mock
 
@@ -11,14 +12,20 @@ import web_ui
 from sherlock_integration import validate_username
 
 
-def _request(url, payload=None):
+def _request(url, payload=None, headers=None):
+    headers = headers or {}
     if payload is None:
-        request = Request(url)
+        request = Request(url, headers=headers)
     else:
+        headers = {
+            "Content-Type": "application/json",
+            "Origin": f"{urlsplit(url).scheme}://{urlsplit(url).netloc}",
+            **headers,
+        }
         request = Request(
             url,
             data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
     try:
@@ -124,6 +131,27 @@ def test_validation_and_authorization_failures_do_not_launch(
             status, body = _request(f"{base_url}/api/runs", payload)
             assert status == expected_status
             assert body["error"]
+        status, body = _request(
+            f"{base_url}/api/runs",
+            {"tool": "sherlock", "input": "alice", "authorized": True},
+            {"Origin": "https://attacker.example"},
+        )
+        assert status == 403
+        assert body["error"]
+        status, body = _request(
+            f"{base_url}/api/runs",
+            {"tool": "sherlock", "input": "alice", "authorized": True},
+            {"Content-Type": "text/plain"},
+        )
+        assert status == 415
+        assert body["error"]
+        status, body = _request(
+            f"{base_url}/api/runs",
+            {"tool": "sherlock", "input": "alice", "authorized": True},
+            {"Host": "attacker.example"},
+        )
+        assert status == 403
+        assert body["error"]
         runner.assert_not_called()
         assert database.query_database("SELECT * FROM ToolRuns") == []
 
