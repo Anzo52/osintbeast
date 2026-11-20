@@ -1,12 +1,14 @@
-import os
 import json
-import tempfile
+import os
 import sqlite3
 import sys
+import tempfile
+from collections.abc import Mapping
 from contextlib import closing
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any
+
 
 # Keep source-checkout paths independent of the current working directory.
 def setup_database_paths(module_file):
@@ -121,7 +123,7 @@ def query_database(query: str, parameters: tuple[Any, ...] = ()) -> list[tuple[A
 
 
 def save_tool_result(
-    tool_name: str, query_text: str, result_text: Optional[str]
+    tool_name: str, query_text: str, result_text: str | None
 ):
     """Persist a tool run and return its result row ID."""
     with closing(connect_db()) as conn, conn:
@@ -146,9 +148,9 @@ def list_tool_results(limit: int = 100) -> list[tuple[Any, ...]]:
 
 def list_tool_runs(
     limit: int = 100,
-    tool: Optional[str] = None,
-    status: Optional[str] = None,
-    cursor: Optional[int] = None,
+    tool: str | None = None,
+    status: str | None = None,
+    cursor: int | None = None,
 ) -> list[tuple[Any, ...]]:
     """Return a bounded, newest-first run page using stable run-ID cursors."""
     _validate_list_limit(limit)
@@ -188,7 +190,7 @@ def _validate_list_limit(limit: int) -> None:
         raise ValueError("limit must be between 1 and 500")
 
 
-def get_tool_run(run_id: int) -> Optional[tuple[Any, ...]]:
+def get_tool_run(run_id: int) -> tuple[Any, ...] | None:
     """Return a run and its persisted result or error, if it exists."""
     run_id = _validate_run_id(run_id)
     with closing(connect_db()) as conn:
@@ -303,8 +305,8 @@ def start_tool_run(tool_name: str, query_text: str):
 
 
 def finish_tool_run(
-    run_id: int, status: str, result_text: Optional[str] = None,
-    error_text: Optional[str] = None,
+    run_id: int, status: str, result_text: str | None = None,
+    error_text: str | None = None,
 ) -> None:
     """Finish a run and retain successful results in the legacy results table."""
     if status not in {"success", "failed", "timed_out"}:
