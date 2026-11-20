@@ -24,10 +24,11 @@ def initialized_db(tmp_path, monkeypatch):
     [
         ("holehe", RuntimeError("missing dependency"), "failed"),
         ("maigret", ValueError("invalid site database"), "failed"),
-        ("maigret", OSError("network error"), "failed"),
+        ("helix", KeyError("missing field"), "failed"),
         ("sherlock", RuntimeError("missing dependency"), "failed"),
         ("holehe", HoleheTimeoutError("timeout"), "timed_out"),
         ("maigret", TimeoutError(), "timed_out"),
+        ("helix", TimeoutError("timed out"), "timed_out"),
         ("sherlock", TimeoutError(), "timed_out"),
     ],
 )
@@ -46,7 +47,7 @@ def test_failed_runs_are_recorded(initialized_db, tool, error, status):
     assert database.list_tool_results() == []
 
 
-@pytest.mark.parametrize("tool", ["holehe", "maigret", "sherlock"])
+@pytest.mark.parametrize("tool", ["holehe", "maigret", "helix", "sherlock"])
 def test_success_run_preserves_legacy_results(initialized_db, tool):
     assert tool_runs.execute_tool_run(tool, "test", lambda _: "output") == (
         "success", "output"
@@ -58,6 +59,17 @@ def test_success_run_preserves_legacy_results(initialized_db, tool):
     assert database.query_database(
         "SELECT toolName, queryText, resultText FROM ToolResults"
     ) == [(tool, "test", "output")]
+
+
+def test_non_text_output_is_recorded_as_a_failure(initialized_db):
+    status, message = tool_runs.execute_tool_run("helix", "test", lambda _: None)
+
+    assert status == "failed"
+    assert message == "helix returned non-text output."
+    assert database.query_database(
+        "SELECT status, resultText, errorText, finishedAt IS NOT NULL FROM ToolRuns"
+    ) == [("failed", None, message, 1)]
+    assert database.list_tool_results() == []
 
 
 def test_finish_is_atomic_if_legacy_result_insert_fails(initialized_db):

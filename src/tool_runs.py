@@ -84,23 +84,18 @@ def execute_tool_run(
                     logging.disable(previous_disable)
         else:
             output = runner(query_text)
+        if not isinstance(output, str):
+            raise RuntimeError(f"{tool_name} returned non-text output.")
     except TimeoutError as exc:
         message = str(exc) or f"{tool_name} exceeded its time limit."
         if sensitive_input:
             message = _redact_sensitive_value(message, query_text)
         database.finish_tool_run(run_id, "timed_out", error_text=message)
         return "timed_out", message
-    except (RuntimeError, OSError, ImportError, ValueError) as exc:
+    except Exception as exc:
         message = str(exc) or f"{tool_name} failed ({type(exc).__name__})."
         if sensitive_input:
             message = _redact_sensitive_value(message, query_text)
-        database.finish_tool_run(run_id, "failed", error_text=message)
-        return "failed", message
-    except Exception as exc:
-        if not sensitive_input:
-            raise
-        message = str(exc) or f"{tool_name} failed ({type(exc).__name__})."
-        message = _redact_sensitive_value(message, query_text)
         database.finish_tool_run(run_id, "failed", error_text=message)
         return "failed", message
     if sensitive_input:

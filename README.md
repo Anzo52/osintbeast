@@ -117,6 +117,15 @@ redacted from saved and displayed results and errors. A `running` record can
 remain after interruption or a database-write failure. Existing
 `ToolResults` rows are preserved but do not gain historical run statuses.
 
+Valid attempts are stored in `ToolRuns` with the tool, input, status (`running`,
+`success`, `failed`, or `timed_out`), and a UTC `startedAt` timestamp. A run
+starts as `running`, with `finishedAt`, `resultText`, and `errorText` unset.
+Every terminal run has a UTC `finishedAt`; `success` requires saved output in
+`resultText` and no `errorText`, while `failed` and `timed_out` require an
+`errorText` and no `resultText`. Successful outputs are also saved to the
+existing `ToolResults` table; failures and timeouts are never stored there.
+Use **Query Database** to inspect either table.
+
 Sublist3r and Amass do not yet have run integrations. Any future integration
 that needs an external process must pass sensitive input through standard input
 (for example, `subprocess.run(..., input=value, text=True)`), never an argument,
