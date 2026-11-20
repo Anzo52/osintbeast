@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import sys
@@ -141,6 +142,108 @@ def list_tool_results(limit: int = 100) -> list[tuple[Any, ...]]:
                FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
             (limit,),
         ).fetchall()
+
+
+def list_tool_runs(
+    limit: int = 20, offset: int = 0, tool_name: Optional[str] = None,
+    status: Optional[str] = None,
+) -> list[tuple[Any, ...]]:
+    """Return a page of structured run history, newest first."""
+    if not 1 <= limit <= 100:
+        raise ValueError("limit must be between 1 and 100")
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        raise ValueError("offset must be a non-negative integer")
+    if tool_name is not None and (not isinstance(tool_name, str) or not tool_name):
+        raise ValueError("tool_name must be a non-empty string")
+    if status is not None and status not in {
+        "running", "success", "failed", "timed_out",
+    }:
+        raise ValueError("Invalid run status")
+
+    filters = []
+    parameters = []
+    if tool_name is not None:
+        filters.append("toolName = ?")
+        parameters.append(tool_name)
+    if status is not None:
+        filters.append("status = ?")
+        parameters.append(status)
+    where_clause = f" WHERE {' AND '.join(filters)}" if filters else ""
+    parameters.extend((limit, offset))
+
+    with closing(connect_db()) as conn:
+        return conn.execute(
+            (
+                """SELECT runID, toolName, queryText, status, startedAt, finishedAt
+                   FROM ToolRuns"""
+                + where_clause
+                + " ORDER BY runID DESC LIMIT ? OFFSET ?"
+            ),
+            tuple(parameters),
+        ).fetchall()
+
+
+def get_tool_run(run_id: int) -> Optional[tuple[Any, ...]]:
+    """Return one complete run record, including its raw result or error."""
+    if not isinstance(run_id, int) or isinstance(run_id, bool) or run_id < 1:
+        raise ValueError("run_id must be a positive integer")
+    with closing(connect_db()) as conn:
+        return conn.execute(
+            """SELECT runID, toolName, queryText, status, startedAt, finishedAt,
+                      resultText, errorText
+               FROM ToolRuns WHERE runID = ?""",
+            (run_id,),
+        ).fetchone()
+
+
+def export_tool_runs_json(
+    run_ids: list[int], include_sensitive: bool = False,
+) -> str:
+    """Serialize selected run records as JSON, redacting sensitive text by default."""
+    if not run_ids or len(run_ids) > 500:
+        raise ValueError("Select between 1 and 500 runs")
+    if any(
+        not isinstance(run_id, int) or isinstance(run_id, bool) or run_id < 1
+        for run_id in run_ids
+    ):
+        raise ValueError("run_ids must contain positive integers")
+    if len(set(run_ids)) != len(run_ids):
+        raise ValueError("run_ids must not contain duplicates")
+
+    placeholders = ", ".join("?" for _ in run_ids)
+    with closing(connect_db()) as conn:
+        rows = conn.execute(
+            f"""SELECT runID, toolName, queryText, status, startedAt, finishedAt,
+                       resultText, errorText
+                FROM ToolRuns WHERE runID IN ({placeholders})""",
+            tuple(run_ids),
+        ).fetchall()
+    by_id = {row[0]: row for row in rows}
+    if len(by_id) != len(run_ids):
+        raise ValueError("One or more selected runs do not exist")
+
+    records = []
+    for run_id in run_ids:
+        row = by_id[run_id]
+        sensitive_values = row[2], row[6], row[7]
+        if not include_sensitive:
+            sensitive_values = tuple(
+                "[REDACTED]" if value is not None else None
+                for value in sensitive_values
+            )
+        records.append(
+            {
+                "run_id": row[0],
+                "tool": row[1],
+                "input": sensitive_values[0],
+                "status": row[3],
+                "started_at": row[4],
+                "finished_at": row[5],
+                "result": sensitive_values[1],
+                "error": sensitive_values[2],
+            }
+        )
+    return json.dumps(records, ensure_ascii=False, indent=2)
 
 
 def start_tool_run(tool_name: str, query_text: str):

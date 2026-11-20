@@ -278,13 +278,13 @@ def test_install_menu_selects_pip_tool_and_default_source(monkeypatch):
     install.assert_called_once_with("helix")
 
 
-def test_query_menu_offers_recent_runs_without_custom_sql(monkeypatch):
-    query = Mock()
+def test_query_menu_offers_structured_run_history(monkeypatch):
+    history = Mock()
 
     class FakeMenu:
         def __init__(self, options, title):
             assert options == [
-                "Recent Tool Runs",
+                "Run History",
                 "Saved Tool Results",
                 "Enter a Custom SQL Query",
                 "Back",
@@ -295,8 +295,8 @@ def test_query_menu_offers_recent_runs_without_custom_sql(monkeypatch):
 
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
     monkeypatch.setattr(menu_utils, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr(main, "query", query)
+    monkeypatch.setattr(main, "run_history_menu", history)
 
     main.query_menu()
 
-    assert query.call_args.args[0].startswith("SELECT runID, toolName, queryText, status")
+    history.assert_called_once_with()
