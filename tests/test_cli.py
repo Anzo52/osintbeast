@@ -1,3 +1,4 @@
+import sqlite3
 import subprocess
 import zipfile
 import zlib
@@ -5,6 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
+import checkers
 import data.utils.database as database
 import main
 import menu_utils
@@ -87,14 +89,17 @@ def test_install_reports_errors(monkeypatch, capsys, error):
     assert capsys.readouterr().out == f"Installation failed: {error}\n"
 
 
-def test_query_reports_sqlite_error(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "test.db"))
-    database.setup_database()
+def test_query_reports_sqlite_error(monkeypatch, capsys):
+    monkeypatch.setattr(
+        main,
+        "get_recent_tool_runs",
+        Mock(side_effect=sqlite3.OperationalError("database is locked")),
+    )
 
-    main.query("SELECT * FROM missing_table")
-
+    assert main.query_view("runs") == 1
     assert capsys.readouterr().out == (
-        "Database query failed: no such table: missing_table\n"
+        "Database query failed: database is locked. "
+        "Initialize the database and check its permissions.\n"
     )
 
 
@@ -103,7 +108,6 @@ def test_query_reports_sqlite_error(tmp_path, monkeypatch, capsys):
     [
         ([2, 2, 1], [], "Download failed: Unable to download repository archive"),
         ([3, 1, 0, 1], [], "Installation failed: Tool 'holehe' is not supported."),
-        ([5, 2, 1], ["SELECT * FROM missing_table"], "Database query failed: no such table: missing_table"),
     ],
 )
 def test_menu_remains_usable_after_failure(
@@ -146,17 +150,13 @@ def test_menu_remains_usable_after_failure(
 def test_successful_actions_keep_their_output(monkeypatch, capsys):
     monkeypatch.setattr(main, "download_tool", lambda *args, **kwargs: "tools/holehe")
     monkeypatch.setattr(main, "install_tool", lambda *args, **kwargs: None)
-    monkeypatch.setattr(main, "query_database", lambda query: [(1,)])
-    monkeypatch.setattr("builtins.input", lambda prompt: "")
 
     main.download("holehe")
     main.install("holehe")
-    main.query("SELECT 1")
 
     assert capsys.readouterr().out == (
         "holehe downloaded successfully to tools/holehe.\n"
         "holehe installed successfully.\n"
-        "Query result: [(1,)]\n"
     )
 
 
@@ -170,7 +170,7 @@ def test_helix_menu_action_dispatches_username(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr("builtins.input", lambda prompt: " @user ")
+    monkeypatch.setattr(checkers, "getpass", lambda prompt: " @user ")
     monkeypatch.setattr(main, "run_helix_check", runner)
 
     main.main_menu()
@@ -188,7 +188,7 @@ def test_holehe_menu_action_dispatches_email(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr("builtins.input", lambda prompt: " person@example.com ")
+    monkeypatch.setattr(checkers, "getpass", lambda prompt: " person@example.com ")
     monkeypatch.setattr(main, "run_holehe_check", runner)
 
     main.main_menu()
@@ -206,7 +206,7 @@ def test_sherlock_menu_action_dispatches_username(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr("builtins.input", lambda prompt: " user ")
+    monkeypatch.setattr(checkers, "getpass", lambda prompt: " user ")
     monkeypatch.setattr(main, "run_sherlock_check", runner)
 
     main.main_menu()
@@ -286,7 +286,6 @@ def test_query_menu_offers_structured_run_history(monkeypatch):
             assert options == [
                 "Run History",
                 "Saved Tool Results",
-                "Enter a Custom SQL Query",
                 "Back",
             ]
 
@@ -300,3 +299,97 @@ def test_query_menu_offers_structured_run_history(monkeypatch):
     main.query_menu()
 
     history.assert_called_once_with()
+
+
+def test_cli_help_lists_commands_and_input_formats(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main.cli(["--help"])
+
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "check-email" in help_text
+    assert "check-username" in help_text
+    assert "init-db" in help_text
+
+    with pytest.raises(SystemExit) as exc_info:
+        main.cli(["check-email", "--help"])
+
+    assert exc_info.value.code == 0
+    assert "check-email [-h] email" in capsys.readouterr().out
+
+    with pytest.raises(SystemExit) as exc_info:
+        main.cli(["check-username", "--help"])
+
+    assert exc_info.value.code == 0
+    username_help = capsys.readouterr().out
+    assert "ASCII letters" in username_help
+    assert "underscores" in username_help
+    assert "hyphens" in username_help
+
+
+def test_cli_requires_command_arguments(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main.cli(["check-email"])
+
+    assert exc_info.value.code == 2
+    assert "the following arguments are required: email" in capsys.readouterr().err
+
+
+def test_cli_rejects_invalid_email_without_running_tool(monkeypatch, capsys):
+    runner = Mock()
+    monkeypatch.setattr(main, "run_holehe", runner)
+
+    result = main.cli(["check-email", "not-an-email"])
+
+    assert result == 2
+    assert "Input error: A valid email address is required." in capsys.readouterr().out
+    runner.assert_not_called()
+
+
+def test_cli_rejects_invalid_username_with_accepted_format(monkeypatch, capsys):
+    runner = Mock()
+    monkeypatch.setattr(main, "run_sherlock", runner)
+
+    result = main.cli(["check-username", "sherlock", "invalid username"])
+
+    assert result == 2
+    assert (
+        "Use a username of up to 100 letters, digits, dots, underscores or hyphens."
+        in capsys.readouterr().out
+    )
+    runner.assert_not_called()
+
+
+def test_cli_reports_optional_dependency_failure_and_nonzero_status(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "test.db"))
+    database.setup_database()
+
+    def missing_dependency(username):
+        raise RuntimeError(
+            "Maigret is required. Install it with `python -m pip install '.[maigret]'`."
+        )
+
+    monkeypatch.setattr(main, "run_maigret", missing_dependency)
+
+    result = main.cli(["check-username", "maigret", "valid_user"])
+
+    assert result == 1
+    assert (
+        "Maigret could not run: Maigret is required. "
+        "Install it with `python -m pip install '.[maigret]'`."
+    ) in capsys.readouterr().out
+
+
+def test_cli_returns_nonzero_for_database_execution_error(monkeypatch, capsys):
+    monkeypatch.setattr(
+        main,
+        "get_recent_tool_runs",
+        Mock(side_effect=sqlite3.OperationalError("database is locked")),
+    )
+
+    result = main.cli(["query", "runs"])
+
+    assert result == 1
+    assert "Initialize the database and check its permissions." in capsys.readouterr().out

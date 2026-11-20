@@ -18,10 +18,10 @@ recorded outcomes:
 
 | Tool | Input | Availability |
 | --- | --- | --- |
-| Holehe | Email address | Included in the standard installation |
-| Maigret | Username | Optional: `python -m pip install -e ".[maigret]"` |
-| Helix OSINT | Username | Optional: `python -m pip install -e ".[helix]"` |
-| Sherlock | Username | Optional: `python -m pip install -e ".[sherlock]"` |
+| Holehe | Sensitive email address; in-process Python API | Included in the standard installation |
+| Maigret | Sensitive username; in-process Python API | Optional: `python -m pip install -e ".[maigret]"` |
+| Helix OSINT | Sensitive username; in-process Python API | Optional: `python -m pip install -e ".[helix]"` |
+| Sherlock | Sensitive username; in-process Python API | Optional: `python -m pip install -e ".[sherlock]"` |
 
 ### Registered tools planned for integration
 
@@ -31,8 +31,8 @@ future integrations, not implemented features:
 
 | Tool | Registry support | Planned status |
 | --- | --- | --- |
-| Sublist3r | Download and Python-package installation | Run integration not implemented |
-| Amass | Download only; requires manual binary installation | Run integration not implemented |
+| Sublist3r | Download and Python-package installation | Run integration not implemented; future runs must use stdin/private pipe |
+| Amass | Download only; requires manual binary installation | Run integration not implemented; future runs must use stdin/private pipe |
 
 Being registered does not mean a tool can be run from the OSINT Beast menu.
 See the [development roadmap](#development-roadmap) for broader planned work.
@@ -65,10 +65,32 @@ This indicates presence, not whether the tool or all its dependencies work.
 Use the arrow keys and Enter to choose a tool to download or install; installing
 uses the default `tools/<name>` download folder. A custom installation folder is
 available as an alternate menu choice. Database views include recent runs and
-saved results, alongside a custom SQL option. Type only the information that
-cannot be selected in advance, such as a username, email address, custom folder,
-or custom SQL query. Errors are reported in the menu so you can correct the
-input or environment and try again.
+saved results. Type only the information that cannot be selected in advance,
+such as a username, email address, or custom folder. Errors are reported in the
+menu so you can correct the input or environment and try again.
+
+### Command-line commands
+
+The installed `osintbeast` command also accepts direct commands. Run
+`osintbeast --help` or `osintbeast <command> --help` for complete usage. With
+no command, it opens the interactive menu.
+
+```text
+osintbeast init-db
+osintbeast list-tools
+osintbeast download TOOL
+osintbeast install TOOL [--path DIRECTORY]
+osintbeast check-email EMAIL
+osintbeast check-username {maigret,helix,sherlock} USERNAME
+osintbeast query {runs,results}
+```
+
+Email checks accept a practical email address such as `person@example.com`.
+Username checks accept ASCII letters, digits, dots, underscores, and hyphens;
+Maigret and Sherlock allow up to 100 characters, while Helix allows up to 50
+and optionally accepts a leading `@`. The `query` command displays recent
+runs or saved results; it does not accept arbitrary SQL. Invalid inputs and
+failed operations print a corrective message and return a nonzero status.
 
 ### Running checks
 
@@ -94,10 +116,10 @@ python -m pip install -e ".[sherlock]"
 Select **Run Holehe Check**, **Run Maigret Check**, **Run Helix Check**, or
 **Run Sherlock Check** in the menu. Sherlock uses its bundled site list and
 skips sites marked NSFW. It sends a username to many public sites; each request
-has a 15-second timeout, so a full search may take longer. Use it only for
-authorized targets. Helix uses its built-in site list through the in-process
-API; the broader optional source collections are not enabled by this menu
-integration. Helix accepts up to
+has a 15-second timeout, and the full scan has a 300-second overall timeout.
+Use it only for authorized targets. Helix uses its built-in site list through
+the in-process API; the broader optional source collections are not enabled by
+this menu integration. Helix accepts up to
 50 ASCII letters, digits, dots, underscores, and hyphens (with an optional leading `@`).
 The scan has a 300-second overall timeout.
 Maigret accepts
@@ -110,28 +132,91 @@ Partial results are not saved when the overall search times out. Individual
 site failures appear as `Unknown` results; a successful run means the search
 completed, not that every site was reachable or every match is confirmed.
 
-The CLI validates input before recording a run. Valid attempts are stored in
-`ToolRuns` with the tool, input, status (`running`, `success`, `failed`, or
-`timed_out`), UTC start and finish timestamps, and either output or an error.
-A `running` record can remain after interruption or a database-write failure.
-Successful outputs are also saved to the existing `ToolResults` table.
-Existing `ToolResults` rows are preserved but do not gain historical run
-statuses. Use **Query Database → Run History** to browse the `ToolRuns` table.
-History pages are ordered newest first by stable run ID and contain the tool,
-input summary, status, and timestamps. Filter by tool or status, move between
-20-run pages, and inspect a run to view its raw result or error; empty results
-are shown as empty rather than parsed as structured data.
+The CLI validates input before recording a run and uses a non-echoing prompt.
+Holehe, Maigret, Helix, and Sherlock receive sensitive input through their
+in-process Python APIs, not process arguments. Their run records use a
+`[redacted]` query; direct and URL-encoded occurrences of the input are also
+redacted from saved and displayed results and errors. A `running` record can
+remain after interruption or a database-write failure. Successful outputs are
+also saved to the existing `ToolResults` table. Existing `ToolResults` rows
+are preserved but do not gain historical run statuses.
+
+Use **Query Database → Run History** to browse `ToolRuns`. History pages are
+ordered newest first by stable run ID and contain the tool, input summary,
+status, and timestamps. Filter by tool or status, move between 20-run pages,
+and inspect a run's stored result or error; empty results are shown as empty
+rather than parsed as structured data.
 
 The history menu can export selected run IDs as a UTF-8 JSON array. JSON string
 escaping preserves quotes, backslashes, newlines, and malformed/non-JSON tool
 output as text. By default, the `input`, `result`, and `error` fields are
-replaced with `[REDACTED]`; explicitly answer yes to the export prompt to
-include them. Treat opted-in exports as sensitive data and store/share them
-accordingly. Exports create a new file and will not overwrite an existing one.
+replaced with `[REDACTED]`; explicitly answer yes to include the values stored
+in the database. Sensitive input is redacted before storage, so opted-in
+exports may still contain other sensitive output or error text; store and share
+them accordingly. Exports are created with owner-only permissions and will not
+overwrite an existing file.
 
 Inputs, results, and errors can contain sensitive data. They are stored in
 plain text in the local database; restrict its permissions and delete records
-when no longer needed. Searches send the supplied input to third-party sites.
+when no longer needed. See the [local data retention and privacy guide](doc/data-retention-and-privacy.md)
+for exactly what is retained, how to restrict database and backup access, and
+safe practices for viewing, removing, and sharing sensitive output.
+
+Valid attempts are stored in `ToolRuns` with the tool, input, status (`running`,
+`success`, `failed`, or `timed_out`), and a UTC `startedAt` timestamp. A run
+starts as `running`, with `finishedAt`, `resultText`, and `errorText` unset.
+Every terminal run has a UTC `finishedAt`; `success` requires saved output in
+`resultText` and no `errorText`, while `failed` and `timed_out` require an
+`errorText` and no `resultText`. Successful outputs are also saved to the
+existing `ToolResults` table; failures and timeouts are never stored there.
+Use **Query Database** to inspect either table.
+
+Sublist3r and Amass do not yet have run integrations. Any future integration
+that needs an external process must pass sensitive input through standard input
+(for example, `subprocess.run(..., input=value, text=True)`), never an argument,
+environment variable, log, or echoed prompt. If a tool cannot accept a private
+input channel, it must not be integrated until a safe mechanism is available.
+Searches send the supplied input to third-party sites.
+
+### Local HTTP API
+
+The experimental HTTP API is separate from the CLI and does not provide a
+browser UI. It requires configured bearer credentials before starting and binds
+only to `127.0.0.1`; remote binding is not supported. Keep it on a trusted
+machine and do not expose it through a proxy or port forward.
+
+Set `OSINTBEAST_API_TOKENS` to a JSON object whose keys are unique,
+cryptographically random URL-safe tokens of at least 32 characters and whose
+values are roles. Configure the value through a secret manager or another
+private environment mechanism; do not commit it, place it in a URL, or include
+it in logs:
+
+```text
+{"<32+ character random operator token>":"operator","<32+ character random viewer token>":"viewer"}
+```
+
+Replace the example token placeholders with private random tokens, then set the
+JSON as `OSINTBEAST_API_TOKENS` in the server's environment and start the API:
+
+```bash
+python -m web_api
+```
+
+An `operator` may launch checks and view runs and results. A `viewer` may view
+runs and results but cannot launch checks. Every API route requires a bearer
+token; missing or invalid credentials receive `401`, and insufficient
+permissions receive `403`. The API exposes only fixed operations, not custom
+SQL:
+
+| Method | Path | Access |
+| --- | --- | --- |
+| `POST` | `/api/runs` | Operator; JSON body contains `tool` and `query` strings |
+| `GET` | `/api/runs` | Operator or viewer |
+| `GET` | `/api/results` | Operator or viewer |
+
+This server uses plain HTTP and is intentionally loopback-only. Do not make it
+remotely accessible; a future remote deployment must add HTTPS and retain
+server-side authentication and authorization.
 
 ### Database initialization
 
@@ -152,6 +237,9 @@ directory: `%APPDATA%\osintbeast` on Windows,
 Custom relative paths are resolved against the working directory at startup.
 Initialization errors are reported in the menu; check the path and permissions
 before retrying.
+
+For deployment, backups, upgrades, and schema-migration expectations, see the
+[operations guide](doc/OPERATIONS.md).
 
 ```bash
 # Linux/macOS, for example
@@ -176,9 +264,62 @@ tests are skipped.
 GitHub Actions runs the test suite and Ruff checks on Python 3.10–3.13 for pushes and pull requests.
 It also installs the Maigret extra so its offline API-contract tests run.
 
+### Background run service
+
+`background_runs.BackgroundRuns` is a shared service for web handlers, not a
+web server. It is not yet connected to the browser interface below. Initialize
+the database first and create one service per application
+process. `submit(tool_name, query)` validates the input, records a run and
+returns its integer ID without waiting for tool execution; `status(run_id)`
+returns the persisted record (or `None`), and `cancel(run_id)` requests
+cancellation and returns whether the run was active. Poll status for the
+terminal outcome. Cancellation is recorded as `failed` with the error
+`Run cancelled.` for compatibility with existing databases.
+
+Configure `RunLimits(max_concurrent=2, timeout_seconds=300,
+max_query_chars=254, max_output_bytes=1000000)` when constructing the service.
+There is no waiting queue: `CapacityError` explicitly rejects submissions when
+all slots are occupied. Execution occurs in child processes, which are stopped
+on timeout or cancellation; tool failures and unexpected worker exits are
+recorded as failures. Call `close()` during orderly application shutdown.
+If saving an outcome fails, the service retains it in memory and keeps its
+capacity slot reserved. Calling `status(run_id)` retries the write and raises
+`RuntimeError` if it still cannot be saved; retry after restoring database
+access. Pending outcomes are lost if the application process exits.
+
+These limits apply per service instance, not across web server processes or
+hosts. Use a single application process or an external coordinator to enforce
+a deployment-wide limit. An abrupt application crash can leave `running`
+records behind; this in-process service is not a durable job queue. A web
+interface must enforce authentication, authorization, CSRF protection as
+appropriate, and access controls on run records before exposing these methods.
+Tool output is limited when returned to the parent; tools may still consume
+additional memory internally while producing it.
+## Browser interface
+
+Start the local browser interface with:
+
+```bash
+python -m web_ui
+```
+
+Open `http://127.0.0.1:8000`. The interface initializes the local database and
+supports authorized runs with Holehe, Maigret, Helix, and Sherlock; tools in the
+registry without a runnable integration are not offered. Confirm authorization
+before each run. Runs execute through the existing validators, integrations,
+and persistence service, and their status and saved output are available in
+the recent-runs view. Keep the interface bound to loopback: it has no login or
+remote-access authentication, and its database and results may contain
+sensitive information.
+
 ## Responsible use and privacy
 
-Use OSINT Beast only with data and targets you are authorized to assess, and follow applicable laws, provider terms, and organizational policies. Tool output may contain personal or sensitive information. Protect the local database, restrict access to it, and remove data when it is no longer needed. Validate inputs and avoid exposing sensitive values in logs, process arguments, or shared environments.
+Use OSINT Beast only with data and targets you are authorized to assess, and
+follow applicable laws, provider terms, and organizational policies. Tool
+output may contain personal or sensitive information; follow the
+[local data retention and privacy guide](doc/data-retention-and-privacy.md).
+Validate inputs and avoid exposing sensitive values in logs, process
+arguments, or shared environments.
 
 ## Project layout
 
@@ -244,7 +385,7 @@ shared application services rather than duplicating CLI behavior.
 
 - [ ] Complete and test MySQL schema and database support behind a storage interface.
 - [x] Add a first-party run integration for Sherlock; Sublist3r and Amass remain candidates, with documented inputs, outputs, and safety requirements.
-- [ ] Document deployment, backup, upgrade, and migration procedures.
+- [x] Document deployment, backup, upgrade, and migration procedures.
 
 ## License
 

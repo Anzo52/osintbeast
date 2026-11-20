@@ -133,9 +133,8 @@ def save_tool_result(
 
 
 def list_tool_results(limit: int = 100) -> list[tuple[Any, ...]]:
-    """Return recent tool runs, newest first, with a bounded page size."""
-    if not 1 <= limit <= 500:
-        raise ValueError("limit must be between 1 and 500")
+    """Return saved tool results, newest first, with a bounded page size."""
+    _validate_list_limit(limit)
     with closing(connect_db()) as conn:
         return conn.execute(
             """SELECT resultID, toolName, queryText, resultText, createdAt
@@ -144,13 +143,17 @@ def list_tool_results(limit: int = 100) -> list[tuple[Any, ...]]:
         ).fetchall()
 
 
+def _validate_list_limit(limit: int) -> None:
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
+        raise ValueError("limit must be between 1 and 500")
+
+
 def list_tool_runs(
     limit: int = 20, offset: int = 0, tool_name: Optional[str] = None,
     status: Optional[str] = None,
 ) -> list[tuple[Any, ...]]:
     """Return a page of structured run history, newest first."""
-    if not 1 <= limit <= 100:
-        raise ValueError("limit must be between 1 and 100")
+    _validate_list_limit(limit)
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
         raise ValueError("offset must be a non-negative integer")
     if tool_name is not None and (not isinstance(tool_name, str) or not tool_name):
@@ -173,24 +176,21 @@ def list_tool_runs(
 
     with closing(connect_db()) as conn:
         return conn.execute(
-            (
-                """SELECT runID, toolName, queryText, status, startedAt, finishedAt
-                   FROM ToolRuns"""
-                + where_clause
-                + " ORDER BY runID DESC LIMIT ? OFFSET ?"
-            ),
+            """SELECT runID, toolName, queryText, status, startedAt, finishedAt,
+                      errorText
+               FROM ToolRuns"""
+            + where_clause
+            + " ORDER BY runID DESC LIMIT ? OFFSET ?",
             tuple(parameters),
         ).fetchall()
 
 
 def get_tool_run(run_id: int) -> Optional[tuple[Any, ...]]:
-    """Return one complete run record, including its raw result or error."""
-    if not isinstance(run_id, int) or isinstance(run_id, bool) or run_id < 1:
-        raise ValueError("run_id must be a positive integer")
+    """Return a run and its persisted result or error, if it exists."""
     with closing(connect_db()) as conn:
         return conn.execute(
-            """SELECT runID, toolName, queryText, status, startedAt, finishedAt,
-                      resultText, errorText
+            """SELECT runID, toolName, queryText, status, resultText, errorText,
+                      startedAt, finishedAt
                FROM ToolRuns WHERE runID = ?""",
             (run_id,),
         ).fetchone()

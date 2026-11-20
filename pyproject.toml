@@ -25,6 +25,9 @@ dependencies = [
     "trio>=0.25,<1",
 ]
 
+[project.scripts]
+osintbeast = "main:cli"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=7,<9",
@@ -44,7 +47,9 @@ sherlock = [
 package-dir = {"" = "src", "osintbeast_schemas" = "data/schemas", "data.utils" = "data/utils"}
 packages = ["osintbeast_schemas", "data.utils"]
 py-modules = [
+    "background_runs",
     "checkers",
+    "backend_services",
     "downloader",
     "holehe_integration",
     "helix_integration",
@@ -55,6 +60,8 @@ py-modules = [
     "sherlock_integration",
     "tool_runs",
     "tool_registry",
+    "web_api",
+    "web_ui",
 ]
 
 [tool.setuptools.package-data]

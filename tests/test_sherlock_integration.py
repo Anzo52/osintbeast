@@ -1,12 +1,49 @@
 import builtins
 import json
+import multiprocessing
 import sys
+import time
 import types
 from unittest.mock import Mock
 
 import pytest
 
 import sherlock_integration
+
+
+def _successful_worker(_, connection):
+    connection.send(
+        (
+            "success",
+            json.dumps(
+                [
+                    {
+                        "site": "Example",
+                        "url": "https://example.test/user",
+                        "status": "Claimed",
+                        "http_status": 200,
+                        "error": None,
+                    }
+                ]
+            ),
+        )
+    )
+    connection.close()
+
+
+def _slow_worker(_, connection):
+    time.sleep(10)
+    connection.close()
+
+
+def _run_search_worker(monkeypatch, search):
+    monkeypatch.setattr(sherlock_integration, "_search", search)
+    receiver, sender = multiprocessing.Pipe(duplex=False)
+    try:
+        sherlock_integration._search_worker("user", sender)
+        return receiver.recv()
+    finally:
+        receiver.close()
 
 
 @pytest.mark.parametrize(
@@ -67,12 +104,19 @@ def test_run_sherlock_uses_bundled_non_nsfw_sites(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "sherlock_project.sites", sites)
     monkeypatch.setattr(sherlock_integration, "files", lambda _: tmp_path)
 
-    output = json.loads(sherlock_integration.run_sherlock(" user "))
+    sherlock_integration._search("user")
+    output = json.loads(
+        sherlock_integration.run_sherlock(
+            " user ",
+            process_context=multiprocessing.get_context("spawn"),
+            worker_target=_successful_worker,
+        )
+    )
 
     assert output == [
         {
             "site": "Example",
-            "url": "https://example.test/user",
+            "url": "https://example.test/[redacted]",
             "status": "Claimed",
             "http_status": 200,
             "error": None,
@@ -85,21 +129,54 @@ def test_run_sherlock_uses_bundled_non_nsfw_sites(monkeypatch, tmp_path):
     assert isinstance(seen["query_notify"], Mock)
 
 
-def test_run_sherlock_rejects_empty_results(monkeypatch):
-    monkeypatch.setattr(sherlock_integration, "_search", lambda _: {})
-
-    with pytest.raises(RuntimeError, match="no site results"):
-        sherlock_integration.run_sherlock("user")
-
-
-def test_run_sherlock_rejects_result_without_status(monkeypatch):
-    monkeypatch.setattr(sherlock_integration, "_search", lambda _: {"Example": {}})
-
-    with pytest.raises(RuntimeError, match="without status"):
-        sherlock_integration.run_sherlock("user")
+def test_search_worker_rejects_empty_results(monkeypatch):
+    assert _run_search_worker(monkeypatch, lambda _: {}) == (
+        "failed",
+        "Sherlock returned no site results.",
+    )
 
 
-def test_missing_sherlock_dependency_is_actionable(monkeypatch):
+def test_search_worker_rejects_result_without_status(monkeypatch):
+    assert _run_search_worker(monkeypatch, lambda _: {"Example": {}}) == (
+        "failed",
+        "Sherlock returned a result without status for Example.",
+    )
+
+
+def test_search_worker_propagates_request_timeout(monkeypatch):
+    def timeout(_):
+        raise TimeoutError("request timed out")
+
+    assert _run_search_worker(monkeypatch, timeout) == (
+        "timed_out",
+        "request timed out",
+    )
+
+
+def test_run_sherlock_timeout_stops_worker_and_allows_next_run(monkeypatch):
+    monkeypatch.setattr(sherlock_integration, "SHERLOCK_TIMEOUT_SECONDS", 0.5)
+    child_pids_before = {worker.pid for worker in multiprocessing.active_children()}
+
+    with pytest.raises(TimeoutError, match="overall limit"):
+        sherlock_integration.run_sherlock(
+            "user",
+            process_context=multiprocessing.get_context("spawn"),
+            worker_target=_slow_worker,
+        )
+
+    child_pids_after = {worker.pid for worker in multiprocessing.active_children()}
+    assert child_pids_after <= child_pids_before
+
+    assert json.loads(
+        sherlock_integration.run_sherlock(
+            "user",
+            process_context=multiprocessing.get_context("spawn"),
+            worker_target=_successful_worker,
+        )
+    )[0]["site"] == "Example"
+
+
+def test_search_missing_sherlock_dependency_is_actionable(monkeypatch):
     original_import = builtins.__import__
 
     def missing(name, *args, **kwargs):
@@ -110,4 +187,4 @@ def test_missing_sherlock_dependency_is_actionable(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", missing)
 
     with pytest.raises(RuntimeError, match=r"pip install.*\[sherlock\]"):
-        sherlock_integration.run_sherlock("user")
+        sherlock_integration._search("user")
