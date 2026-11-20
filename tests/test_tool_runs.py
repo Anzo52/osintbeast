@@ -126,6 +126,30 @@ def test_run_finish_rejects_repeated_completion(initialized_db):
 
 
 @pytest.mark.parametrize(
+    ("status", "result_text", "error_text"),
+    [
+        ("running", None, None),
+        ("success", None, None),
+        ("success", "output", "error"),
+        ("failed", "output", "error"),
+        ("failed", None, None),
+        ("timed_out", "output", None),
+    ],
+)
+def test_finish_tool_run_rejects_invalid_terminal_states(
+    initialized_db, status, result_text, error_text
+):
+    run_id = database.start_tool_run("holehe", "test")
+
+    with pytest.raises(ValueError):
+        database.finish_tool_run(run_id, status, result_text, error_text)
+
+    assert database.query_database(
+        "SELECT status, resultText, errorText, finishedAt FROM ToolRuns"
+    ) == [("running", None, None, None)]
+
+
+@pytest.mark.parametrize(
     ("function", "target", "value", "query_text", "result", "tool"),
     [
         (main.run_holehe_check, "run_holehe", " user@example.com ", "user@example.com", {"output": "email output"}, "holehe"),
@@ -164,6 +188,24 @@ def test_database_failure_after_execution_is_reported(initialized_db, monkeypatc
     assert "Could not record maigret run: disk full" in output
     assert "saved" not in output
     assert database.query_database("SELECT status FROM ToolRuns") == [("running",)]
+
+
+def test_cli_reports_timeout_without_claiming_success(initialized_db, monkeypatch, capsys):
+    monkeypatch.setattr(
+        main,
+        "run_maigret",
+        Mock(side_effect=TimeoutError("Maigret exceeded its time limit")),
+    )
+
+    main.run_maigret_check("user")
+
+    assert capsys.readouterr().out == (
+        "Maigret timed out: Maigret exceeded its time limit\n"
+    )
+    assert database.query_database(
+        "SELECT status, resultText, errorText FROM ToolRuns"
+    ) == [("timed_out", None, "Maigret exceeded its time limit")]
+    assert database.list_tool_results() == []
 
 
 def test_maigret_menu_action_dispatches_username(monkeypatch):

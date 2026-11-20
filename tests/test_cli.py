@@ -23,6 +23,24 @@ def test_list_supported_tools_shows_current_installation_status(monkeypatch, cap
     assert capsys.readouterr().out == "- amass: installed\n- holehe: installed\n"
 
 
+@pytest.mark.parametrize("choice", [None, "0", -1, 10])
+def test_main_menu_ignores_cancelled_or_invalid_choices(monkeypatch, choice):
+    class FakeMenu:
+        def __init__(self, options, title):
+            assert title == "OSINT Beast Main Menu"
+
+        def show(self):
+            return choice
+
+    action = Mock()
+    monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
+    monkeypatch.setattr(main, "init_db", action)
+
+    main.main_menu()
+
+    action.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("error", "message"),
     [

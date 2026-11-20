@@ -13,6 +13,7 @@ import helix_integration
     [
         ("user", "user"),
         (" @user.name-1_ ", "user.name-1_"),
+        ("a" * 50, "a" * 50),
     ],
 )
 def test_validate_username_normalizes_accepted_input(username, expected):

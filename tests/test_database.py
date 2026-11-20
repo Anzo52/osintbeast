@@ -244,6 +244,23 @@ def test_insert_query_and_save_tool_result(tmp_path, monkeypatch):
     )
 
 
+def test_list_tool_results_orders_newest_first_and_enforces_limit(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "results.db"))
+    database.setup_database()
+    for query_text in ("oldest", "middle", "newest"):
+        database.save_tool_result("holehe", query_text, query_text)
+
+    assert [row[2] for row in database.list_tool_results(limit=2)] == [
+        "newest", "middle"
+    ]
+    assert [row[2] for row in database.list_tool_results(limit=1)] == ["newest"]
+    for limit in (0, 501):
+        with pytest.raises(ValueError, match="between 1 and 500"):
+            database.list_tool_results(limit=limit)
+
+
 def test_insert_rejects_unknown_table_and_column(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "safe.db"))
     database.setup_database()

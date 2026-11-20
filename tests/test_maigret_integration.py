@@ -8,6 +8,14 @@ import pytest
 import maigret_integration
 
 
+@pytest.mark.parametrize(
+    ("username", "expected"),
+    [(" user.name-1_ ", "user.name-1_"), ("a" * 100, "a" * 100)],
+)
+def test_valid_username_normalizes_and_accepts_maximum_length(username, expected):
+    assert maigret_integration.validate_username(username) == expected
+
+
 @pytest.mark.parametrize("username", ["", "  ", "user name", "a" * 101, "../name", None])
 def test_invalid_username(username):
     with pytest.raises(ValueError):

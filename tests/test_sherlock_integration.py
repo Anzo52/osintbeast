@@ -11,7 +11,11 @@ import sherlock_integration
 
 @pytest.mark.parametrize(
     ("username", "expected"),
-    [("user", "user"), (" user.name-1_ ", "user.name-1_")],
+    [
+        ("user", "user"),
+        (" user.name-1_ ", "user.name-1_"),
+        ("a" * 100, "a" * 100),
+    ],
 )
 def test_validate_username_normalizes_accepted_input(username, expected):
     assert sherlock_integration.validate_username(username) == expected
