@@ -95,13 +95,15 @@ def _run_check(tool_name, query_text, validator, runner):
         print(f"Input error: {exc}")
         return
     try:
-        status, value = execute_tool_run(tool_name, query_text, runner)
+        status, value = execute_tool_run(
+            tool_name, query_text, runner, sensitive_input=True
+        )
     except sqlite3.Error as exc:
         print(f"Could not record {tool_name} run: {exc}. Initialize the database and check its permissions.")
         return
     if status == "success":
         print(value)
-        print(f"{tool_name.capitalize()} check saved to the database.")
+        print(f"{tool_name.capitalize()} run recorded with redacted input and output.")
     elif status == "timed_out":
         print(f"{tool_name.capitalize()} timed out: {value}")
     else:
