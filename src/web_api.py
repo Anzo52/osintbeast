@@ -78,6 +78,9 @@ def _authorized_role(authorization, tokens):
 
 def _make_handler(tokens):
     class ApiHandler(BaseHTTPRequestHandler):
+        # Bound idle socket reads, including headers read before authentication.
+        timeout = 10
+
         def _send_json(
             self, status, payload, authenticate=False, close_connection=False
         ):
