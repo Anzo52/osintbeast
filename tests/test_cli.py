@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
+import checkers
 import data.utils.database as database
 import main
 import menu_utils
@@ -88,14 +89,16 @@ def test_install_reports_errors(monkeypatch, capsys, error):
     assert capsys.readouterr().out == f"Installation failed: {error}\n"
 
 
-def test_query_reports_sqlite_error(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "test.db"))
-    database.setup_database()
+def test_query_reports_sqlite_error(monkeypatch, capsys):
+    monkeypatch.setattr(
+        main,
+        "get_recent_tool_runs",
+        Mock(side_effect=sqlite3.OperationalError("database is locked")),
+    )
 
-    main.query("SELECT * FROM missing_table")
-
+    assert main.query_view("runs") == 1
     assert capsys.readouterr().out == (
-        "Database query failed: no such table: missing_table. "
+        "Database query failed: database is locked. "
         "Initialize the database and check its permissions.\n"
     )
 
@@ -105,7 +108,6 @@ def test_query_reports_sqlite_error(tmp_path, monkeypatch, capsys):
     [
         ([2, 2, 1], [], "Download failed: Unable to download repository archive"),
         ([3, 1, 0, 1], [], "Installation failed: Tool 'holehe' is not supported."),
-        ([5, 2, 1], ["SELECT * FROM missing_table"], "Database query failed: no such table: missing_table"),
     ],
 )
 def test_menu_remains_usable_after_failure(
@@ -148,17 +150,13 @@ def test_menu_remains_usable_after_failure(
 def test_successful_actions_keep_their_output(monkeypatch, capsys):
     monkeypatch.setattr(main, "download_tool", lambda *args, **kwargs: "tools/holehe")
     monkeypatch.setattr(main, "install_tool", lambda *args, **kwargs: None)
-    monkeypatch.setattr(main, "query_database", lambda query: [(1,)])
-    monkeypatch.setattr("builtins.input", lambda prompt: "")
 
     main.download("holehe")
     main.install("holehe")
-    main.query("SELECT 1")
 
     assert capsys.readouterr().out == (
         "holehe downloaded successfully to tools/holehe.\n"
         "holehe installed successfully.\n"
-        "Query result: [(1,)]\n"
     )
 
 
@@ -172,7 +170,7 @@ def test_helix_menu_action_dispatches_username(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr("builtins.input", lambda prompt: " @user ")
+    monkeypatch.setattr(checkers, "getpass", lambda prompt: " @user ")
     monkeypatch.setattr(main, "run_helix_check", runner)
 
     main.main_menu()
@@ -190,7 +188,7 @@ def test_holehe_menu_action_dispatches_email(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr("builtins.input", lambda prompt: " person@example.com ")
+    monkeypatch.setattr(checkers, "getpass", lambda prompt: " person@example.com ")
     monkeypatch.setattr(main, "run_holehe_check", runner)
 
     main.main_menu()
@@ -208,7 +206,7 @@ def test_sherlock_menu_action_dispatches_username(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr("builtins.input", lambda prompt: " user ")
+    monkeypatch.setattr(checkers, "getpass", lambda prompt: " user ")
     monkeypatch.setattr(main, "run_sherlock_check", runner)
 
     main.main_menu()
@@ -281,14 +279,13 @@ def test_install_menu_selects_pip_tool_and_default_source(monkeypatch):
 
 
 def test_query_menu_offers_recent_runs_without_custom_sql(monkeypatch):
-    query = Mock()
+    get_recent_tool_runs = Mock(return_value=[])
 
     class FakeMenu:
         def __init__(self, options, title):
             assert options == [
                 "Recent Tool Runs",
                 "Saved Tool Results",
-                "Enter a Custom SQL Query",
                 "Back",
             ]
 
@@ -297,11 +294,11 @@ def test_query_menu_offers_recent_runs_without_custom_sql(monkeypatch):
 
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
     monkeypatch.setattr(menu_utils, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr(main, "query", query)
+    monkeypatch.setattr(main, "get_recent_tool_runs", get_recent_tool_runs)
 
     main.query_menu()
 
-    assert query.call_args.args[0].startswith("SELECT runID, toolName, queryText, status")
+    get_recent_tool_runs.assert_called_once_with()
 
 
 def test_cli_help_lists_commands_and_input_formats(capsys):
@@ -388,11 +385,11 @@ def test_cli_reports_optional_dependency_failure_and_nonzero_status(
 def test_cli_returns_nonzero_for_database_execution_error(monkeypatch, capsys):
     monkeypatch.setattr(
         main,
-        "query_database",
+        "get_recent_tool_runs",
         Mock(side_effect=sqlite3.OperationalError("database is locked")),
     )
 
-    result = main.cli(["query", "SELECT 1"])
+    result = main.cli(["query", "runs"])
 
     assert result == 1
     assert "Initialize the database and check its permissions." in capsys.readouterr().out

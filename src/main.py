@@ -8,9 +8,9 @@ import zlib
 from simple_term_menu import TerminalMenu
 
 from checkers import _run_email_check_menu, _run_username_check_menu
+from backend_services import get_recent_tool_runs, get_saved_tool_results
 from data.utils.init_db import init_db
 from menu_utils import _choose_option, _download_tool_menu, _install_tool_menu
-from data.utils.database import query_database
 from downloader import download_tool
 from helix_integration import run_helix, validate_username as validate_helix_username
 from installer import install_tool
@@ -99,7 +99,9 @@ def _run_check(tool_name, query_text, validator, runner):
         print(f"Input error: {exc}")
         return 2
     try:
-        status, value = execute_tool_run(tool_name, query_text, runner)
+        status, value = execute_tool_run(
+            tool_name, query_text, runner, sensitive_input=True
+        )
     except sqlite3.Error as exc:
         print(f"Could not record {tool_name} run: {exc}. Initialize the database and check its permissions.")
         return 1
@@ -130,9 +132,12 @@ def run_sherlock_check(username):
     return _run_check("sherlock", username, validate_sherlock_username, run_sherlock)
 
 
-def query(query_text):
+def query_view(view):
     try:
-        result = query_database(query_text)
+        if view == "runs":
+            result = get_recent_tool_runs()
+        else:
+            result = get_saved_tool_results()
     except sqlite3.Error as exc:
         print(
             f"Database query failed: {exc}. Initialize the database and check its permissions."
@@ -147,23 +152,14 @@ def query_menu():
         [
             "Recent Tool Runs",
             "Saved Tool Results",
-            "Enter a Custom SQL Query",
             "Back",
         ],
         "Choose database view",
     )
     if choice == 0:
-        query(
-            "SELECT runID, toolName, queryText, status, startedAt, finishedAt, "
-            "errorText FROM ToolRuns ORDER BY runID DESC LIMIT 20"
-        )
+        return query_view("runs")
     elif choice == 1:
-        query(
-            "SELECT resultID, toolName, queryText, resultText, createdAt "
-            "FROM ToolResults ORDER BY resultID DESC LIMIT 20"
-        )
-    elif choice == 2:
-        query(input("Enter your SQL query: ").strip())
+        return query_view("results")
 
 
 def _cli_initialize_database(_args):
@@ -232,9 +228,15 @@ def _build_parser():
         }[args.tool](args.username)
     )
 
-    query_command = commands.add_parser("query", help="run a SQL query against the local database")
-    query_command.add_argument("sql", help="SQL statement to run")
-    query_command.set_defaults(handler=lambda args: query(args.sql))
+    query_command = commands.add_parser(
+        "query", help="view recent tool runs or saved tool results"
+    )
+    query_command.add_argument(
+        "view",
+        choices=("runs", "results"),
+        help="which saved data to view",
+    )
+    query_command.set_defaults(handler=lambda args: query_view(args.view))
     return parser
 
 
@@ -249,7 +251,5 @@ def cli(argv=None):
     except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
         print(f"Command failed: {exc}", file=sys.stderr)
         return 1
-
-
 if __name__ == "__main__":
     raise SystemExit(cli())

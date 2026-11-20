@@ -48,6 +48,7 @@ package-dir = {"" = "src", "osintbeast_schemas" = "data/schemas", "data.utils" =
 packages = ["osintbeast_schemas", "data.utils"]
 py-modules = [
     "checkers",
+    "backend_services",
     "downloader",
     "holehe_integration",
     "helix_integration",
@@ -58,6 +59,7 @@ py-modules = [
     "sherlock_integration",
     "tool_runs",
     "tool_registry",
+    "web_ui",
 ]
 
 [tool.setuptools.package-data]
