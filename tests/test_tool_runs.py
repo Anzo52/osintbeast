@@ -244,6 +244,36 @@ def test_sensitive_json_redaction_preserves_schema_and_mixed_encoding(initialize
     }
 
 
+def test_short_username_redaction_preserves_numeric_json_fields(initialized_db):
+    result = json.dumps(
+        [
+            {
+                "site": "Example",
+                "url": "https://example.test/2",
+                "status": "not found",
+                "http_status": 200,
+            }
+        ],
+        indent=2,
+    )
+
+    outcome, output = tool_runs.execute_tool_run(
+        "sherlock",
+        "2",
+        lambda _: result,
+        sensitive_input=True,
+    )
+
+    record = json.loads(output)[0]
+    assert outcome == "success"
+    assert record == {
+        "site": "Example",
+        "url": "https://example.test/[redacted]",
+        "status": "not found",
+        "http_status": 200,
+    }
+
+
 @pytest.mark.parametrize("error_type", [RuntimeError, TypeError])
 def test_sensitive_values_are_redacted_from_errors(
     initialized_db, monkeypatch, capsys, error_type
