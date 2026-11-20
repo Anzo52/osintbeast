@@ -207,6 +207,37 @@ tests are skipped.
 GitHub Actions runs the test suite and Ruff checks on Python 3.10–3.13 for pushes and pull requests.
 It also installs the Maigret extra so its offline API-contract tests run.
 
+### Background run service
+
+`background_runs.BackgroundRuns` is a shared service for web handlers, not a
+web server. It is not yet connected to the browser interface below. Initialize
+the database first and create one service per application
+process. `submit(tool_name, query)` validates the input, records a run and
+returns its integer ID without waiting for tool execution; `status(run_id)`
+returns the persisted record (or `None`), and `cancel(run_id)` requests
+cancellation and returns whether the run was active. Poll status for the
+terminal outcome. Cancellation is recorded as `failed` with the error
+`Run cancelled.` for compatibility with existing databases.
+
+Configure `RunLimits(max_concurrent=2, timeout_seconds=300,
+max_query_chars=254, max_output_bytes=1000000)` when constructing the service.
+There is no waiting queue: `CapacityError` explicitly rejects submissions when
+all slots are occupied. Execution occurs in child processes, which are stopped
+on timeout or cancellation; tool failures and unexpected worker exits are
+recorded as failures. Call `close()` during orderly application shutdown.
+If saving an outcome fails, the service retains it in memory and keeps its
+capacity slot reserved. Calling `status(run_id)` retries the write and raises
+`RuntimeError` if it still cannot be saved; retry after restoring database
+access. Pending outcomes are lost if the application process exits.
+
+These limits apply per service instance, not across web server processes or
+hosts. Use a single application process or an external coordinator to enforce
+a deployment-wide limit. An abrupt application crash can leave `running`
+records behind; this in-process service is not a durable job queue. A web
+interface must enforce authentication, authorization, CSRF protection as
+appropriate, and access controls on run records before exposing these methods.
+Tool output is limited when returned to the parent; tools may still consume
+additional memory internally while producing it.
 ## Browser interface
 
 Start the local browser interface with:
