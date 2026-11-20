@@ -184,7 +184,10 @@ Use OSINT Beast only with data and targets you are authorized to assess, and fol
 
 ## Development roadmap
 
-This roadmap describes planned work, not a promise or release schedule. Priorities may change as the project develops.
+This roadmap is ordered by priority and prerequisite: earlier sections establish
+the safety and shared-service foundations needed by later work. It describes
+planned work, not a promise or release schedule, and priorities may change as
+the project develops.
 
 ### UI direction
 
@@ -203,26 +206,26 @@ shared application services rather than duplicating CLI behavior.
 
 ### 2. Harden tool execution and data handling
 
+- [ ] Keep downloads and installation constrained to reviewed registry entries and safe paths.
 - [ ] Prefer supported in-process integrations or private input mechanisms for sensitive values.
 - [ ] Ensure long-running operations time out gracefully and return control to the CLI.
 - [ ] Standardize run status, timestamps, errors, and result persistence.
 - [ ] Parse tool output into normalized findings while preserving raw output and reporting malformed or unsupported formats explicitly.
 - [ ] Document retention, local database permissions, and sensitive-output handling.
-- [ ] Keep downloads and installation constrained to reviewed registry entries and safe paths.
+- [ ] Keep arbitrary SQL unavailable to any future web-facing interface.
 
 ### 3. Improve the CLI and service boundaries
 
 - [ ] Separate reusable application services from menu/input/output code.
 - [ ] Provide clear help, input validation, and actionable error messages.
 - [ ] Add structured result-history views and safe export options.
-- [ ] Keep arbitrary SQL unavailable to any future web-facing interface.
 
 ### 4. Build a web UI
 
-- [ ] Define a small backend API around the shared application services.
 - [ ] Add authentication and authorization before exposing any network-accessible interface.
-- [ ] Add a simple UI for launching authorized runs and viewing their status and results.
 - [ ] Run long tasks outside request handlers and enforce resource limits.
+- [ ] Define a small backend API around the shared application services.
+- [ ] Add a simple UI for launching authorized runs and viewing their status and results.
 - [ ] Add web-route tests with mocked tool execution and security checks.
 
 ### 5. Expand persistence and integrations
