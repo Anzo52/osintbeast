@@ -121,6 +121,46 @@ Inputs, results, and errors can contain sensitive data. They are stored in
 plain text in the local database; restrict its permissions and delete records
 when no longer needed. Searches send the supplied input to third-party sites.
 
+### Local HTTP API
+
+The experimental HTTP API is separate from the CLI and does not provide a
+browser UI. It requires configured bearer credentials before starting and binds
+only to `127.0.0.1`; remote binding is not supported. Keep it on a trusted
+machine and do not expose it through a proxy or port forward.
+
+Set `OSINTBEAST_API_TOKENS` to a JSON object whose keys are unique,
+cryptographically random URL-safe tokens of at least 32 characters and whose
+values are roles. Configure the value through a secret manager or another
+private environment mechanism; do not commit it, place it in a URL, or include
+it in logs:
+
+```text
+{"<32+ character random operator token>":"operator","<32+ character random viewer token>":"viewer"}
+```
+
+Replace the example token placeholders with private random tokens, then set the
+JSON as `OSINTBEAST_API_TOKENS` in the server's environment and start the API:
+
+```bash
+python -m web_api
+```
+
+An `operator` may launch checks and view runs and results. A `viewer` may view
+runs and results but cannot launch checks. Every API route requires a bearer
+token; missing or invalid credentials receive `401`, and insufficient
+permissions receive `403`. The API exposes only fixed operations, not custom
+SQL:
+
+| Method | Path | Access |
+| --- | --- | --- |
+| `POST` | `/api/runs` | Operator; JSON body contains `tool` and `query` strings |
+| `GET` | `/api/runs` | Operator or viewer |
+| `GET` | `/api/results` | Operator or viewer |
+
+This server uses plain HTTP and is intentionally loopback-only. Do not make it
+remotely accessible; a future remote deployment must add HTTPS and retain
+server-side authentication and authorization.
+
 ### Database initialization
 
 Select **Initialize Database** from the menu. In a source checkout, the default
