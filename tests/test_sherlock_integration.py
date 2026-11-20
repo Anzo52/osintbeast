@@ -72,7 +72,7 @@ def test_run_sherlock_uses_bundled_non_nsfw_sites(monkeypatch, tmp_path):
     assert output == [
         {
             "site": "Example",
-            "url": "https://example.test/user",
+            "url": "https://example.test/[redacted]",
             "status": "Claimed",
             "http_status": 200,
             "error": None,

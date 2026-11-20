@@ -2,6 +2,8 @@ import json
 import re
 from importlib.resources import as_file, files
 
+from tool_runs import redact_sensitive_data
+
 SHERLOCK_REQUEST_TIMEOUT_SECONDS = 15
 
 
@@ -57,6 +59,8 @@ def run_sherlock(username: str) -> str:
             "error": status.context,
         })
     try:
-        return json.dumps(records, ensure_ascii=False, indent=2)
+        return json.dumps(
+            redact_sensitive_data(records, username), ensure_ascii=False, indent=2
+        )
     except (TypeError, ValueError) as exc:
         raise RuntimeError("Sherlock returned results that could not be serialized.") from exc

@@ -1,24 +1,62 @@
+import json
 import logging
 import re
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
-from urllib.parse import quote, quote_plus
 
 import data.utils.database as database
 
 
 def _redact_sensitive_value(text: str, sensitive_value: str) -> str:
-    """Redact common direct and URL-encoded representations of an input."""
-    variants = {
-        sensitive_value,
-        quote(sensitive_value, safe=""),
-        quote_plus(sensitive_value),
-    }
-    for variant in sorted(variants, key=len, reverse=True):
-        if variant:
-            text = re.sub(re.escape(variant), "[redacted]", text, flags=re.IGNORECASE)
-    return text
+    """Redact whole input values, including partially URL-encoded forms."""
+    if not sensitive_value:
+        return text
+
+    alternatives = []
+    for char in sensitive_value:
+        encoded = "".join(f"%{byte:02X}" for byte in char.encode("utf-8"))
+        representations = [re.escape(char), re.escape(encoded)]
+        if char == " ":
+            representations.append(r"\+")
+        alternatives.append(f"(?:{'|'.join(representations)})")
+    pattern = re.compile(
+        rf"(?<![A-Za-z0-9_.-])(?<!\[){''.join(alternatives)}"
+        r"(?![A-Za-z0-9_.-])(?!\])",
+        re.IGNORECASE,
+    )
+    return pattern.sub("[redacted]", text)
+
+
+def redact_sensitive_data(value, sensitive_value: str):
+    """Redact string values in structured data without changing its schema."""
+    if isinstance(value, str):
+        return _redact_sensitive_value(value, sensitive_value)
+    if isinstance(value, dict):
+        return {
+            key: redact_sensitive_data(item, sensitive_value)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_sensitive_data(item, sensitive_value) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_sensitive_data(item, sensitive_value) for item in value)
+    return value
+
+
+def redact_sensitive_output(output: str, sensitive_value: str) -> str:
+    """Redact JSON values as data, falling back to text for other output."""
+    try:
+        structured = json.loads(output)
+    except (TypeError, json.JSONDecodeError):
+        return _redact_sensitive_value(output, sensitive_value)
+    if isinstance(structured, (dict, list)):
+        return json.dumps(
+            redact_sensitive_data(structured, sensitive_value),
+            ensure_ascii=False,
+            indent=2,
+        )
+    return _redact_sensitive_value(output, sensitive_value)
 
 
 def execute_tool_run(
@@ -64,6 +102,6 @@ def execute_tool_run(
         database.finish_tool_run(run_id, "failed", error_text=message)
         return "failed", message
     if sensitive_input:
-        output = _redact_sensitive_value(output, query_text)
+        output = redact_sensitive_output(output, query_text)
     database.finish_tool_run(run_id, "success", result_text=output)
     return "success", output

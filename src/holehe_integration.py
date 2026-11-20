@@ -1,9 +1,9 @@
 import json
 import re
 import sqlite3
-from urllib.parse import quote, quote_plus
 
 import data.utils.database as database
+from tool_runs import redact_sensitive_data, redact_sensitive_output
 
 HOLEHE_TIMEOUT_SECONDS = 300
 
@@ -85,7 +85,7 @@ def _run_holehe(email: str):
 def run_holehe(email: str):
     """Run Holehe in-process so the email is not exposed in process arguments."""
     email = validate_email(email)
-    results = _run_holehe(email)
+    results = redact_sensitive_data(_run_holehe(email), email)
     return {
         "returncode": 0,
         "output": json.dumps(results, ensure_ascii=False, indent=2),
@@ -93,12 +93,7 @@ def run_holehe(email: str):
 
 
 def save_tool_result(tool_name: str, query_text: str, result_text: str):
-    variants = {query_text, quote(query_text, safe=""), quote_plus(query_text)}
-    for variant in sorted(variants, key=len, reverse=True):
-        if variant:
-            result_text = re.sub(
-                re.escape(variant), "[redacted]", result_text, flags=re.IGNORECASE
-            )
+    result_text = redact_sensitive_output(result_text, query_text)
     conn = sqlite3.connect(database.DB_FILE)
     try:
         conn.execute(
