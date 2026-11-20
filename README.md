@@ -64,10 +64,9 @@ This indicates presence, not whether the tool or all its dependencies work.
 Use the arrow keys and Enter to choose a tool to download or install; installing
 uses the default `tools/<name>` download folder. A custom installation folder is
 available as an alternate menu choice. Database views include recent runs and
-saved results, alongside a custom SQL option. Type only the information that
-cannot be selected in advance, such as a username, email address, custom folder,
-or custom SQL query. Errors are reported in the menu so you can correct the
-input or environment and try again.
+saved results. Type only the information that cannot be selected in advance,
+such as a username, email address, or custom folder. Errors are reported in the
+menu so you can correct the input or environment and try again.
 
 ### Running checks
 
@@ -113,8 +112,9 @@ The CLI validates input before recording a run and uses a non-echoing prompt.
 Holehe, Maigret, Helix, and Sherlock receive sensitive input through their
 in-process Python APIs, not process arguments. Their run records use a
 `[redacted]` query; direct and URL-encoded occurrences of the input are also
-redacted from saved and displayed results and errors. A `running` record can
-remain after interruption or a database-write failure. Existing
+redacted from saved and displayed results and errors. A Ctrl+C during a check
+marks the run as failed before exiting; a `running` record can remain after an
+abrupt termination or a database-write failure. Existing
 `ToolResults` rows are preserved but do not gain historical run statuses.
 
 Inputs, results, and errors can contain sensitive data. They are stored in

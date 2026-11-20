@@ -110,8 +110,8 @@ def insert_data(table: str, data: Mapping[str, Any]) -> None:
 def query_database(query: str, parameters: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
     """Execute a SQL query and return its rows.
 
-    This is retained for the local CLI. Web routes should use specific,
-    parameterized repository functions rather than accepting arbitrary SQL.
+    Web routes should use specific, parameterized repository functions rather
+    than accepting arbitrary SQL.
     """
     with closing(connect_db()) as conn:
         cursor = conn.execute(query, parameters)

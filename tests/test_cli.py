@@ -1,3 +1,4 @@
+import sqlite3
 import subprocess
 import zipfile
 import zlib
@@ -40,6 +41,19 @@ def test_main_menu_ignores_cancelled_or_invalid_choices(monkeypatch, choice):
     main.main_menu()
 
     action.assert_not_called()
+
+
+def test_menu_reports_initialization_failure(monkeypatch, capsys):
+    def fail():
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(main, "init_db", fail)
+
+    main.menu_actions()[0]()
+
+    assert capsys.readouterr().out == (
+        "Database initialization failed: unable to open database file\n"
+    )
 
 
 @pytest.mark.parametrize(
