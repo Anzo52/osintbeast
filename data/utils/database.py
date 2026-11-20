@@ -153,6 +153,16 @@ def start_tool_run(tool_name: str, query_text: str):
         return cursor.lastrowid
 
 
+def get_tool_run(run_id: int) -> Optional[tuple[Any, ...]]:
+    """Return one run and its result, or None if it does not exist."""
+    with closing(connect_db()) as conn:
+        return conn.execute(
+            """SELECT runID, toolName, queryText, status, resultText, errorText,
+                      startedAt, finishedAt FROM ToolRuns WHERE runID = ?""",
+            (run_id,),
+        ).fetchone()
+
+
 def finish_tool_run(
     run_id: int, status: str, result_text: Optional[str] = None,
     error_text: Optional[str] = None,
