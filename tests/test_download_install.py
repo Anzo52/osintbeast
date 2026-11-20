@@ -7,6 +7,7 @@ import requests
 
 import downloader
 import installer
+import tool_registry
 
 
 def _zip_response(files):
@@ -81,13 +82,13 @@ def test_download_repo_tries_master_after_main_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(downloader.requests, "get", fake_get)
 
     result = downloader.download_github_repo(
-        "https://github.com/example/repo", str(tmp_path)
+        "https://github.com/megadose/holehe", str(tmp_path)
     )
 
     assert result == str(tmp_path.resolve())
     assert requests_seen == [
-        "https://github.com/example/repo/archive/refs/heads/main.zip",
-        "https://github.com/example/repo/archive/refs/heads/master.zip",
+        "https://github.com/megadose/holehe/archive/refs/heads/main.zip",
+        "https://github.com/megadose/holehe/archive/refs/heads/master.zip",
     ]
 
 
@@ -100,7 +101,75 @@ def test_download_repo_rejects_archive_path_traversal(tmp_path, monkeypatch):
 
     with pytest.raises(ValueError, match="unsafe path"):
         downloader.download_github_repo(
-            "https://github.com/example/repo", str(tmp_path / "download")
+            "https://github.com/megadose/holehe", str(tmp_path / "download")
+        )
+
+    assert not (tmp_path / "outside.txt").exists()
+
+
+@pytest.mark.parametrize(
+    "repo_url",
+    [
+        "https://github.com/example/repo",
+        "https://attacker.example/megadose/holehe",
+        "http://github.com/megadose/holehe",
+        "https://user@github.com/megadose/holehe",
+    ],
+)
+def test_download_repo_rejects_unreviewed_sources(repo_url, monkeypatch, tmp_path):
+    monkeypatch.setattr(
+        downloader.requests,
+        "get",
+        lambda *args, **kwargs: pytest.fail("unreviewed URL triggered a request"),
+    )
+
+    with pytest.raises(ValueError):
+        downloader.download_github_repo(repo_url, str(tmp_path))
+
+
+def test_download_tool_rejects_invalid_registry_repository(monkeypatch, tmp_path):
+    invalid_metadata = dict(tool_registry.TOOL_REGISTRY["holehe"])
+    invalid_metadata["repo"] = "https://attacker.example/repository"
+    monkeypatch.setitem(tool_registry.TOOL_REGISTRY, "holehe", invalid_metadata)
+    monkeypatch.setattr(
+        downloader.requests,
+        "get",
+        lambda *args, **kwargs: pytest.fail("invalid registry URL triggered a request"),
+    )
+
+    with pytest.raises(ValueError):
+        downloader.download_tool("holehe", str(tmp_path))
+
+
+@pytest.mark.parametrize("module", [downloader, installer])
+def test_download_tool_rejects_destination_symlink_escape(module, tmp_path, monkeypatch):
+    output = tmp_path / "downloads"
+    output.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (output / "holehe").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(
+        downloader.requests,
+        "get",
+        lambda *args, **kwargs: pytest.fail("unsafe destination triggered a request"),
+    )
+
+    with pytest.raises(ValueError, match="escapes"):
+        module.download_tool("holehe", str(output))
+
+
+def test_installer_download_rejects_archive_path_traversal(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        downloader.requests,
+        "get",
+        lambda *args, **kwargs: _zip_response(
+            {"repo-main/../../outside.txt": "not written"}
+        ),
+    )
+
+    with pytest.raises(ValueError, match="unsafe path"):
+        installer.download_github_repo(
+            "https://github.com/megadose/holehe", str(tmp_path / "download")
         )
 
     assert not (tmp_path / "outside.txt").exists()
@@ -136,3 +205,15 @@ def test_install_tool_rejects_unknown_and_non_python_tools(tmp_path):
 def test_install_tool_reports_missing_python_project(tmp_path):
     with pytest.raises(ValueError, match="No Python project metadata"):
         installer.install_tool("holehe", str(tmp_path))
+
+
+def test_install_tool_rejects_nested_project_symlink_escape(tmp_path):
+    tool_dir = tmp_path / "tool"
+    tool_dir.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "pyproject.toml").write_text("[project]\nname = 'outside'\n")
+    (tool_dir / "project").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="escapes"):
+        installer.install_tool("holehe", str(tool_dir))

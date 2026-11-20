@@ -3,6 +3,7 @@ from __future__ import annotations
 from importlib.metadata import PackageNotFoundError, distribution
 from shutil import which
 from typing import TypedDict
+from urllib.parse import urlparse
 
 
 class ToolMetadata(TypedDict):
@@ -69,6 +70,33 @@ def get_tool_metadata(name: str) -> ToolMetadata | None:
     if not isinstance(name, str):
         return None
     return TOOL_REGISTRY.get(name.strip().lower())
+
+
+def get_reviewed_repo_url(repo_url: str) -> str:
+    """Return a canonical repository URL only when it is a valid registry entry."""
+    if not isinstance(repo_url, str):
+        raise ValueError("Repository URL is not a reviewed tool registry entry.")
+
+    parsed = urlparse(repo_url)
+    parts = parsed.path.split("/")
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "github.com"
+        or parsed.query
+        or parsed.fragment
+        or len(parts) != 3
+        or not parts[1]
+        or not parts[2]
+        or parts[1] in {".", ".."}
+        or parts[2] in {".", ".."}
+    ):
+        raise ValueError("Only canonical HTTPS GitHub repository URLs are supported.")
+
+    if repo_url not in {
+        metadata.get("repo") for metadata in TOOL_REGISTRY.values()
+    }:
+        raise ValueError("Repository URL is not a reviewed tool registry entry.")
+    return repo_url
 
 
 def is_tool_installed(name: str) -> bool:
