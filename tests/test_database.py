@@ -94,6 +94,13 @@ def test_mysql_schemas_are_split_by_domain_and_include_run_history():
     assert "CREATE TABLE IF NOT EXISTS ToolResults" in tool_schema
     assert "CREATE TABLE IF NOT EXISTS ToolRuns" in tool_schema
     assert "CREATE TABLE IF NOT EXISTS Platforms" not in tool_schema
+    assert "UNIQUE KEY uq_domains_domain (domain)" in info_schema
+    assert "CONSTRAINT fk_usernames_services" in info_schema
+    assert "KEY idx_toolresults_tool_created (toolName, createdAt)" in tool_schema
+    assert (
+        "CHECK (status IN ('running', 'success', 'failed', 'timed_out'))"
+        in tool_schema
+    )
 
 
 def test_setup_database_preserves_existing_data_and_repairs_missing_objects(

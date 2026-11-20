@@ -39,6 +39,9 @@ helix = [
 sherlock = [
     "sherlock-project>=0.16.2,<0.17",
 ]
+mysql = [
+    "PyMySQL>=1.1.1,<2",
+]
 
 [tool.setuptools]
 package-dir = {"" = "src", "osintbeast_schemas" = "data/schemas", "data.utils" = "data/utils"}

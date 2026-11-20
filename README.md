@@ -121,31 +121,60 @@ Inputs, results, and errors can contain sensitive data. They are stored in
 plain text in the local database; restrict its permissions and delete records
 when no longer needed. Searches send the supplied input to third-party sites.
 
-### Database initialization
+### Database configuration and initialization
 
 Select **Initialize Database** from the menu. In a source checkout, the default
 database is `osintbeast.db` in the repository root, regardless of the current
-working directory. Initialization creates missing tables and indexes in one
-transaction; running it again preserves existing records and recreates missing
-schema objects, including the new run-history table in existing databases. It
-does not migrate or repair incompatible existing tables.
+working directory. SQLite initialization creates missing tables and indexes in
+one transaction; running it again preserves existing records and recreates
+missing schema objects, including the run-history table in existing databases.
+It does not migrate or repair incompatible existing tables.
 
-To use a different location, set `OSINTBEAST_DB_PATH` before starting the
-application. For a source checkout, the default remains the repository-root
+To use SQLite at a different location, set `OSINTBEAST_DB_PATH` before starting
+the application. For a source checkout, the default remains the repository-root
 `osintbeast.db`. For an installed package, the default is a per-user data
 directory: `%APPDATA%\osintbeast` on Windows,
 `~/Library/Application Support/osintbeast` on macOS, or
 `$XDG_DATA_HOME/osintbeast` on Linux (falling back to
 `~/.local/share/osintbeast`). The database directory is created as needed.
 Custom relative paths are resolved against the working directory at startup.
-Initialization errors are reported in the menu; check the path and permissions
-before retrying.
 
 ```bash
 # Linux/macOS, for example
 export OSINTBEAST_DB_PATH="$HOME/osintbeast.db"
 # Windows PowerShell: $env:OSINTBEAST_DB_PATH = "$HOME\osintbeast.db"
 ```
+
+MySQL is also supported through the same persistence operations. Install the
+optional driver and set `OSINTBEAST_DATABASE_URL`; this setting takes precedence
+over `OSINTBEAST_DB_PATH`.
+
+```bash
+python -m pip install -e ".[mysql]"
+export OSINTBEAST_DATABASE_URL="mysql://${MYSQL_USER}:${MYSQL_PASSWORD}@db.example:3306/osintbeast?charset=utf8mb4"
+```
+
+The target database must already exist, and the configured account needs
+permission to create tables and indexes and to read/write the application
+tables. Use a protected secret source rather than committing credentials or
+putting a production password in shell history; URL-encode special characters
+in credentials. `mysql://` URLs are accepted and use PyMySQL automatically.
+Supported MySQL servers are MySQL 8.0.16 or
+newer (the schema uses enforced `CHECK` constraints); MariaDB and older MySQL
+releases are not currently covered. The MySQL schema uses InnoDB, foreign keys,
+uniqueness constraints, and indexes for relation and recent-run queries.
+
+Run **Initialize Database** after configuring the URL. MySQL initialization is
+idempotent: it creates absent tables with their declared indexes and preserves existing rows,
+including by adding the `ToolRuns` table to a pre-run-history installation.
+MySQL commits DDL implicitly, so initialization cannot roll back already
+created tables if a later statement fails. It does not alter incompatible
+existing columns, add constraints to tables that already existed without them,
+or migrate data between SQLite and MySQL. Back up the database before applying
+schema changes and use a MySQL-compatible client for custom SQL queries.
+
+Initialization errors are reported in the menu; check the path and permissions
+before retrying.
 
 ## Development and tests
 
@@ -158,6 +187,8 @@ python -m ruff check --select E4,E7,E9,F src data tests
 ```
 
 Tests should mock network requests and external tool execution; normal test runs should not contact third-party services or perform real scans. Keep database and subprocess behavior covered by focused tests.
+MySQL storage behavior is tested with a mocked SQLAlchemy engine, so CI does
+not require a live MySQL service.
 The Maigret API-contract tests require the optional extra; without it those
 tests are skipped.
 
@@ -230,7 +261,7 @@ shared application services rather than duplicating CLI behavior.
 
 ### 5. Expand persistence and integrations
 
-- [ ] Complete and test MySQL schema and database support behind a storage interface.
+- [x] Complete and test MySQL schema and database support behind a storage interface.
 - [x] Add a first-party run integration for Sherlock; Sublist3r and Amass remain candidates, with documented inputs, outputs, and safety requirements.
 - [ ] Document deployment, backup, upgrade, and migration procedures.
 

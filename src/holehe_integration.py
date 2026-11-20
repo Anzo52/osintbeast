@@ -1,6 +1,5 @@
 import json
 import re
-import sqlite3
 
 import data.utils.database as database
 
@@ -92,21 +91,4 @@ def run_holehe(email: str):
 
 
 def save_tool_result(tool_name: str, query_text: str, result_text: str):
-    conn = sqlite3.connect(database.DB_FILE)
-    try:
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS ToolResults (
-                resultID INTEGER PRIMARY KEY AUTOINCREMENT,
-                toolName TEXT NOT NULL,
-                queryText TEXT NOT NULL,
-                resultText TEXT,
-                createdAt TEXT DEFAULT CURRENT_TIMESTAMP
-            )"""
-        )
-        conn.execute(
-            "INSERT INTO ToolResults (toolName, queryText, resultText) VALUES (?, ?, ?)",
-            (tool_name, query_text, result_text),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    return database.save_tool_result(tool_name, query_text, result_text)

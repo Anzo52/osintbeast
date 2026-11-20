@@ -1,10 +1,12 @@
 import os
 import sqlite3
 import sys
-from contextlib import closing
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping, Optional
+
+from data.utils.storage import MySQLStorage, SQLiteStorage, Storage, StorageError
+
 
 # Keep source-checkout paths independent of the current working directory.
 def setup_database_paths(module_file):
@@ -54,103 +56,79 @@ def _user_data_directory():
 
 
 DB_FILE, SCHEMA_DIR, SCHEMA_FILES, INSERTABLE_TABLES = setup_database_paths(__file__)
+MYSQL_SCHEMA_FILES = ("mysql-infoschema.sql", "mysql-toolschema.sql")
+_STORAGE_CACHE: dict[tuple[Any, ...], Storage] = {}
+DATABASE_ERRORS = (sqlite3.Error, StorageError)
 
 
-def connect_db() -> sqlite3.Connection:
-    """Open the SQLite database with foreign-key enforcement enabled."""
-    Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+def _get_storage() -> Storage:
+    database_url = os.environ.get("OSINTBEAST_DATABASE_URL")
+    if database_url:
+        if not database_url.startswith(("mysql://", "mysql+pymysql://")):
+            raise StorageError(
+                "OSINTBEAST_DATABASE_URL must use mysql:// or mysql+pymysql://."
+            )
+        key = ("mysql", database_url, str(SCHEMA_DIR))
+        if key not in _STORAGE_CACHE:
+            _STORAGE_CACHE[key] = MySQLStorage(
+                database_url,
+                SCHEMA_DIR,
+                MYSQL_SCHEMA_FILES,
+                INSERTABLE_TABLES,
+            )
+        return _STORAGE_CACHE[key]
+
+    key = ("sqlite", DB_FILE, str(SCHEMA_DIR), SCHEMA_FILES)
+    if key not in _STORAGE_CACHE:
+        _STORAGE_CACHE[key] = SQLiteStorage(
+            DB_FILE, SCHEMA_DIR, SCHEMA_FILES, INSERTABLE_TABLES
+        )
+    return _STORAGE_CACHE[key]
+
+
+def connect_db():
+    """Open the selected backend's connection for legacy callers."""
+    return _get_storage().connect()
 
 
 def setup_database() -> None:
-    """Create missing schema objects atomically without replacing existing data."""
-    schemas = []
-    for schema_name in SCHEMA_FILES:
-        schema_path = SCHEMA_DIR.joinpath(schema_name)
-        if not schema_path.is_file():
-            raise FileNotFoundError(f"SQLite schema file not found: {schema_path}")
-        schemas.append(schema_path.read_text(encoding="utf-8"))
-
-    with closing(connect_db()) as conn, conn:
-        conn.executescript("BEGIN IMMEDIATE;\n" + "\n".join(schemas))
+    """Create missing schema objects without replacing existing data."""
+    _get_storage().setup()
 
 
 def insert_data(table: str, data: Mapping[str, Any]) -> None:
-    """Insert a mapping into a known table using bound SQLite parameters.
-
-    The table allowlist and live column check constrain SQL identifiers; values
-    are always passed separately to SQLite.
-    """
-    if not data:
-        raise ValueError("data must contain at least one column")
-    if not isinstance(table, str) or table not in INSERTABLE_TABLES:
-        raise ValueError(f"Unknown database table: {table}")
-
-    with closing(connect_db()) as conn, conn:
-        valid_columns = {
-            row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')
-        }
-        columns = list(data)
-        if any(
-            not isinstance(column, str) or column not in valid_columns
-            for column in columns
-        ):
-            raise ValueError(f"Unknown column for table {table}")
-
-        quoted_columns = ", ".join(f'"{column}"' for column in columns)
-        placeholders = ", ".join("?" for _ in columns)
-        conn.execute(
-            f'INSERT INTO "{table}" ({quoted_columns}) VALUES ({placeholders})',
-            tuple(data[column] for column in columns),
-        )
+    """Insert a mapping into an allowlisted table using bound values."""
+    _get_storage().insert(table, data)
 
 
-def query_database(query: str, parameters: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+def query_database(
+    query: str, parameters: tuple[Any, ...] = ()
+) -> list[tuple[Any, ...]]:
     """Execute a SQL query and return its rows.
 
     This is retained for the local CLI. Web routes should use specific,
     parameterized repository functions rather than accepting arbitrary SQL.
     """
-    with closing(connect_db()) as conn:
-        cursor = conn.execute(query, parameters)
-        return cursor.fetchall()
+    return _get_storage().query(query, parameters)
 
 
 def save_tool_result(
     tool_name: str, query_text: str, result_text: Optional[str]
 ):
     """Persist a tool run and return its result row ID."""
-    with closing(connect_db()) as conn, conn:
-        cursor = conn.execute(
-            """INSERT INTO ToolResults (toolName, queryText, resultText)
-               VALUES (?, ?, ?)""",
-            (tool_name, query_text, result_text),
-        )
-        return cursor.lastrowid
+    return _get_storage().save_tool_result(tool_name, query_text, result_text)
 
 
 def list_tool_results(limit: int = 100) -> list[tuple[Any, ...]]:
     """Return recent tool runs, newest first, with a bounded page size."""
     if not 1 <= limit <= 500:
         raise ValueError("limit must be between 1 and 500")
-    with closing(connect_db()) as conn:
-        return conn.execute(
-            """SELECT resultID, toolName, queryText, resultText, createdAt
-               FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
-            (limit,),
-        ).fetchall()
+    return _get_storage().list_tool_results(limit)
 
 
 def start_tool_run(tool_name: str, query_text: str):
     """Create a running record before starting an external check."""
-    with closing(connect_db()) as conn, conn:
-        cursor = conn.execute(
-            "INSERT INTO ToolRuns (toolName, queryText, status) VALUES (?, ?, 'running')",
-            (tool_name, query_text),
-        )
-        return cursor.lastrowid
+    return _get_storage().start_tool_run(tool_name, query_text)
 
 
 def finish_tool_run(
@@ -164,17 +142,4 @@ def finish_tool_run(
         status != "success" and (error_text is None or result_text is not None)
     ):
         raise ValueError("Success requires a result; failures require an error.")
-    with closing(connect_db()) as conn, conn:
-        cursor = conn.execute(
-            """UPDATE ToolRuns SET status = ?, resultText = ?, errorText = ?,
-               finishedAt = CURRENT_TIMESTAMP WHERE runID = ? AND status = 'running'""",
-            (status, result_text, error_text, run_id),
-        )
-        if cursor.rowcount != 1:
-            raise ValueError("Run does not exist or is already finished.")
-        if status == "success":
-            conn.execute(
-                """INSERT INTO ToolResults (toolName, queryText, resultText)
-                   SELECT toolName, queryText, resultText FROM ToolRuns WHERE runID = ?""",
-                (run_id,),
-            )
+    _get_storage().finish_tool_run(run_id, status, result_text, error_text)
