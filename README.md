@@ -223,8 +223,11 @@ Configure `RunLimits(max_concurrent=2, timeout_seconds=300,
 max_query_chars=254, max_output_bytes=1000000)` when constructing the service.
 There is no waiting queue: `CapacityError` explicitly rejects submissions when
 all slots are occupied. Execution occurs in child processes, which are stopped
-on timeout or cancellation; tool failures and unexpected worker exits are
-recorded as failures. Call `close()` during orderly application shutdown.
+on timeout or cancellation; each worker also monitors its deadline and its
+parent process so it exits if the parent dies. On POSIX, the worker's process
+group is killed as well; on Windows, this watchdog stops only the worker.
+Tool failures and unexpected worker exits are recorded as failures. Call
+`close()` during orderly application shutdown.
 If saving an outcome fails, the service retains it in memory and keeps its
 capacity slot reserved. Calling `status(run_id)` retries the write and raises
 `RuntimeError` if it still cannot be saved; retry after restoring database
