@@ -16,7 +16,8 @@ TOKENS = {OPERATOR_TOKEN: "operator", VIEWER_TOKEN: "viewer"}
 def api_server(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "api.db"))
     database.setup_database()
-    server = web_api.create_server(port=0, tokens=TOKENS)
+    monkeypatch.setenv("OSINTBEAST_API_TOKENS", json.dumps(TOKENS))
+    server = web_api.create_server(port=0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -25,6 +26,36 @@ def api_server(tmp_path, monkeypatch):
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+@pytest.mark.parametrize(
+    "raw_tokens",
+    [
+        "{",
+        "null",
+        "[]",
+        '"operator"',
+        "1",
+        "{}",
+        json.dumps({"o" * 31: "operator"}),
+        json.dumps({"o" * 257: "operator"}),
+        json.dumps({"+" * 40: "operator"}),
+        json.dumps({OPERATOR_TOKEN: "admin"}),
+        json.dumps({OPERATOR_TOKEN: None}),
+        json.dumps({OPERATOR_TOKEN: "operator", VIEWER_TOKEN: "admin"}),
+    ],
+)
+def test_server_rejects_invalid_environment_tokens_before_binding(
+    monkeypatch, raw_tokens
+):
+    monkeypatch.setenv("OSINTBEAST_API_TOKENS", raw_tokens)
+
+    def fail_if_bound(*args, **kwargs):
+        pytest.fail("Invalid token configuration must fail before binding.")
+
+    monkeypatch.setattr(web_api, "ThreadingHTTPServer", fail_if_bound)
+    with pytest.raises(ValueError):
+        web_api.create_server(port=0)
 
 
 def send_request(server, method, path, token=None, payload=None):
