@@ -113,6 +113,20 @@ def test_sensitive_existing_run_must_already_be_redacted(initialized_db):
     assert database.get_tool_run(run_id)[3] == "running"
 
 
+def test_sensitive_existing_redacted_run_is_completed(initialized_db):
+    run_id = database.start_tool_run("holehe", tool_runs.REDACTED)
+    assert tool_runs.execute_tool_run(
+        "holehe", "private input", lambda value: f"result: {value}",
+        run_id=run_id, sensitive_input=True,
+    ) == ("success", "result: private input")
+    assert database.get_tool_run(run_id)[2:6] == (
+        tool_runs.REDACTED, "success", tool_runs.REDACTED, None
+    )
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolResults"
+    ) == [(tool_runs.REDACTED, tool_runs.REDACTED)]
+
+
 def test_finish_is_atomic_if_legacy_result_insert_fails(initialized_db):
     run_id = database.start_tool_run("maigret", "test")
     with database.connect_db() as conn:
@@ -222,7 +236,9 @@ def test_cli_saves_success(
     monkeypatch.setattr(main, target, runner)
     function(value)
     runner.assert_called_once_with(query_text)
-    assert f"{tool.capitalize()} check saved to the database." in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert (result["output"] if isinstance(result, dict) else result) in output
+    assert f"{tool.capitalize()} run recorded with redacted input and output." in output
     assert database.query_database("SELECT toolName, queryText, status FROM ToolRuns") == [
         (tool, tool_runs.REDACTED, "success")
     ]

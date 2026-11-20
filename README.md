@@ -122,6 +122,9 @@ statuses. Use **Query Database** to inspect either table.
 Older records and other database entries may contain sensitive data in plain
 text; restrict database permissions and delete records when no longer needed.
 Searches send the supplied input to third-party sites.
+Code calling `execute_tool_run` must explicitly set `sensitive_input` to a
+boolean. Set it to `False` only when the input, output, and errors are safe to
+store unredacted.
 
 ### Database initialization
 

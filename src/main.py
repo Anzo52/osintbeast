@@ -103,7 +103,7 @@ def _run_check(tool_name, query_text, validator, runner):
         return
     if status == "success":
         print(value)
-        print(f"{tool_name.capitalize()} check saved to the database.")
+        print(f"{tool_name.capitalize()} run recorded with redacted input and output.")
     elif status == "timed_out":
         print(f"{tool_name.capitalize()} timed out: {value}")
     else:
