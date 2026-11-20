@@ -101,22 +101,22 @@ def test_missing_server_token_fails_closed():
 
 
 def test_status_route_returns_only_public_status_fields(client, monkeypatch):
-    monkeypatch.setattr(
-        database,
-        "get_tool_run",
-        lambda run_id: {
-            "run_id": run_id,
+    get_run = Mock(
+        return_value={
+            "run_id": 7,
             "tool": "holehe",
             "status": "failed",
             "started_at": "2026-01-01",
             "finished_at": "2026-01-01",
             "query": "private@example.com",
             "error": "internal exception",
-        },
+        }
     )
+    monkeypatch.setattr(database, "get_tool_run", get_run)
 
     response = client.get("/api/runs/7", headers=auth_headers())
 
+    get_run.assert_called_once_with(7)
     assert response.status_code == 200
     assert response.json == {
         "run_id": 7,
@@ -130,20 +130,20 @@ def test_status_route_returns_only_public_status_fields(client, monkeypatch):
 
 
 def test_result_route_returns_saved_result_without_query_text(client, monkeypatch):
-    monkeypatch.setattr(
-        database,
-        "get_tool_result",
-        lambda result_id: {
-            "result_id": result_id,
+    get_result = Mock(
+        return_value={
+            "result_id": 9,
             "tool": "holehe",
             "result": "scan output",
             "created_at": "2026-01-01",
             "query": "private@example.com",
-        },
+        }
     )
+    monkeypatch.setattr(database, "get_tool_result", get_result)
 
     response = client.get("/api/results/9", headers=auth_headers())
 
+    get_result.assert_called_once_with(9)
     assert response.status_code == 200
     assert response.json == {
         "result_id": 9,
