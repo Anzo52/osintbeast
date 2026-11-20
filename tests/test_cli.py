@@ -1,3 +1,4 @@
+import sqlite3
 import subprocess
 import zipfile
 import zlib
@@ -94,7 +95,8 @@ def test_query_reports_sqlite_error(tmp_path, monkeypatch, capsys):
     main.query("SELECT * FROM missing_table")
 
     assert capsys.readouterr().out == (
-        "Database query failed: no such table: missing_table\n"
+        "Database query failed: no such table: missing_table. "
+        "Initialize the database and check its permissions.\n"
     )
 
 
@@ -300,3 +302,97 @@ def test_query_menu_offers_recent_runs_without_custom_sql(monkeypatch):
     main.query_menu()
 
     assert query.call_args.args[0].startswith("SELECT runID, toolName, queryText, status")
+
+
+def test_cli_help_lists_commands_and_input_formats(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main.cli(["--help"])
+
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "check-email" in help_text
+    assert "check-username" in help_text
+    assert "init-db" in help_text
+
+    with pytest.raises(SystemExit) as exc_info:
+        main.cli(["check-email", "--help"])
+
+    assert exc_info.value.code == 0
+    assert "check-email [-h] email" in capsys.readouterr().out
+
+    with pytest.raises(SystemExit) as exc_info:
+        main.cli(["check-username", "--help"])
+
+    assert exc_info.value.code == 0
+    username_help = capsys.readouterr().out
+    assert "ASCII letters" in username_help
+    assert "underscores" in username_help
+    assert "hyphens" in username_help
+
+
+def test_cli_requires_command_arguments(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main.cli(["check-email"])
+
+    assert exc_info.value.code == 2
+    assert "the following arguments are required: email" in capsys.readouterr().err
+
+
+def test_cli_rejects_invalid_email_without_running_tool(monkeypatch, capsys):
+    runner = Mock()
+    monkeypatch.setattr(main, "run_holehe", runner)
+
+    result = main.cli(["check-email", "not-an-email"])
+
+    assert result == 2
+    assert "Input error: A valid email address is required." in capsys.readouterr().out
+    runner.assert_not_called()
+
+
+def test_cli_rejects_invalid_username_with_accepted_format(monkeypatch, capsys):
+    runner = Mock()
+    monkeypatch.setattr(main, "run_sherlock", runner)
+
+    result = main.cli(["check-username", "sherlock", "invalid username"])
+
+    assert result == 2
+    assert (
+        "Use a username of up to 100 letters, digits, dots, underscores or hyphens."
+        in capsys.readouterr().out
+    )
+    runner.assert_not_called()
+
+
+def test_cli_reports_optional_dependency_failure_and_nonzero_status(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "test.db"))
+    database.setup_database()
+
+    def missing_dependency(username):
+        raise RuntimeError(
+            "Maigret is required. Install it with `python -m pip install '.[maigret]'`."
+        )
+
+    monkeypatch.setattr(main, "run_maigret", missing_dependency)
+
+    result = main.cli(["check-username", "maigret", "valid_user"])
+
+    assert result == 1
+    assert (
+        "Maigret could not run: Maigret is required. "
+        "Install it with `python -m pip install '.[maigret]'`."
+    ) in capsys.readouterr().out
+
+
+def test_cli_returns_nonzero_for_database_execution_error(monkeypatch, capsys):
+    monkeypatch.setattr(
+        main,
+        "query_database",
+        Mock(side_effect=sqlite3.OperationalError("database is locked")),
+    )
+
+    result = main.cli(["query", "SELECT 1"])
+
+    assert result == 1
+    assert "Initialize the database and check its permissions." in capsys.readouterr().out

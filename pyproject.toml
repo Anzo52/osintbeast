@@ -25,6 +25,9 @@ dependencies = [
     "trio>=0.25,<1",
 ]
 
+[project.scripts]
+osintbeast = "main:cli"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=7,<9",

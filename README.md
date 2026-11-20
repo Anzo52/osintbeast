@@ -69,6 +69,28 @@ cannot be selected in advance, such as a username, email address, custom folder,
 or custom SQL query. Errors are reported in the menu so you can correct the
 input or environment and try again.
 
+### Command-line commands
+
+The installed `osintbeast` command also accepts direct commands. Run
+`osintbeast --help` or `osintbeast <command> --help` for complete usage. With
+no command, it opens the interactive menu.
+
+```text
+osintbeast init-db
+osintbeast list-tools
+osintbeast download TOOL
+osintbeast install TOOL [--path DIRECTORY]
+osintbeast check-email EMAIL
+osintbeast check-username {maigret,helix,sherlock} USERNAME
+osintbeast query SQL
+```
+
+Email checks accept a practical email address such as `person@example.com`.
+Username checks accept ASCII letters, digits, dots, underscores, and hyphens;
+Maigret and Sherlock allow up to 100 characters, while Helix allows up to 50
+and optionally accepts a leading `@`. Invalid inputs and failed operations
+print a corrective message and return a nonzero status.
+
 ### Running checks
 
 Holehe is installed with the standard dependencies. To enable Maigret in a
