@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import sqlite3
 from unittest.mock import Mock
 
@@ -128,6 +129,26 @@ def test_authentication_applies_to_reads_and_writes(client, monkeypatch):
         assert response["body"]["error"]["code"] == "unauthorized"
         assert response["headers"]["WWW-Authenticate"] == "Bearer"
     execute.assert_not_called()
+
+
+@pytest.mark.parametrize("scheme", ["bearer", "BEARER"])
+def test_authentication_scheme_is_case_insensitive(client, monkeypatch, scheme):
+    execute = Mock(return_value=(1, "success", None))
+    monkeypatch.setattr(api.tool_runs, "execute_tool_run_with_id", execute)
+    response = client(
+        "POST", "/runs", {"tool": "maigret", "query": "user", "authorized": True},
+        HTTP_AUTHORIZATION=f"{scheme} test-token",
+    )
+    assert response["status"] == 201
+
+
+def test_factory_initializes_database_and_private_permissions(tmp_path, monkeypatch):
+    db_path = tmp_path / "fresh.db"
+    monkeypatch.setattr(database, "DB_FILE", str(db_path))
+    api.create_app("test-token")
+    assert db_path.exists()
+    assert os.stat(db_path).st_mode & 0o777 == 0o600
+    assert database.query_database("SELECT name FROM sqlite_master WHERE type = 'table'")
 
 
 @pytest.mark.parametrize("token", [None, "", "non-ascii-\u2603"])

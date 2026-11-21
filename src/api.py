@@ -5,7 +5,8 @@ import json
 import os
 import re
 import sqlite3
-from wsgiref.simple_server import make_server
+from socketserver import ThreadingMixIn
+from wsgiref.simple_server import WSGIServer, make_server
 
 import data.utils.database as database
 import helix_integration
@@ -15,8 +16,8 @@ import sherlock_integration
 import tool_runs
 from tool_registry import get_tool_metadata
 
-
 MAX_BODY_SIZE = 4096
+REQUEST_TIMEOUT = 10
 
 
 def _holehe_runner(value):
@@ -51,11 +52,15 @@ def create_app(token):
     """Create a single-operator API; the token grants access to all runs."""
     if not isinstance(token, str) or not token or not token.isascii():
         raise ValueError("A non-empty ASCII API token is required.")
-    expected = ("Bearer " + token).encode("ascii")
+    database.setup_database()
+    expected = token.encode("ascii")
 
     def app(environ, start_response):
-        authorization = environ.get("HTTP_AUTHORIZATION", "").encode("utf-8")
-        if not hmac.compare_digest(authorization, expected):
+        authorization = environ.get("HTTP_AUTHORIZATION", "")
+        scheme, _, credentials = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not hmac.compare_digest(
+            credentials.encode("utf-8"), expected
+        ):
             return _error(start_response, "401 Unauthorized", "unauthorized",
                           "A valid bearer token is required.", [("WWW-Authenticate", "Bearer")])
 
@@ -131,8 +136,16 @@ def create_app(token):
     return app
 
 
+class _ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
+    daemon_threads = True
+
+    def get_request(self):
+        request, client_address = super().get_request()
+        request.settimeout(REQUEST_TIMEOUT)
+        return request, client_address
+
+
 if __name__ == "__main__":
     app = create_app(os.environ.get("OSINTBEAST_API_TOKEN"))
-    database.setup_database()
-    with make_server("127.0.0.1", 8000, app) as server:
+    with make_server("127.0.0.1", 8000, app, server_class=_ThreadingWSGIServer) as server:
         server.serve_forever()
