@@ -263,7 +263,7 @@ def test_history_menu_filter_handles_sqlite_errors(tmp_path, monkeypatch, capsys
     main.run_history_menu()
 
     output = capsys.readouterr().out
-    assert "Invalid history filter: no such table: ToolRuns" in output
+    assert "Invalid history filter:" not in output
     assert output.count("Run history query failed: no such table: ToolRuns") == 2
 
 

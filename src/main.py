@@ -273,7 +273,7 @@ def run_history_menu():
             offset = 0
             try:
                 list_tool_runs(tool_name=tool_name, status=status)
-            except (ValueError, sqlite3.Error) as exc:
+            except ValueError as exc:
                 print(f"Invalid history filter: {exc}")
                 tool_name = status = None
             except sqlite3.Error as exc:
