@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import subprocess
@@ -274,6 +275,70 @@ def test_list_tool_results_orders_newest_first_and_enforces_limit(
     for limit in (0, 501):
         with pytest.raises(ValueError, match="between 1 and 500"):
             database.list_tool_results(limit=limit)
+
+
+def test_list_tool_runs_filters_and_uses_stable_cursor_pagination(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "runs.db"))
+    database.setup_database()
+    run_ids = []
+    for tool, status in (
+        ("holehe", "success"),
+        ("maigret", "failed"),
+        ("holehe", "success"),
+        ("sherlock", "timed_out"),
+    ):
+        run_id = database.start_tool_run(tool, "input")
+        if status == "success":
+            database.finish_tool_run(run_id, status, result_text="result")
+        else:
+            database.finish_tool_run(run_id, status, error_text="error")
+        run_ids.append(run_id)
+
+    first_page = database.list_tool_runs(limit=2)
+    assert [row[0] for row in first_page] == run_ids[3:1:-1]
+
+    database.start_tool_run("newer", "inserted between pages")
+    next_page = database.list_tool_runs(
+        limit=2, before_run_id=first_page[-1][0]
+    )
+    assert [row[0] for row in next_page] == run_ids[1::-1]
+    assert database.list_tool_runs(
+        tool_name="holehe", status="success"
+    )[0][0] == run_ids[2]
+    assert database.list_tool_runs(
+        tool_name="holehe' OR 1=1 --"
+    ) == []
+
+
+def test_export_tool_runs_json_redacts_unless_given_boolean_consent(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "export.db"))
+    database.setup_database()
+    run_id = database.start_tool_run("holehe", "private@example.test")
+    result = 'line one\n"quoted"'
+    database.finish_tool_run(run_id, "success", result_text=result)
+
+    redacted = json.loads(database.export_tool_runs_json([run_id]))
+    included = json.loads(
+        database.export_tool_runs_json([run_id], include_sensitive=True)
+    )
+    assert redacted[0]["input"] == "[REDACTED]"
+    assert redacted[0]["result"] == "[REDACTED]"
+    assert included[0]["input"] == "private@example.test"
+    assert included[0]["result"] == result
+
+    with pytest.raises(ValueError, match="boolean"):
+        database.export_tool_runs_json([run_id], include_sensitive="false")
+    for invalid_id in (0, database.MAX_SQLITE_INTEGER + 1):
+        with pytest.raises(ValueError, match="SQLite integer"):
+            database.get_tool_run(invalid_id)
+        with pytest.raises(ValueError, match="SQLite integer"):
+            database.export_tool_runs_json([invalid_id])
+    with pytest.raises(ValueError, match="do not exist"):
+        database.export_tool_runs_json([run_id + 1])
 
 
 def test_insert_rejects_unknown_table_and_column(tmp_path, monkeypatch):

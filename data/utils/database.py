@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import sys
@@ -54,6 +55,7 @@ def _user_data_directory():
 
 
 DB_FILE, SCHEMA_DIR, SCHEMA_FILES, INSERTABLE_TABLES = setup_database_paths(__file__)
+MAX_SQLITE_INTEGER = (1 << 63) - 1
 
 
 def connect_db() -> sqlite3.Connection:
@@ -142,15 +144,35 @@ def list_tool_results(limit: int = 100) -> list[tuple[Any, ...]]:
         ).fetchall()
 
 
-def list_tool_runs(limit: int = 100) -> list[tuple[Any, ...]]:
-    """Return recent tool runs, newest first, with a bounded page size."""
+def list_tool_runs(
+    limit: int = 100, before_run_id: Optional[int] = None,
+    tool_name: Optional[str] = None, status: Optional[str] = None,
+) -> list[tuple[Any, ...]]:
+    """Return a page of tool runs, newest first, before an optional run ID."""
     _validate_list_limit(limit)
+    if before_run_id is not None:
+        _validate_run_id(before_run_id)
+    if tool_name is not None and (not isinstance(tool_name, str) or not tool_name):
+        raise ValueError("tool_name must be a non-empty string")
+    if status is not None and (
+        not isinstance(status, str)
+        or status not in {"running", "success", "failed", "timed_out"}
+    ):
+        raise ValueError("Invalid run status")
+
     with closing(connect_db()) as conn:
         return conn.execute(
             """SELECT runID, toolName, queryText, status, startedAt, finishedAt,
                       errorText
-               FROM ToolRuns ORDER BY runID DESC LIMIT ?""",
-            (limit,),
+               FROM ToolRuns
+               WHERE (? IS NULL OR runID < ?)
+                 AND (? IS NULL OR toolName = ?)
+                 AND (? IS NULL OR status = ?)
+               ORDER BY runID DESC LIMIT ?""",
+            (
+                before_run_id, before_run_id, tool_name, tool_name, status,
+                status, limit,
+            ),
         ).fetchall()
 
 
@@ -159,8 +181,18 @@ def _validate_list_limit(limit: int) -> None:
         raise ValueError("limit must be between 1 and 500")
 
 
+def _validate_run_id(run_id: int) -> None:
+    if (
+        not isinstance(run_id, int)
+        or isinstance(run_id, bool)
+        or not 1 <= run_id <= MAX_SQLITE_INTEGER
+    ):
+        raise ValueError("run_id must be a positive SQLite integer")
+
+
 def get_tool_run(run_id: int) -> Optional[tuple[Any, ...]]:
     """Return a run and its persisted result or error, if it exists."""
+    _validate_run_id(run_id)
     with closing(connect_db()) as conn:
         return conn.execute(
             """SELECT runID, toolName, queryText, status, resultText, errorText,
@@ -180,11 +212,57 @@ def start_tool_run(tool_name: str, query_text: str):
         return cursor.lastrowid
 
 
+def export_tool_runs_json(
+    run_ids: list[int], include_sensitive: bool = False,
+) -> str:
+    """Serialize selected run records as JSON, redacting sensitive text by default."""
+    if not isinstance(include_sensitive, bool):
+        raise ValueError("include_sensitive must be a boolean")
+    if not isinstance(run_ids, list) or not run_ids or len(run_ids) > 500:
+        raise ValueError("Select between 1 and 500 runs")
+    for run_id in run_ids:
+        _validate_run_id(run_id)
+    if len(set(run_ids)) != len(run_ids):
+        raise ValueError("run_ids must not contain duplicates")
+
+    records = []
+    with closing(connect_db()) as conn:
+        for run_id in run_ids:
+            row = conn.execute(
+                """SELECT runID, toolName, queryText, status, startedAt,
+                          finishedAt, resultText, errorText
+                   FROM ToolRuns WHERE runID = ?""",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("One or more selected runs do not exist")
+            sensitive_values = row[2], row[6], row[7]
+            if not include_sensitive:
+                sensitive_values = tuple(
+                    "[REDACTED]" if value is not None else None
+                    for value in sensitive_values
+                )
+            records.append(
+                {
+                    "run_id": row[0],
+                    "tool": row[1],
+                    "input": sensitive_values[0],
+                    "status": row[3],
+                    "started_at": row[4],
+                    "finished_at": row[5],
+                    "result": sensitive_values[1],
+                    "error": sensitive_values[2],
+                }
+            )
+    return json.dumps(records, ensure_ascii=False, indent=2)
+
+
 def finish_tool_run(
     run_id: int, status: str, result_text: Optional[str] = None,
     error_text: Optional[str] = None,
 ) -> None:
     """Finish a run and retain successful results in the legacy results table."""
+    _validate_run_id(run_id)
     if status not in {"success", "failed", "timed_out"}:
         raise ValueError(f"Invalid terminal run status: {status}")
     if (status == "success" and (result_text is None or error_text is not None)) or (
