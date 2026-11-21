@@ -2,6 +2,7 @@ import json
 import re
 
 import data.utils.database as database
+from tool_runs import redact_sensitive_data, redact_sensitive_output
 
 HOLEHE_TIMEOUT_SECONDS = 300
 
@@ -83,7 +84,7 @@ def _run_holehe(email: str):
 def run_holehe(email: str):
     """Run Holehe in-process so the email is not exposed in process arguments."""
     email = validate_email(email)
-    results = _run_holehe(email)
+    results = redact_sensitive_data(_run_holehe(email), email)
     return {
         "returncode": 0,
         "output": json.dumps(results, ensure_ascii=False, indent=2),
@@ -91,4 +92,5 @@ def run_holehe(email: str):
 
 
 def save_tool_result(tool_name: str, query_text: str, result_text: str):
-    return database.save_tool_result(tool_name, query_text, result_text)
+    result_text = redact_sensitive_output(result_text, query_text)
+    return database.save_tool_result(tool_name, "[redacted]", result_text)

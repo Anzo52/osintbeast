@@ -38,6 +38,9 @@ class Storage(Protocol):
 
 
 class SQLiteStorage:
+    _PRIVATE_FILE_MODE = 0o600
+    _COMPANION_SUFFIXES = ("-journal", "-shm", "-wal")
+
     def __init__(
         self,
         db_file: str,
@@ -51,10 +54,21 @@ class SQLiteStorage:
         self.insertable_tables = insertable_tables
 
     def connect(self) -> sqlite3.Connection:
-        Path(self.db_file).parent.mkdir(parents=True, exist_ok=True)
+        db_path = Path(self.db_file)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._enforce_private_permissions()
         conn = sqlite3.connect(self.db_file)
+        self._enforce_private_permissions()
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
+
+    def _enforce_private_permissions(self) -> None:
+        for path in (
+            Path(self.db_file),
+            *(Path(self.db_file + suffix) for suffix in self._COMPANION_SUFFIXES),
+        ):
+            if path.exists():
+                path.chmod(self._PRIVATE_FILE_MODE)
 
     def setup(self) -> None:
         schemas = []

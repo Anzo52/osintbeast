@@ -188,11 +188,26 @@ def test_legacy_downloader_initializes_full_schema(tmp_path, monkeypatch):
 def test_holehe_result_uses_initialized_database(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "results.db"))
     database.setup_database()
-    holehe_integration.save_tool_result("holehe", "person@example.com", "output")
+    holehe_integration.save_tool_result(
+        "holehe", "person@example.com", "output for person@example.com"
+    )
 
     assert database.query_database(
         "SELECT toolName, queryText, resultText FROM ToolResults"
-    ) == [("holehe", "person@example.com", "output")]
+    ) == [("holehe", "[redacted]", "output for [redacted]")]
+
+
+def test_holehe_result_redacts_partially_encoded_input(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "encoded-results.db"))
+    database.setup_database()
+    query = "person+tag@example.com"
+    holehe_integration.save_tool_result(
+        "holehe", query, "Found person+tag%40example.com"
+    )
+
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolResults"
+    ) == [("[redacted]", "Found [redacted]")]
 
 
 def test_database_path_override_is_shared_across_modules(tmp_path):

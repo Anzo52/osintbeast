@@ -2,7 +2,6 @@
 
 import json
 import ipaddress
-import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
@@ -171,7 +170,7 @@ def _run_in_background(run_id, tool_name, query_text, runner):
                 "failed",
                 error_text=str(exc) or "The tool run could not be completed.",
             )
-        except (sqlite3.Error, ValueError):
+        except (*database.DATABASE_ERRORS, ValueError):
             pass
 
 
@@ -297,7 +296,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 self._send_json(404, {"error": "Not found."})
         except ValueError as exc:
             self._send_json(400, {"error": str(exc)})
-        except sqlite3.Error:
+        except database.DATABASE_ERRORS:
             self._send_json(500, {"error": "Could not access the run database."})
 
     def do_POST(self):
@@ -358,7 +357,7 @@ class WebHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Request body must contain valid JSON."})
         except ValueError as exc:
             self._send_json(400, {"error": str(exc)})
-        except sqlite3.Error:
+        except database.DATABASE_ERRORS:
             self._send_json(500, {"error": "Could not access the run database."})
 
     def log_message(self, format, *args):
