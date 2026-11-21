@@ -8,6 +8,7 @@ OSINT Beast is a Python command-line framework for organizing authorized open-so
 - Download registered tools and install supported Python packages through the CLI. Binary tools such as Amass require manual installation.
 - Initialize a local SQLite database for OSINT records and tool metadata.
 - Run Holehe email checks and optional Maigret, Helix OSINT, and Sherlock username checks, with recorded outcomes.
+- Browse and filter run history, inspect run results, and export selected runs as JSON.
 - Query stored database records from the CLI.
 
 ### Integrated tools
@@ -153,6 +154,15 @@ Every terminal run has a UTC `finishedAt`; `success` requires saved output in
 `errorText` and no `resultText`. Successful outputs are also saved to the
 existing `ToolResults` table; failures and timeouts are never stored there.
 Use **Query Database** to inspect either table.
+
+Choose **Query Database → Run History** to browse the newest runs, filter by
+tool or status, inspect a run, and move between pages. Export selected run IDs
+as JSON when needed. The export redacts input, result, and error fields by
+default; explicitly answer yes to include values stored in the database.
+On POSIX, exports are created with owner-only permissions; sensitive exports
+are disabled on Windows because file permissions inherit from the destination
+directory. Exports will not overwrite an existing file. Store and share
+opted-in exports as sensitive data.
 
 Sublist3r and Amass do not yet have run integrations. Any future integration
 that needs an external process must pass sensitive input through standard input
@@ -354,7 +364,7 @@ shared application services rather than duplicating CLI behavior.
 
 - [ ] Separate reusable application services from menu/input/output code.
 - [ ] Provide clear help, input validation, and actionable error messages.
-- [ ] Add structured result-history views and safe export options.
+- [x] Add structured result-history views and safe export options.
 
 ### 4. Build a web UI
 

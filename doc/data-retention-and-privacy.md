@@ -16,8 +16,12 @@ error in `ToolRuns`, not `ToolResults`. Other structured records saved through
 the database are retained there as well.
 
 Inputs, results, and errors are stored as plain text. Output is displayed in
-the terminal and database views. OSINT Beast does not provide a built-in
-export, backup, redaction, or cleanup feature.
+the terminal and database views. Run history can be exported to JSON; exports
+redact input, result, and error fields by default and require explicit consent
+to include their stored values. On POSIX, exports are created with owner-only
+permissions. Sensitive exports are disabled on Windows because file
+permissions inherit from the destination directory. Export files are not
+overwritten. OSINT Beast does not provide a built-in backup or cleanup feature.
 
 ## Database location and retention
 
@@ -92,10 +96,13 @@ and any sidecar files that exist. Protect all resulting copies.
   may capture displayed input and results.
 - Avoid running checks with sensitive inputs on shared accounts, shared
   machines, or environments that retain terminal output.
-- There is no built-in safe export. If you extract data with another SQLite
-  client, export only the fields needed, store the file with the same access
-  controls as the database, and securely transfer or dispose of it under your
-  organization's policy.
+- JSON exports redact sensitive fields unless you explicitly opt in. Opted-in
+  exports may contain sensitive output or error text even when the input was
+  redacted before storage; store them with the same access controls as the
+  database and securely transfer or dispose of them under your organization's
+  policy.
+- If you extract data with another SQLite client, export only the fields needed
+  and apply the same access controls as the database.
 - Before sharing output in an issue, report, screenshot, or message, review it
   and remove personal data, credentials, identifiers, and other information
   that recipients do not need. Do not assume output or errors have been

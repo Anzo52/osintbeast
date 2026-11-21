@@ -1,7 +1,9 @@
 import argparse
+import os
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import zipfile
 import zlib
 
@@ -9,6 +11,11 @@ from simple_term_menu import TerminalMenu
 
 from checkers import _run_email_check_menu, _run_username_check_menu
 from backend_services import get_recent_tool_runs, get_saved_tool_results
+from data.utils.database import (
+    export_tool_runs_json,
+    get_tool_run,
+    list_tool_runs,
+)
 from data.utils.init_db import init_db
 from menu_utils import _choose_option, _download_tool_menu, _install_tool_menu
 from downloader import download_tool
@@ -150,16 +157,173 @@ def query_view(view):
 def query_menu():
     choice = _choose_option(
         [
-            "Recent Tool Runs",
+            "Run History",
             "Saved Tool Results",
             "Back",
         ],
         "Choose database view",
     )
     if choice == 0:
-        return query_view("runs")
+        return run_history_menu()
     elif choice == 1:
         return query_view("results")
+
+
+def show_run_history(tool_name=None, status=None, before_run_id=None):
+    try:
+        runs = list_tool_runs(
+            limit=20,
+            before_run_id=before_run_id,
+            tool_name=tool_name,
+            status=status,
+        )
+    except ValueError as exc:
+        print(f"Invalid history filter: {exc}")
+        return []
+    except (OSError, sqlite3.Error) as exc:
+        print(f"Run history query failed: {exc}")
+        return []
+    if not runs:
+        print("No matching runs.")
+        return []
+    for run_id, tool, query_text, run_status, started, finished, _error in runs:
+        summary = query_text[:80] + ("…" if len(query_text) > 80 else "")
+        print(
+            f"Run {run_id} | {tool} | input={summary!r} | {run_status} | "
+            f"started={started} | finished={finished or '—'}"
+        )
+    return runs
+
+
+def inspect_tool_run(run_id):
+    try:
+        run = get_tool_run(run_id)
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        print(f"Could not inspect run: {exc}")
+        return
+    if run is None:
+        print(f"Run {run_id} was not found.")
+        return
+    print(
+        f"Run {run[0]} | {run[1]} | input={run[2]!r} | {run[3]} | "
+        f"started={run[6]} | finished={run[7] or '—'}"
+    )
+    print(f"Result: {run[4]!r}" if run[4] else "Result: (empty)")
+    if run[5] is not None:
+        print(f"Error: {run[5]!r}")
+
+
+def _parse_run_ids(value):
+    try:
+        run_ids = [int(item.strip()) for item in value.split(",") if item.strip()]
+    except ValueError:
+        print("Enter run IDs separated by commas.")
+        return None
+    if not run_ids:
+        print("Select at least one run ID.")
+        return None
+    return run_ids
+
+
+def _write_export_file(output_path, content):
+    destination = os.path.abspath(output_path)
+    directory = os.path.dirname(destination)
+    prefix = f".{os.path.basename(destination)}."
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix=prefix, suffix=".tmp", dir=directory
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as export_file:
+            export_file.write(content + "\n")
+            export_file.flush()
+            os.fsync(export_file.fileno())
+        os.link(temporary_path, destination)
+    finally:
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
+
+
+def export_selected_runs():
+    run_ids = _parse_run_ids(input("Run IDs to export (comma-separated): "))
+    if run_ids is None:
+        return
+    output_path = input("New JSON file path: ").strip()
+    if not output_path:
+        print("Export cancelled.")
+        return
+    include_sensitive = input(
+        "Include sensitive input, result, and error text? [y/N]: "
+    ).strip().casefold() in {"y", "yes"}
+    if include_sensitive and os.name == "nt":
+        print(
+            "Sensitive exports are disabled on Windows because file permissions "
+            "are inherited from the destination directory."
+        )
+        return
+    try:
+        content = export_tool_runs_json(
+            run_ids, include_sensitive=include_sensitive
+        )
+        _write_export_file(output_path, content)
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        print(f"Could not export runs: {exc}")
+        return
+    print(f"Exported {len(run_ids)} run(s) to {output_path}.")
+
+
+def run_history_menu():
+    tool_name = None
+    status = None
+    page_cursors = [None]
+    current_runs = show_run_history(tool_name, status)
+    options = [
+        "Refresh history",
+        "Filter by tool/status",
+        "Inspect a run result",
+        "Next page",
+        "Previous page",
+        "Export selected runs as JSON",
+        "Back",
+    ]
+    while True:
+        choice = _choose_option(options, "Run History")
+        if choice is None or choice == 6:
+            return
+        if choice == 0:
+            current_runs = show_run_history(
+                tool_name, status, page_cursors[-1]
+            )
+        elif choice == 1:
+            tool_value = input("Tool name (blank for any): ").strip()
+            status_value = input(
+                "Status (running, success, failed, timed_out; blank for any): "
+            ).strip()
+            tool_name = tool_value or None
+            status = status_value or None
+            page_cursors = [None]
+            current_runs = show_run_history(tool_name, status)
+        elif choice == 2:
+            value = input("Run ID to inspect: ").strip()
+            try:
+                inspect_tool_run(int(value))
+            except ValueError:
+                print("Enter a valid run ID.")
+        elif choice == 3:
+            if len(current_runs) == 20:
+                page_cursors.append(current_runs[-1][0])
+                current_runs = show_run_history(
+                    tool_name, status, page_cursors[-1]
+                )
+        elif choice == 4:
+            if len(page_cursors) > 1:
+                page_cursors.pop()
+                current_runs = show_run_history(
+                    tool_name, status, page_cursors[-1]
+                )
+        elif choice == 5:
+            export_selected_runs()
 
 
 def _cli_initialize_database(_args):

@@ -49,11 +49,11 @@ def test_backend_service_operations_accept_no_query_or_table_arguments():
 
 
 @pytest.mark.parametrize(
-    ("choice", "service_name"),
-    [(0, "get_recent_tool_runs"), (1, "get_saved_tool_results")],
+    ("view", "service_name"),
+    [("runs", "get_recent_tool_runs"), ("results", "get_saved_tool_results")],
 )
-def test_history_menu_uses_approved_service_methods(
-    monkeypatch, capsys, choice, service_name
+def test_query_view_uses_approved_service_methods(
+    monkeypatch, capsys, view, service_name
 ):
     service = Mock(return_value=[("approved",)])
     monkeypatch.setattr(main, service_name, service)
@@ -61,9 +61,8 @@ def test_history_menu_uses_approved_service_methods(
         database, "query_database",
         Mock(side_effect=AssertionError("raw SQL persistence used")),
     )
-    monkeypatch.setattr(main, "_choose_option", lambda options, title: choice)
 
-    main.query_menu()
+    main.query_view(view)
 
     service.assert_called_once_with()
     assert capsys.readouterr().out == "Query result: [('approved',)]\n"
@@ -91,9 +90,7 @@ def test_history_menu_reports_database_errors(monkeypatch, capsys):
         main, "get_recent_tool_runs",
         Mock(side_effect=sqlite3.OperationalError("database unavailable")),
     )
-    monkeypatch.setattr(main, "_choose_option", lambda options, title: 0)
-
-    main.query_menu()
+    assert main.query_view("runs") == 1
 
     assert capsys.readouterr().out == (
         "Database query failed: database unavailable. "
