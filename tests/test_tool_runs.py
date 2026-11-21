@@ -141,6 +141,132 @@ def test_run_finish_rejects_repeated_completion(initialized_db):
         database.finish_tool_run(run_id, "success", result_text="output")
 
 
+def test_list_tool_runs_filters_orders_and_paginates(initialized_db):
+    oldest = database.start_tool_run("holehe", "old")
+    database.finish_tool_run(oldest, "success", result_text="old result")
+    database.start_tool_run("maigret", "middle")
+    newest = database.start_tool_run("holehe", "new")
+    database.finish_tool_run(newest, "failed", error_text="failed")
+
+    assert [row[0] for row in database.list_tool_runs(limit=2)] == [newest, newest - 1]
+    assert [row[2] for row in database.list_tool_runs(
+        tool_name="holehe", status="success"
+    )] == ["old"]
+    assert [row[2] for row in database.list_tool_runs(offset=2)] == ["old"]
+    assert database.list_tool_runs(offset=3) == []
+    with pytest.raises(ValueError):
+        database.list_tool_runs(status="unknown")
+
+
+def test_export_tool_runs_json_escapes_content_and_handles_empty_results(
+    initialized_db,
+):
+    malformed = '{"broken":\n"value"'
+    malformed_id = database.start_tool_run("maigret", 'user,"example"')
+    database.finish_tool_run(malformed_id, "success", result_text=malformed)
+    empty_id = database.start_tool_run("holehe", "empty")
+    database.finish_tool_run(empty_id, "success", result_text="")
+
+    exported = json.loads(
+        database.export_tool_runs_json([malformed_id, empty_id])
+    )
+
+    assert exported[0]["input"] == "[REDACTED]"
+    assert exported[0]["result"] == "[REDACTED]"
+    assert exported[1]["result"] == "[REDACTED]"
+    included = json.loads(
+        database.export_tool_runs_json([malformed_id, empty_id], include_sensitive=True)
+    )
+    assert included[0]["input"] == 'user,"example"'
+    assert included[0]["result"] == malformed
+    assert included[1]["result"] == ""
+
+
+def test_export_tool_runs_json_rejects_missing_or_invalid_ids(initialized_db):
+    with pytest.raises(ValueError):
+        database.export_tool_runs_json([])
+    with pytest.raises(ValueError):
+        database.export_tool_runs_json([0])
+    with pytest.raises(ValueError, match="do not exist"):
+        database.export_tool_runs_json([99])
+
+
+def test_history_menu_filters_and_inspects_results(
+    initialized_db, monkeypatch, capsys
+):
+    first_id = database.start_tool_run("maigret", "first")
+    failed_id = database.start_tool_run("holehe", "target")
+    database.finish_tool_run(failed_id, "failed", error_text="broken output")
+    choices = iter([1, 2, 6])
+    answers = iter(["holehe", "failed", str(failed_id)])
+
+    class FakeMenu:
+        def __init__(self, options, title):
+            assert title == "Run History"
+
+        def show(self):
+            return next(choices)
+
+    monkeypatch.setattr("menu_utils.TerminalMenu", FakeMenu)
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+
+    main.run_history_menu()
+
+    output = capsys.readouterr().out
+    assert f"Run {failed_id} | holehe | input='target' | failed" in output
+    assert "Error: 'broken output'" in output
+    assert output.count(f"Run {first_id} |") == 1
+
+
+def test_export_selected_runs_creates_json_with_explicit_sensitive_opt_in(
+    initialized_db, monkeypatch, tmp_path, capsys
+):
+    result = '{"matched":\nfalse}'
+    run_id = database.start_tool_run("holehe", "person@example.com")
+    database.finish_tool_run(run_id, "success", result_text=result)
+    output_path = tmp_path / "selected.json"
+    answers = iter([str(run_id), str(output_path), "yes"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+
+    main.export_selected_runs()
+
+    exported = json.loads(output_path.read_text(encoding="utf-8"))
+    assert exported[0]["input"] == "person@example.com"
+    assert exported[0]["result"] == result
+    assert output_path.stat().st_mode & 0o077 == 0
+    assert f"Exported 1 run(s) to {output_path}." in capsys.readouterr().out
+
+    original_content = output_path.read_bytes()
+    answers = iter([str(run_id), str(output_path), "yes"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    main.export_selected_runs()
+
+    assert output_path.read_bytes() == original_content
+    assert "Could not export runs:" in capsys.readouterr().out
+
+
+def test_history_menu_filter_handles_sqlite_errors(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "missing.db"))
+    choices = iter([1, 6])
+    answers = iter(["holehe", "success"])
+
+    class FakeMenu:
+        def __init__(self, options, title):
+            assert title == "Run History"
+
+        def show(self):
+            return next(choices)
+
+    monkeypatch.setattr("menu_utils.TerminalMenu", FakeMenu)
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+
+    main.run_history_menu()
+
+    output = capsys.readouterr().out
+    assert "Invalid history filter:" not in output
+    assert output.count("Run history query failed: no such table: ToolRuns") == 2
+
+
 @pytest.mark.parametrize(
     ("status", "result_text", "error_text"),
     [

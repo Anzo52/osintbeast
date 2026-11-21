@@ -8,6 +8,7 @@ OSINT Beast is a Python command-line framework for organizing authorized open-so
 - Download registered tools and install supported Python packages through the CLI. Binary tools such as Amass require manual installation.
 - Initialize a local SQLite database for OSINT records and tool metadata.
 - Run Holehe email checks and optional Maigret, Helix OSINT, and Sherlock username checks, with recorded outcomes.
+- Review, filter, and page through prior runs; inspect results and export selected runs as JSON.
 - Query stored database records from the CLI.
 
 ### Integrated tools
@@ -136,8 +137,24 @@ Holehe, Maigret, Helix, and Sherlock receive sensitive input through their
 in-process Python APIs, not process arguments. Their run records use a
 `[redacted]` query; direct and URL-encoded occurrences of the input are also
 redacted from saved and displayed results and errors. A `running` record can
-remain after interruption or a database-write failure. Existing
-`ToolResults` rows are preserved but do not gain historical run statuses.
+remain after interruption or a database-write failure. Successful outputs are
+also saved to the existing `ToolResults` table. Existing `ToolResults` rows
+are preserved but do not gain historical run statuses.
+
+Use **Query Database → Run History** to browse `ToolRuns`. History pages are
+ordered newest first by stable run ID and contain the tool, input summary,
+status, and timestamps. Filter by tool or status, move between 20-run pages,
+and inspect a run's stored result or error; empty results are shown as empty
+rather than parsed as structured data.
+
+The history menu can export selected run IDs as a UTF-8 JSON array. JSON string
+escaping preserves quotes, backslashes, newlines, and malformed/non-JSON tool
+output as text. By default, the `input`, `result`, and `error` fields are
+replaced with `[REDACTED]`; explicitly answer yes to include the values stored
+in the database. Sensitive input is redacted before storage, so opted-in
+exports may still contain other sensitive output or error text; store and share
+them accordingly. Exports are created with owner-only permissions and will not
+overwrite an existing file.
 
 Inputs, results, and errors can contain sensitive data. They are stored in
 plain text in the local database; restrict its permissions and delete records
@@ -354,7 +371,7 @@ shared application services rather than duplicating CLI behavior.
 
 - [ ] Separate reusable application services from menu/input/output code.
 - [ ] Provide clear help, input validation, and actionable error messages.
-- [ ] Add structured result-history views and safe export options.
+- [x] Add structured result-history views and safe export options.
 
 ### 4. Build a web UI
 
