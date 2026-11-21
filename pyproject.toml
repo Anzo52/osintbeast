@@ -47,6 +47,7 @@ sherlock = [
 package-dir = {"" = "src", "osintbeast_schemas" = "data/schemas", "data.utils" = "data/utils"}
 packages = ["osintbeast_schemas", "data.utils"]
 py-modules = [
+    "api",
     "background_runs",
     "checkers",
     "backend_services",

@@ -12,7 +12,6 @@ def _redact_sensitive_value(text: str, sensitive_value: str) -> str:
     """Redact whole input values, including partially URL-encoded forms."""
     if not sensitive_value:
         return text
-
     alternatives = []
     for char in sensitive_value:
         encoded = "".join(f"%{byte:02X}" for byte in char.encode("utf-8"))
@@ -68,11 +67,37 @@ def execute_tool_run(
     sensitive_input: bool = False,
 ) -> tuple[str, str]:
     """Persist the run outcome; propagate persistence errors to the caller."""
-    stored_query = "[redacted]" if sensitive_input else query_text
     if run_id is None:
-        run_id = database.start_tool_run(tool_name, stored_query)
+        run_id = database.start_tool_run(
+            tool_name, "[redacted]" if sensitive_input else query_text
+        )
     if run_id is None:
         raise RuntimeError("Failed to start tool run.")
+    return _execute_tool_run(
+        tool_name, query_text, runner, run_id, sensitive_input=sensitive_input
+    )
+
+
+def execute_tool_run_with_id(
+    tool_name: str, query_text: str, runner: Callable[[str], str]
+) -> tuple[int, str, str]:
+    """Execute a run and return its persisted identifier and outcome."""
+    run_id = database.start_tool_run(tool_name, query_text)
+    if run_id is None:
+        raise RuntimeError("Failed to start tool run.")
+    status, value = _execute_tool_run(tool_name, query_text, runner, run_id)
+    return run_id, status, value
+
+
+def _execute_tool_run(
+    tool_name: str,
+    query_text: str,
+    runner: Callable[[str], str],
+    run_id: int,
+    *,
+    sensitive_input: bool = False,
+) -> tuple[str, str]:
+    """Execute and persist a run using an existing run identifier."""
     try:
         if sensitive_input:
             with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
@@ -92,8 +117,18 @@ def execute_tool_run(
             message = _redact_sensitive_value(message, query_text)
         database.finish_tool_run(run_id, "timed_out", error_text=message)
         return "timed_out", message
-    except Exception as exc:
+    except (RuntimeError, OSError, ImportError, ValueError) as exc:
         message = str(exc) or f"{tool_name} failed ({type(exc).__name__})."
+        if sensitive_input:
+            message = _redact_sensitive_value(message, query_text)
+        database.finish_tool_run(run_id, "failed", error_text=message)
+        return "failed", message
+    except Exception as exc:
+        message = (
+            str(exc) or f"{tool_name} failed ({type(exc).__name__})."
+            if sensitive_input
+            else f"{tool_name} failed unexpectedly."
+        )
         if sensitive_input:
             message = _redact_sensitive_value(message, query_text)
         database.finish_tool_run(run_id, "failed", error_text=message)

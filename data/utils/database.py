@@ -55,12 +55,23 @@ def _user_data_directory():
 
 
 DB_FILE, SCHEMA_DIR, SCHEMA_FILES, INSERTABLE_TABLES = setup_database_paths(__file__)
+_PRIVATE_FILE_MODE = 0o600
+_SQLITE_COMPANION_SUFFIXES = ("-journal", "-shm", "-wal")
+
+
+def _enforce_private_permissions() -> None:
+    for path in (Path(DB_FILE), *(Path(DB_FILE + suffix) for suffix in _SQLITE_COMPANION_SUFFIXES)):
+        if path.exists():
+            path.chmod(_PRIVATE_FILE_MODE)
 
 
 def connect_db() -> sqlite3.Connection:
     """Open the SQLite database with foreign-key enforcement enabled."""
-    Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
+    db_path = Path(DB_FILE)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    _enforce_private_permissions()
     conn = sqlite3.connect(DB_FILE)
+    _enforce_private_permissions()
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
