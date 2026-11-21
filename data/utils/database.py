@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import sys
+from contextlib import closing
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping, Optional
