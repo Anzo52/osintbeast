@@ -276,6 +276,9 @@ def run_history_menu():
             except (ValueError, sqlite3.Error) as exc:
                 print(f"Invalid history filter: {exc}")
                 tool_name = status = None
+            except sqlite3.Error as exc:
+                print(f"Run history query failed: {exc}")
+                continue
             show_run_history(tool_name, status, offset)
         elif choice == 2:
             value = input("Run ID to inspect: ").strip()
