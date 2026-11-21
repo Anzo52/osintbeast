@@ -256,6 +256,12 @@ def export_selected_runs():
     include_sensitive = input(
         "Include sensitive input, result, and error text? [y/N]: "
     ).strip().casefold() in {"y", "yes"}
+    if include_sensitive and os.name == "nt":
+        print(
+            "Sensitive exports are disabled on Windows because file permissions "
+            "are inherited from the destination directory."
+        )
+        return
     try:
         content = export_tool_runs_json(
             run_ids, include_sensitive=include_sensitive

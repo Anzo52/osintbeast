@@ -473,12 +473,32 @@ def test_export_selected_runs_obeys_sensitive_consent(
 
     main.export_selected_runs()
 
+    if consent == "yes" and os.name == "nt":
+        assert not output_path.exists()
+        assert "Sensitive exports are disabled on Windows" in capsys.readouterr().out
+        return
     record = json.loads(output_path.read_text(encoding="utf-8"))[0]
     assert record["input"] == expected_input
     assert record["result"] == expected_result
     if os.name == "posix":
         assert stat.S_IMODE(output_path.stat().st_mode) == 0o600
     assert "Exported 1 run(s)" in capsys.readouterr().out
+
+
+def test_sensitive_export_is_disabled_on_windows(
+    initialized_db, monkeypatch, tmp_path, capsys
+):
+    run_id = database.start_tool_run("holehe", "private@example.test")
+    database.finish_tool_run(run_id, "success", result_text="sensitive result")
+    output_path = tmp_path / "runs.json"
+    inputs = iter((str(run_id), str(output_path), "yes"))
+    monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+    monkeypatch.setattr(main.os, "name", "nt")
+
+    main.export_selected_runs()
+
+    assert not output_path.exists()
+    assert "Sensitive exports are disabled on Windows" in capsys.readouterr().out
 
 
 def test_export_does_not_overwrite_existing_file(initialized_db, tmp_path):

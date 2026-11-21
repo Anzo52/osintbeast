@@ -159,8 +159,10 @@ Choose **Query Database → Run History** to browse the newest runs, filter by
 tool or status, inspect a run, and move between pages. Export selected run IDs
 as JSON when needed. The export redacts input, result, and error fields by
 default; explicitly answer yes to include values stored in the database.
-Exports are created with owner-only permissions and will not overwrite an
-existing file. Store and share opted-in exports as sensitive data.
+On POSIX, exports are created with owner-only permissions; sensitive exports
+are disabled on Windows because file permissions inherit from the destination
+directory. Exports will not overwrite an existing file. Store and share
+opted-in exports as sensitive data.
 
 Sublist3r and Amass do not yet have run integrations. Any future integration
 that needs an external process must pass sensitive input through standard input

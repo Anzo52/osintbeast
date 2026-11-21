@@ -18,9 +18,10 @@ the database are retained there as well.
 Inputs, results, and errors are stored as plain text. Output is displayed in
 the terminal and database views. Run history can be exported to JSON; exports
 redact input, result, and error fields by default and require explicit consent
-to include their stored values. Export files are created with owner-only
-permissions and are not overwritten. OSINT Beast does not provide a built-in
-backup or cleanup feature.
+to include their stored values. On POSIX, exports are created with owner-only
+permissions. Sensitive exports are disabled on Windows because file
+permissions inherit from the destination directory. Export files are not
+overwritten. OSINT Beast does not provide a built-in backup or cleanup feature.
 
 ## Database location and retention
 
