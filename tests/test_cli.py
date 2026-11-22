@@ -422,6 +422,7 @@ def test_cli_reports_optional_dependency_failure_and_nonzero_status(
 
 
 def test_cli_returns_nonzero_for_database_execution_error(monkeypatch, capsys):
+    monkeypatch.setattr(database, "setup_database", Mock())
     monkeypatch.setattr(
         main,
         "get_recent_tool_runs",
@@ -432,3 +433,24 @@ def test_cli_returns_nonzero_for_database_execution_error(monkeypatch, capsys):
 
     assert result == 1
     assert "Initialize the database and check its permissions." in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("view", ["runs", "results"])
+def test_cli_query_migrates_legacy_records(tmp_path, monkeypatch, capsys, view):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "legacy-cli.db"))
+    database.setup_database()
+    with database.connect_db() as conn:
+        conn.execute("DELETE FROM OsintBeastMigrations")
+        conn.execute(
+            "INSERT INTO ToolResults (toolName, queryText, resultText) "
+            "VALUES ('holehe', 'private@example.com', 'private@example.com result')"
+        )
+        conn.execute(
+            "INSERT INTO ToolRuns (toolName, queryText, status, errorText) "
+            "VALUES ('holehe', 'private@example.com', 'failed', 'private@example.com error')"
+        )
+
+    assert main.cli(["query", view]) == 0
+    output = capsys.readouterr().out
+    assert "private@example.com" not in output
+    assert "[redacted]" in output
