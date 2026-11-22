@@ -1,0 +1,461 @@
+import sqlite3
+from contextlib import closing
+from datetime import date, datetime
+from pathlib import Path
+from typing import Any, Mapping, Optional, Protocol
+
+from sqlalchemy import MetaData, Table, create_engine
+from sqlalchemy.engine import URL
+
+
+class StorageError(Exception):
+    """A backend-neutral storage error for application-level handling."""
+
+
+class Storage(Protocol):
+    def connect(self): ...
+
+    def setup(self) -> None: ...
+
+    def insert(self, table: str, data: Mapping[str, Any]) -> None: ...
+
+    def query(
+        self, query: str, parameters: tuple[Any, ...] = ()
+    ) -> list[tuple[Any, ...]]: ...
+
+    def save_tool_result(
+        self, tool_name: str, query_text: str, result_text: Optional[str]
+    ) -> int: ...
+
+    def list_tool_results(self, limit: int) -> list[tuple[Any, ...]]: ...
+
+    def start_tool_run(self, tool_name: str, query_text: str) -> int: ...
+
+    def finish_tool_run(
+        self,
+        run_id: int,
+        status: str,
+        result_text: Optional[str],
+        error_text: Optional[str],
+    ) -> None: ...
+
+    def reconcile_stale_tool_runs(self, older_than_seconds: int) -> int: ...
+
+
+class SQLiteStorage:
+    _PRIVATE_FILE_MODE = 0o600
+    _COMPANION_SUFFIXES = ("-journal", "-shm", "-wal")
+
+    def __init__(
+        self,
+        db_file: str,
+        schema_dir: Path,
+        schema_files: tuple[str, ...],
+        insertable_tables: frozenset[str],
+    ):
+        self.db_file = db_file
+        self.schema_dir = schema_dir
+        self.schema_files = schema_files
+        self.insertable_tables = insertable_tables
+
+    def connect(self) -> sqlite3.Connection:
+        db_path = Path(self.db_file)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._enforce_private_permissions()
+        conn = sqlite3.connect(self.db_file)
+        self._enforce_private_permissions()
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+
+    def _enforce_private_permissions(self) -> None:
+        for path in (
+            Path(self.db_file),
+            *(Path(self.db_file + suffix) for suffix in self._COMPANION_SUFFIXES),
+        ):
+            if path.exists():
+                path.chmod(self._PRIVATE_FILE_MODE)
+
+    def setup(self) -> None:
+        schemas = []
+        for schema_name in self.schema_files:
+            schema_path = self.schema_dir.joinpath(schema_name)
+            if not schema_path.is_file():
+                raise FileNotFoundError(
+                    f"SQLite schema file not found: {schema_path}"
+                )
+            schemas.append(schema_path.read_text(encoding="utf-8"))
+
+        with closing(self.connect()) as conn, conn:
+            conn.executescript("BEGIN IMMEDIATE;\n" + "\n".join(schemas))
+
+    def insert(self, table: str, data: Mapping[str, Any]) -> None:
+        if not data:
+            raise ValueError("data must contain at least one column")
+        if not isinstance(table, str) or table not in self.insertable_tables:
+            raise ValueError(f"Unknown database table: {table}")
+
+        db_path = Path(self.db_file)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._enforce_private_permissions()
+        engine = create_engine(URL.create("sqlite", database=str(db_path.resolve())))
+        try:
+            with engine.begin() as connection:
+                connection.exec_driver_sql("PRAGMA foreign_keys = ON")
+                self._enforce_private_permissions()
+                reflected = Table(table, MetaData(), autoload_with=connection)
+                known_columns = {column.name for column in reflected.columns}
+                if any(
+                    not isinstance(column, str) or column not in known_columns
+                    for column in data
+                ):
+                    raise ValueError(f"Unknown column for table {table}")
+                connection.execute(reflected.insert().values(**data))
+        finally:
+            engine.dispose()
+
+    def query(
+        self, query: str, parameters: tuple[Any, ...] = ()
+    ) -> list[tuple[Any, ...]]:
+        with closing(self.connect()) as conn:
+            return conn.execute(query, parameters).fetchall()
+
+    def save_tool_result(
+        self, tool_name: str, query_text: str, result_text: Optional[str]
+    ) -> int:
+        with closing(self.connect()) as conn, conn:
+            cursor = conn.execute(
+                """INSERT INTO ToolResults (toolName, queryText, resultText)
+                   VALUES (?, ?, ?)""",
+                (tool_name, query_text, result_text),
+            )
+            return cursor.lastrowid
+
+    def list_tool_results(self, limit: int) -> list[tuple[Any, ...]]:
+        with closing(self.connect()) as conn:
+            return conn.execute(
+                """SELECT resultID, toolName, queryText, resultText, createdAt
+                   FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+
+    def start_tool_run(self, tool_name: str, query_text: str) -> int:
+        with closing(self.connect()) as conn, conn:
+            cursor = conn.execute(
+                """INSERT INTO ToolRuns (toolName, queryText, status)
+                   VALUES (?, ?, 'running')""",
+                (tool_name, query_text),
+            )
+            return cursor.lastrowid
+
+    def finish_tool_run(
+        self,
+        run_id: int,
+        status: str,
+        result_text: Optional[str],
+        error_text: Optional[str],
+    ) -> None:
+        with closing(self.connect()) as conn, conn:
+            cursor = conn.execute(
+                """UPDATE ToolRuns SET status = ?, resultText = ?, errorText = ?,
+                   finishedAt = CURRENT_TIMESTAMP
+                   WHERE runID = ? AND status = 'running'""",
+                (status, result_text, error_text, run_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Run does not exist or is already finished.")
+            if status == "success":
+                conn.execute(
+                    """INSERT INTO ToolResults (toolName, queryText, resultText)
+                       SELECT toolName, queryText, resultText
+                       FROM ToolRuns WHERE runID = ?""",
+                    (run_id,),
+                )
+
+    def reconcile_stale_tool_runs(self, older_than_seconds: int) -> int:
+        with closing(self.connect()) as conn, conn:
+            cursor = conn.execute(
+                """UPDATE ToolRuns SET status = 'failed',
+                          errorText = 'Run outcome could not be persisted.',
+                          finishedAt = CURRENT_TIMESTAMP
+                   WHERE status = 'running' AND startedAt <= datetime('now', ?)""",
+                (f"-{older_than_seconds} seconds",),
+            )
+            return cursor.rowcount
+
+
+class MySQLStorage:
+    def __init__(
+        self,
+        database_url: str,
+        schema_dir: Path,
+        schema_files: tuple[str, ...],
+        insertable_tables: frozenset[str],
+    ):
+        self.database_url = database_url
+        self.schema_dir = schema_dir
+        self.schema_files = schema_files
+        self.insertable_tables = insertable_tables
+        self._engine = None
+
+    def _get_engine(self):
+        if self._engine is None:
+            try:
+                from sqlalchemy import create_engine
+                from sqlalchemy.engine import make_url
+            except ImportError as exc:
+                raise StorageError(
+                    "MySQL support requires the mysql extra: "
+                    "python -m pip install 'osintbeast[mysql]'"
+                ) from exc
+
+            url = make_url(self.database_url)
+            if url.drivername == "mysql":
+                url = url.set(drivername="mysql+pymysql")
+            elif url.drivername != "mysql+pymysql":
+                raise ValueError(
+                    "OSINTBEAST_DATABASE_URL must use mysql:// or "
+                    "mysql+pymysql://."
+                )
+            try:
+                self._engine = create_engine(url, pool_pre_ping=True)
+            except Exception as exc:
+                raise StorageError(f"Unable to initialize MySQL driver: {exc}") from exc
+        return self._engine
+
+    def connect(self):
+        return self._get_engine().raw_connection()
+
+    @staticmethod
+    def _mysql_placeholders(query: str, parameters: tuple[Any, ...]) -> str:
+        if not parameters:
+            return query
+
+        converted = []
+        quote = None
+        escaped = False
+        count = 0
+        line_comment = False
+        block_comment = False
+        index = 0
+        while index < len(query):
+            char = query[index]
+            following = query[index + 1] if index + 1 < len(query) else ""
+            if line_comment:
+                converted.append(char)
+                line_comment = char != "\n"
+            elif block_comment:
+                converted.append(char)
+                if char == "*" and following == "/":
+                    converted.append(following)
+                    block_comment = False
+                    index += 1
+            elif quote:
+                converted.append(char)
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = None
+            elif char == "#" or (
+                char == "-" and following == "-" and
+                (index + 2 == len(query) or query[index + 2].isspace())
+            ):
+                converted.append(char)
+                if char == "-":
+                    converted.append(following)
+                    index += 1
+                line_comment = True
+            elif char == "/" and following == "*":
+                converted.extend((char, following))
+                block_comment = True
+                index += 1
+            elif char in ("'", '"', "`"):
+                quote = char
+                converted.append(char)
+            elif char == "?":
+                converted.append("%s")
+                count += 1
+            else:
+                converted.append(char)
+            index += 1
+        if count != len(parameters):
+            raise ValueError("SQL placeholder count does not match parameters")
+        return "".join(converted)
+
+    @staticmethod
+    def _normalize_rows(rows) -> list[tuple[Any, ...]]:
+        return [
+            tuple(
+                value.isoformat(sep=" ")
+                if isinstance(value, datetime)
+                else value.isoformat()
+                if isinstance(value, date)
+                else value
+                for value in row
+            )
+            for row in rows
+        ]
+
+    def setup(self) -> None:
+        schemas = []
+        for schema_name in self.schema_files:
+            schema_path = self.schema_dir.joinpath(schema_name)
+            if not schema_path.is_file():
+                raise FileNotFoundError(
+                    f"MySQL schema file not found: {schema_path}"
+                )
+            schemas.extend(
+                statement.strip()
+                for statement in schema_path.read_text(encoding="utf-8").split(";")
+                if statement.strip()
+            )
+
+        try:
+            with self._get_engine().begin() as connection:
+                for statement in schemas:
+                    connection.exec_driver_sql(statement)
+        except Exception as exc:
+            if exc.__class__.__module__.startswith("sqlalchemy"):
+                raise StorageError(str(exc)) from exc
+            raise
+
+    def insert(self, table: str, data: Mapping[str, Any]) -> None:
+        if not data:
+            raise ValueError("data must contain at least one column")
+        if not isinstance(table, str) or table not in self.insertable_tables:
+            raise ValueError(f"Unknown database table: {table}")
+
+        columns = list(data)
+        quoted_columns = ", ".join(f"`{column}`" for column in columns)
+        placeholders = ", ".join("%s" for _ in columns)
+        query = (
+            f"INSERT INTO `{table}` ({quoted_columns}) VALUES ({placeholders})"
+        )
+        try:
+            with self._get_engine().begin() as connection:
+                valid_columns = {
+                    row[0]
+                    for row in connection.exec_driver_sql(
+                        """SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+                           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s""",
+                        (table,),
+                    ).fetchall()
+                }
+                if any(
+                    not isinstance(column, str) or column not in valid_columns
+                    for column in columns
+                ):
+                    raise ValueError(f"Unknown column for table {table}")
+                connection.exec_driver_sql(
+                    query, tuple(data[column] for column in columns)
+                )
+        except Exception as exc:
+            if exc.__class__.__module__.startswith("sqlalchemy"):
+                raise StorageError(str(exc)) from exc
+            raise
+
+    def query(
+        self, query: str, parameters: tuple[Any, ...] = ()
+    ) -> list[tuple[Any, ...]]:
+        query = self._mysql_placeholders(query, parameters)
+        try:
+            with self._get_engine().connect() as connection:
+                return self._normalize_rows(
+                    connection.exec_driver_sql(query, parameters).fetchall()
+                )
+        except Exception as exc:
+            if exc.__class__.__module__.startswith("sqlalchemy"):
+                raise StorageError(str(exc)) from exc
+            raise
+
+    def save_tool_result(
+        self, tool_name: str, query_text: str, result_text: Optional[str]
+    ) -> int:
+        try:
+            with self._get_engine().begin() as connection:
+                result = connection.exec_driver_sql(
+                    """INSERT INTO ToolResults (toolName, queryText, resultText)
+                       VALUES (%s, %s, %s)""",
+                    (tool_name, query_text, result_text),
+                )
+                return result.lastrowid
+        except Exception as exc:
+            if exc.__class__.__module__.startswith("sqlalchemy"):
+                raise StorageError(str(exc)) from exc
+            raise
+
+    def list_tool_results(self, limit: int) -> list[tuple[Any, ...]]:
+        try:
+            with self._get_engine().connect() as connection:
+                return self._normalize_rows(
+                    connection.exec_driver_sql(
+                        """SELECT resultID, toolName, queryText, resultText, createdAt
+                           FROM ToolResults ORDER BY resultID DESC LIMIT %s""",
+                        (limit,),
+                    ).fetchall()
+                )
+        except Exception as exc:
+            if exc.__class__.__module__.startswith("sqlalchemy"):
+                raise StorageError(str(exc)) from exc
+            raise
+
+    def start_tool_run(self, tool_name: str, query_text: str) -> int:
+        try:
+            with self._get_engine().begin() as connection:
+                result = connection.exec_driver_sql(
+                    """INSERT INTO ToolRuns (toolName, queryText, status)
+                       VALUES (%s, %s, 'running')""",
+                    (tool_name, query_text),
+                )
+                return result.lastrowid
+        except Exception as exc:
+            if exc.__class__.__module__.startswith("sqlalchemy"):
+                raise StorageError(str(exc)) from exc
+            raise
+
+    def finish_tool_run(
+        self,
+        run_id: int,
+        status: str,
+        result_text: Optional[str],
+        error_text: Optional[str],
+    ) -> None:
+        try:
+            with self._get_engine().begin() as connection:
+                result = connection.exec_driver_sql(
+                    """UPDATE ToolRuns SET status = %s, resultText = %s,
+                       errorText = %s, finishedAt = CURRENT_TIMESTAMP
+                       WHERE runID = %s AND status = 'running'""",
+                    (status, result_text, error_text, run_id),
+                )
+                if result.rowcount != 1:
+                    raise ValueError("Run does not exist or is already finished.")
+                if status == "success":
+                    connection.exec_driver_sql(
+                        """INSERT INTO ToolResults (toolName, queryText, resultText)
+                           SELECT toolName, queryText, resultText
+                           FROM ToolRuns WHERE runID = %s""",
+                        (run_id,),
+                    )
+        except Exception as exc:
+            if exc.__class__.__module__.startswith("sqlalchemy"):
+                raise StorageError(str(exc)) from exc
+            raise
+
+    def reconcile_stale_tool_runs(self, older_than_seconds: int) -> int:
+        try:
+            with self._get_engine().begin() as connection:
+                result = connection.exec_driver_sql(
+                    """UPDATE ToolRuns SET status = 'failed',
+                              errorText = 'Run outcome could not be persisted.',
+                              finishedAt = UTC_TIMESTAMP()
+                       WHERE status = 'running' AND
+                             startedAt <= DATE_SUB(UTC_TIMESTAMP(), INTERVAL %s SECOND)""",
+                    (older_than_seconds,),
+                )
+                return result.rowcount
+        except Exception as exc:
+            if exc.__class__.__module__.startswith("sqlalchemy"):
+                raise StorageError(str(exc)) from exc
+            raise
