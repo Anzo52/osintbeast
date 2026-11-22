@@ -1,15 +1,18 @@
-import getpass
 import warnings
+from getpass import GetPassWarning, getpass
 
 
 def _read_sensitive_input(prompt):
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", getpass.GetPassWarning)
-            return getpass.getpass(prompt).strip()
-    except (getpass.GetPassWarning, EOFError, OSError):
-        print("Cannot read input securely. Please use an interactive terminal.")
-        return None
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", GetPassWarning)
+        try:
+            return getpass(prompt).strip()
+        except GetPassWarning:
+            print("Unable to securely read sensitive input; terminal echo is enabled.")
+            return None
+        except (EOFError, OSError):
+            print("Cannot read input securely. Please use an interactive terminal.")
+            return None
 
 
 def _run_email_check_menu(check):

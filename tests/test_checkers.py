@@ -16,7 +16,7 @@ import checkers
 def test_checker_reads_hidden_input(monkeypatch, menu, prompt):
     reader = Mock(return_value=" value ")
     check = Mock()
-    monkeypatch.setattr(checkers.getpass, "getpass", reader)
+    monkeypatch.setattr(checkers, "getpass", reader)
 
     menu(check)
 
@@ -31,14 +31,14 @@ def test_checker_refuses_getpass_fallback_before_reading(monkeypatch, capsys, me
     check = Mock()
     stdin = Mock()
     monkeypatch.setattr("sys.stdin", stdin)
-    monkeypatch.setattr(checkers.getpass, "getpass", getpass.fallback_getpass)
+    monkeypatch.setattr(checkers, "getpass", getpass.fallback_getpass)
 
     menu(check)
 
     stdin.readline.assert_not_called()
     check.assert_not_called()
     assert capsys.readouterr().out == (
-        "Cannot read input securely. Please use an interactive terminal.\n"
+        "Unable to securely read sensitive input; terminal echo is enabled.\n"
     )
 
 
@@ -48,7 +48,7 @@ def test_checker_refuses_getpass_fallback_before_reading(monkeypatch, capsys, me
 )
 def test_checker_handles_unavailable_input(monkeypatch, capsys, menu, error):
     check = Mock()
-    monkeypatch.setattr(checkers.getpass, "getpass", Mock(side_effect=error))
+    monkeypatch.setattr(checkers, "getpass", Mock(side_effect=error))
 
     menu(check)
 
