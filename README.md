@@ -135,12 +135,15 @@ completed, not that every site was reachable or every match is confirmed.
 
 The CLI validates input before recording a run and uses a non-echoing prompt.
 Holehe, Maigret, Helix, and Sherlock receive sensitive input through their
-in-process Python APIs, not process arguments. Their run records use a
-`[redacted]` query; direct and URL-encoded occurrences of the input are also
-redacted from saved and displayed results and errors. A `running` record can
-remain after interruption or a database-write failure. Successful outputs are
-also saved to the existing `ToolResults` table. Existing `ToolResults` rows
-are preserved but do not gain historical run statuses.
+in-process Python APIs, not process arguments. Configured sensitive inputs and
+matching output or error text are redacted before storage. Saved history and
+result views also redact query fields and standalone direct or partially
+URL-encoded matches at read time; this does not rewrite existing database
+values. Direct database access and exports that include sensitive fields may
+still expose the original values. A `running` record can remain after
+interruption or a database-write failure. Successful outputs are also saved
+to the existing `ToolResults` table. Existing `ToolResults` rows are preserved
+but do not gain historical run statuses.
 
 Callers of the shared run helpers must explicitly declare whether an input is
 sensitive using a boolean. Set it to `False` only when unredacted storage is
@@ -157,10 +160,10 @@ The history menu can export selected run IDs as a UTF-8 JSON array. JSON string
 escaping preserves quotes, backslashes, newlines, and malformed/non-JSON tool
 output as text. By default, the `input`, `result`, and `error` fields are
 replaced with `[REDACTED]`; explicitly answer yes to include the values stored
-in the database. Sensitive input is redacted before storage, so opted-in
-exports may still contain other sensitive output or error text; store and share
-them accordingly. Exports are created with owner-only permissions and will not
-overwrite an existing file.
+in the database, including any unredacted legacy values; store and share them
+accordingly. Sensitive input is redacted before storage for configured runs,
+but other sensitive output or error text may remain. Exports are created with
+owner-only permissions and will not overwrite an existing file.
 
 Inputs, results, and errors can contain sensitive data. They are stored in
 plain text in the local database; restrict its permissions and delete records

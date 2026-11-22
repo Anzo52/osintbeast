@@ -2,7 +2,6 @@ import json
 import sqlite3
 import threading
 import time
-from http.server import ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -38,14 +37,12 @@ def _request(url, payload=None, headers=None):
 
 def _server(tmp_path, monkeypatch, runner):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "web.db"))
-    database.setup_database()
     monkeypatch.setattr(
         web_ui,
         "RUNNABLE_TOOLS",
         {"sherlock": ("username", validate_username, runner)},
     )
-    server = ThreadingHTTPServer(("127.0.0.1", 0), web_ui.WebHandler)
-    server.daemon_threads = True
+    server = web_ui.create_server("127.0.0.1", 0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, f"http://127.0.0.1:{server.server_port}"
@@ -75,7 +72,7 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
         status, running = _request(f"{base_url}/api/runs/{launched['id']}")
         assert status == 200
         assert running["status"] == "running"
-        assert running["input"] == "alice"
+        assert running["input"] == "[redacted]"
         release_runner.set()
 
         deadline = time.monotonic() + 2
@@ -87,8 +84,8 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
 
         assert status == 200
         assert detail["status"] == "success"
-        assert detail["input"] == "alice"
-        assert detail["result"] == f"alice: {output}"
+        assert detail["input"] == "[redacted]"
+        assert detail["result"] == f"[redacted]: {output}"
         assert database.query_database(
             "SELECT toolName, queryText, resultText FROM ToolResults"
         ) == [("sherlock", "alice", f"alice: {output}")]
@@ -176,6 +173,60 @@ def test_holehe_email_is_redacted_in_web_ui_history(tmp_path, monkeypatch):
         assert database.query_database(
             "SELECT queryText, resultText FROM ToolResults"
         ) == [("[redacted]", "Found [redacted]")]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_web_startup_redacts_legacy_records_without_rewriting_them(
+    tmp_path, monkeypatch
+):
+    db_path = tmp_path / "legacy.db"
+    monkeypatch.setattr(database, "DB_FILE", str(db_path))
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """CREATE TABLE ToolRuns (
+                runID INTEGER PRIMARY KEY,
+                toolName TEXT NOT NULL,
+                queryText TEXT NOT NULL,
+                status TEXT NOT NULL,
+                resultText TEXT,
+                errorText TEXT,
+                startedAt TEXT NOT NULL,
+                finishedAt TEXT
+            )"""
+        )
+        conn.execute(
+            """INSERT INTO ToolRuns
+               (runID, toolName, queryText, status, errorText, startedAt)
+               VALUES (1, 'holehe', ?, 'failed', ?, '2020-01-01')""",
+            (
+                "person+tag@example.com",
+                "failed for person+tag%40example.com",
+            ),
+        )
+
+    server = web_ui.create_server("127.0.0.1", 0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        _, runs = _request(f"http://127.0.0.1:{server.server_port}/api/runs")
+        _, detail = _request(
+            f"http://127.0.0.1:{server.server_port}/api/runs/1"
+        )
+        assert runs[0]["input"] == "[redacted]"
+        assert detail["input"] == "[redacted]"
+        assert detail["error"] == "failed for [redacted]"
+        assert database.query_database(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("ToolResults",),
+        ) == [("ToolResults",)]
+        assert database.query_database(
+            "SELECT queryText, errorText FROM ToolRuns WHERE runID = ?", (1,)
+        ) == [(
+            "person+tag@example.com",
+            "failed for person+tag%40example.com",
+        )]
     finally:
         server.shutdown()
         server.server_close()
@@ -279,7 +330,7 @@ def test_unexpected_background_error_is_redacted(tmp_path, monkeypatch, caplog):
                 break
             time.sleep(0.01)
         assert detail["status"] == "failed"
-        assert detail["input"] == "alice"
+        assert detail["input"] == "[redacted]"
         assert detail["error"] == "sherlock failed unexpectedly (Exception)."
     finally:
         server.shutdown()

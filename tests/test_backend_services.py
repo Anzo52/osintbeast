@@ -19,8 +19,10 @@ def test_backend_services_return_recent_runs_and_saved_results(initialized_db):
     run_id = database.start_tool_run("holehe", "person@example.com")
     database.finish_tool_run(run_id, "success", result_text="output")
 
-    assert backend_services.get_recent_tool_runs() == database.list_tool_runs()
-    assert backend_services.get_saved_tool_results() == database.list_tool_results()
+    assert backend_services.get_recent_tool_runs()[0][2] == "[redacted]"
+    assert database.list_tool_runs()[0][2] == "person@example.com"
+    assert backend_services.get_saved_tool_results()[0][2] == "[redacted]"
+    assert database.list_tool_results()[0][2] == "person@example.com"
 
 
 @pytest.mark.parametrize("operation", [

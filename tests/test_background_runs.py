@@ -51,7 +51,7 @@ def wait_for_run(service, run_id):
     [
         ("user", "success", "output"),
         ("error", "failed", "mock failure"),
-        ("timeout", "timed_out", "mock timeout"),
+        ("timeout", "timed_out", "mock [redacted]"),
         ("crash", "failed", "Background worker failed."),
         ("large", "failed", "Background worker failed."),
         ("slow", "timed_out", "Background run exceeded its time limit."),

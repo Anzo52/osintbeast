@@ -21,8 +21,13 @@ error in `ToolRuns`, not `ToolResults`. Other structured records saved through
 the database are retained there as well.
 
 Values remaining after any configured redaction are stored as plain text.
-Output is displayed in the terminal and database views. OSINT Beast does not
-provide a built-in export, backup, or cleanup feature.
+Saved run and result views redact query fields and standalone direct or
+partially URL-encoded matches in result or error text when reading records.
+This is presentation-only: it does not change existing database values, so
+direct database access and exports that include sensitive fields may still
+expose original values. Other sensitive information may remain in results and
+errors. Output is displayed in the terminal and database views. OSINT Beast
+does not provide a built-in backup or cleanup feature.
 
 ## Database location and retention
 

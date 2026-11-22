@@ -119,10 +119,8 @@ def _make_handler(tokens):
                 return
             try:
                 if self.path == "/api/runs":
-                    rows = database.query_database(
-                        """SELECT runID, toolName, queryText, status, startedAt,
-                                  finishedAt, errorText
-                           FROM ToolRuns ORDER BY runID DESC LIMIT 100"""
+                    rows = database.list_tool_runs(
+                        limit=100, redact_sensitive=True
                     )
                     keys = (
                         "id", "tool", "query", "status", "started_at",
@@ -130,7 +128,9 @@ def _make_handler(tokens):
                     )
                     payload = {"runs": [dict(zip(keys, row)) for row in rows]}
                 elif self.path == "/api/results":
-                    rows = database.list_tool_results(limit=100)
+                    rows = database.list_tool_results(
+                        limit=100, redact_sensitive=True
+                    )
                     keys = ("id", "tool", "query", "result", "created_at")
                     payload = {"results": [dict(zip(keys, row)) for row in rows]}
                 else:
@@ -230,6 +230,7 @@ def create_server(host="127.0.0.1", port=8765, tokens=None):
     configured_tokens = _validate_tokens(tokens) if tokens is not None else load_tokens()
     if not isinstance(port, int) or not 0 <= port <= 65535:
         raise ValueError("API port must be between 0 and 65535.")
+    database.setup_database()
     return ThreadingHTTPServer(
         (str(address), port), _make_handler(configured_tokens)
     )

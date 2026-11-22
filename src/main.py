@@ -171,7 +171,8 @@ def query_menu():
 def show_run_history(tool_name=None, status=None, offset=0):
     try:
         runs = list_tool_runs(
-            limit=20, offset=offset, tool_name=tool_name, status=status
+            limit=20, offset=offset, tool_name=tool_name, status=status,
+            redact_sensitive=True,
         )
     except database.DATABASE_ERRORS as exc:
         print(f"Run history query failed: {exc}")
@@ -189,7 +190,7 @@ def show_run_history(tool_name=None, status=None, offset=0):
 
 def inspect_tool_run(run_id):
     try:
-        run = get_tool_run(run_id)
+        run = get_tool_run(run_id, redact_sensitive=True)
     except ValueError as exc:
         print(f"Could not inspect run: {exc}")
         return

@@ -10,9 +10,9 @@ __all__ = ("get_recent_tool_runs", "get_saved_tool_results")
 
 def get_recent_tool_runs(limit: int = 20):
     """Return a bounded page of recent tool runs."""
-    return _list_tool_runs(limit)
+    return _list_tool_runs(limit, redact_sensitive=True)
 
 
 def get_saved_tool_results(limit: int = 20):
     """Return a bounded page of saved tool results."""
-    return _list_tool_results(limit)
+    return _list_tool_results(limit, redact_sensitive=True)

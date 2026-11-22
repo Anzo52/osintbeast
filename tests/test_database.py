@@ -284,6 +284,66 @@ def test_list_tool_results_orders_newest_first_and_enforces_limit(
             database.list_tool_results(limit=limit)
 
 
+def test_saved_views_redact_legacy_values_without_rewriting_them(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "legacy-views.db"))
+    database.setup_database()
+    query = "person+tag@example.com"
+    result = "Found person+tag%40example.com and person+tagger@example.com"
+    run_id = database.start_tool_run("holehe", query)
+
+    assert database.get_tool_run(run_id, redact_sensitive=True)[2] == "[redacted]"
+    database.finish_tool_run(run_id, "success", result_text=result)
+
+    assert database.get_tool_run(run_id, redact_sensitive=True)[2:6] == (
+        "[redacted]", "success",
+        "Found [redacted] and person+tagger@example.com", None,
+    )
+    assert database.list_tool_runs(redact_sensitive=True)[0][2] == "[redacted]"
+    assert database.list_tool_results(redact_sensitive=True)[0][2:4] == (
+        "[redacted]", "Found [redacted] and person+tagger@example.com",
+    )
+    result_id = database.query_database(
+        "SELECT resultID FROM ToolResults"
+    )[0][0]
+    assert database.get_tool_result(result_id, redact_sensitive=True)["result"] == (
+        "Found [redacted] and person+tagger@example.com"
+    )
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolRuns WHERE runID = ?", (run_id,)
+    ) == [(query, result)]
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolResults"
+    ) == [(query, result)]
+
+
+@pytest.mark.parametrize(
+    ("query", "text", "expected"),
+    [
+        (
+            "ali",
+            "malicious output includes ali as a standalone token",
+            "malicious output includes [redacted] as a standalone token",
+        ),
+        (
+            "person+tag@example.com",
+            "Found person+tag%40example.com and person+tagger@example.com",
+            "Found [redacted] and person+tagger@example.com",
+        ),
+        (
+            "https://example.test/a/b",
+            "found https%3A//example.test/a%2Fb in a response",
+            "found [redacted] in a response",
+        ),
+    ],
+)
+def test_saved_text_redaction_handles_encoding_and_word_boundaries(
+    query, text, expected
+):
+    assert database.redact_sensitive_text(text, query) == expected
+
+
 def test_insert_rejects_unknown_table_and_column(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "safe.db"))
     database.setup_database()

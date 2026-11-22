@@ -143,6 +143,37 @@ def test_mysql_backend_is_selected_without_changing_sqlite_default(monkeypatch):
     assert database._get_storage().__class__.__name__ == "SQLiteStorage"
 
 
+def test_mysql_rows_use_the_shared_saved_view_redaction(monkeypatch):
+    class LegacyMySQLReader:
+        def query(self, statement, _parameters=()):
+            if "FROM ToolRuns" in statement:
+                return [
+                    (
+                        3, "holehe", "person+tag@example.com", "failed",
+                        "2020-01-01", None,
+                        "failed for person+tag%40example.com",
+                    )
+                ]
+            return []
+
+        def list_tool_results(self, _limit):
+            return [
+                (
+                    4, "holehe", "person+tag@example.com",
+                    "Found person+tag%40example.com", "2020-01-01",
+                )
+            ]
+
+    monkeypatch.setattr(database, "_get_storage", LegacyMySQLReader)
+
+    assert database.list_tool_runs(redact_sensitive=True)[0][2:] == (
+        "[redacted]", "failed", "2020-01-01", None, "failed for [redacted]",
+    )
+    assert database.list_tool_results(redact_sensitive=True)[0][2:4] == (
+        "[redacted]", "Found [redacted]",
+    )
+
+
 def test_mysql_failures_are_reported_as_storage_errors(mysql_storage):
     storage, engine = mysql_storage
     engine.connection.fail_on = "INSERT INTO ToolRuns"
