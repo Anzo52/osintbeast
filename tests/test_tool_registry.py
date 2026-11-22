@@ -19,6 +19,25 @@ def test_tool_metadata_has_expected_fields_and_values():
     assert metadata["category"] == "email"
     assert metadata["repo"].startswith("https://")
     assert metadata["install_method"] == "pip"
+    assert metadata["input_mechanism"] == "in-process Python API"
+    assert {
+        name: TOOL_REGISTRY[name]["input_mechanism"]
+        for name in ("holehe", "maigret", "helix", "sherlock")
+    } == {
+        "holehe": "in-process Python API",
+        "maigret": "in-process Python API",
+        "helix": "in-process Python API",
+        "sherlock": "in-process Python API",
+    }
+
+
+def test_unimplemented_tools_require_private_input_when_integrated():
+    assert TOOL_REGISTRY["sublist3r"]["input_mechanism"] == (
+        "not integrated; future runs require stdin/private pipe"
+    )
+    assert TOOL_REGISTRY["amass"]["input_mechanism"] == (
+        "not integrated; future runs require stdin/private pipe"
+    )
 
 
 def test_metadata_lookup_normalizes_name_and_handles_unknown_inputs():

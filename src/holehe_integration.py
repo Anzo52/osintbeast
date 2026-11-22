@@ -3,6 +3,7 @@ import re
 import sqlite3
 
 import data.utils.database as database
+from tool_runs import redact_sensitive_data, redact_sensitive_output
 
 HOLEHE_TIMEOUT_SECONDS = 300
 
@@ -84,7 +85,7 @@ def _run_holehe(email: str):
 def run_holehe(email: str):
     """Run Holehe in-process so the email is not exposed in process arguments."""
     email = validate_email(email)
-    results = _run_holehe(email)
+    results = redact_sensitive_data(_run_holehe(email), email)
     return {
         "returncode": 0,
         "output": json.dumps(results, ensure_ascii=False, indent=2),
@@ -92,6 +93,7 @@ def run_holehe(email: str):
 
 
 def save_tool_result(tool_name: str, query_text: str, result_text: str):
+    result_text = redact_sensitive_output(result_text, query_text)
     conn = sqlite3.connect(database.DB_FILE)
     try:
         conn.execute(
@@ -105,7 +107,7 @@ def save_tool_result(tool_name: str, query_text: str, result_text: str):
         )
         conn.execute(
             "INSERT INTO ToolResults (toolName, queryText, resultText) VALUES (?, ?, ?)",
-            (tool_name, query_text, result_text),
+            (tool_name, "[redacted]", result_text),
         )
         conn.commit()
     finally:

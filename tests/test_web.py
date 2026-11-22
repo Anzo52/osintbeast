@@ -129,6 +129,39 @@ def test_status_route_returns_only_public_status_fields(client, monkeypatch):
     assert b"internal exception" not in response.data
 
 
+def test_status_and_result_routes_support_current_database_rows(client):
+    run_id = database.start_tool_run("holehe", "private@example.com")
+    database.finish_tool_run(run_id, "success", result_text="scan output")
+    result_id = database.query_database(
+        "SELECT resultID FROM ToolResults"
+    )[0][0]
+
+    run_response = client.get(f"/api/runs/{run_id}", headers=auth_headers())
+    result_response = client.get(
+        f"/api/results/{result_id}", headers=auth_headers()
+    )
+
+    assert run_response.status_code == 200
+    assert {
+        key: run_response.json[key]
+        for key in ("run_id", "tool", "status")
+    } == {"run_id": run_id, "tool": "holehe", "status": "success"}
+    assert run_response.json["started_at"]
+    assert run_response.json["finished_at"]
+    assert result_response.status_code == 200
+    assert {
+        key: result_response.json[key]
+        for key in ("result_id", "tool", "result")
+    } == {
+        "result_id": result_id,
+        "tool": "holehe",
+        "result": "scan output",
+    }
+    assert result_response.json["created_at"]
+    assert b"private@example.com" not in run_response.data
+    assert b"private@example.com" not in result_response.data
+
+
 def test_result_route_returns_saved_result_without_query_text(client, monkeypatch):
     get_result = Mock(
         return_value={

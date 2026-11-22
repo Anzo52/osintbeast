@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import sys
@@ -5,6 +6,7 @@ from contextlib import closing
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping, Optional
+
 
 # Keep source-checkout paths independent of the current working directory.
 def setup_database_paths(module_file):
@@ -54,12 +56,23 @@ def _user_data_directory():
 
 
 DB_FILE, SCHEMA_DIR, SCHEMA_FILES, INSERTABLE_TABLES = setup_database_paths(__file__)
+_PRIVATE_FILE_MODE = 0o600
+_SQLITE_COMPANION_SUFFIXES = ("-journal", "-shm", "-wal")
+
+
+def _enforce_private_permissions() -> None:
+    for path in (Path(DB_FILE), *(Path(DB_FILE + suffix) for suffix in _SQLITE_COMPANION_SUFFIXES)):
+        if path.exists():
+            path.chmod(_PRIVATE_FILE_MODE)
 
 
 def connect_db() -> sqlite3.Connection:
     """Open the SQLite database with foreign-key enforcement enabled."""
-    Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
+    db_path = Path(DB_FILE)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    _enforce_private_permissions()
     conn = sqlite3.connect(DB_FILE)
+    _enforce_private_permissions()
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
@@ -132,9 +145,8 @@ def save_tool_result(
 
 
 def list_tool_results(limit: int = 100) -> list[tuple[Any, ...]]:
-    """Return recent tool runs, newest first, with a bounded page size."""
-    if not 1 <= limit <= 500:
-        raise ValueError("limit must be between 1 and 500")
+    """Return saved tool results, newest first, with a bounded page size."""
+    _validate_list_limit(limit)
     with closing(connect_db()) as conn:
         return conn.execute(
             """SELECT resultID, toolName, queryText, resultText, createdAt
@@ -143,16 +155,65 @@ def list_tool_results(limit: int = 100) -> list[tuple[Any, ...]]:
         ).fetchall()
 
 
-def list_tool_runs(limit: int = 100) -> list[tuple[Any, ...]]:
-    """Return recent tool runs, newest first, with a bounded page size."""
-    if not 1 <= limit <= 500:
+def _validate_list_limit(limit: int) -> None:
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
         raise ValueError("limit must be between 1 and 500")
+
+
+def list_tool_runs(
+    limit: int = 20, offset: int = 0, tool_name: Optional[str] = None,
+    status: Optional[str] = None,
+) -> list[tuple[Any, ...]]:
+    """Return a page of structured run history, newest first."""
+    _validate_list_limit(limit)
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        raise ValueError("offset must be a non-negative integer")
+    if tool_name is not None and (not isinstance(tool_name, str) or not tool_name):
+        raise ValueError("tool_name must be a non-empty string")
+    if status is not None and status not in {
+        "running", "success", "failed", "timed_out",
+    }:
+        raise ValueError("Invalid run status")
+
+    filters = []
+    parameters = []
+    if tool_name is not None:
+        filters.append("toolName = ?")
+        parameters.append(tool_name)
+    if status is not None:
+        filters.append("status = ?")
+        parameters.append(status)
+    where_clause = f" WHERE {' AND '.join(filters)}" if filters else ""
+    parameters.extend((limit, offset))
+
     with closing(connect_db()) as conn:
         return conn.execute(
-            """SELECT runID, toolName, queryText, status, startedAt, finishedAt
-               FROM ToolRuns ORDER BY runID DESC LIMIT ?""",
-            (limit,),
+            """SELECT runID, toolName, queryText, status, startedAt, finishedAt,
+                      errorText
+               FROM ToolRuns"""
+            + where_clause
+            + " ORDER BY runID DESC LIMIT ? OFFSET ?",
+            tuple(parameters),
         ).fetchall()
+
+
+def reconcile_stale_tool_runs(older_than_seconds: int = 600) -> int:
+    """Mark runs older than the tool timeout as interrupted after lost outcomes."""
+    if (
+        not isinstance(older_than_seconds, int)
+        or isinstance(older_than_seconds, bool)
+        or older_than_seconds < 1
+    ):
+        raise ValueError("older_than_seconds must be a positive integer")
+    with closing(connect_db()) as conn, conn:
+        cursor = conn.execute(
+            """UPDATE ToolRuns SET status = 'failed',
+                      errorText = 'Run outcome could not be persisted.',
+                      finishedAt = CURRENT_TIMESTAMP
+               WHERE status = 'running' AND startedAt <= datetime('now', ?)""",
+            (f"-{older_than_seconds} seconds",),
+        )
+        return cursor.rowcount
 
 
 def get_tool_run(run_id: int) -> Optional[tuple[Any, ...]]:
@@ -164,6 +225,69 @@ def get_tool_run(run_id: int) -> Optional[tuple[Any, ...]]:
                FROM ToolRuns WHERE runID = ?""",
             (run_id,),
         ).fetchone()
+
+
+def get_tool_result(result_id: int) -> Optional[dict[str, Any]]:
+    """Return one saved result without exposing its original query text."""
+    with closing(connect_db()) as conn:
+        row = conn.execute(
+            """SELECT resultID, toolName, resultText, createdAt
+               FROM ToolResults WHERE resultID = ?""",
+            (result_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return dict(zip(("result_id", "tool", "result", "created_at"), row))
+
+
+def export_tool_runs_json(
+    run_ids: list[int], include_sensitive: bool = False,
+) -> str:
+    """Serialize selected run records as JSON, redacting sensitive text by default."""
+    if not run_ids or len(run_ids) > 500:
+        raise ValueError("Select between 1 and 500 runs")
+    if any(
+        not isinstance(run_id, int) or isinstance(run_id, bool) or run_id < 1
+        for run_id in run_ids
+    ):
+        raise ValueError("run_ids must contain positive integers")
+    if len(set(run_ids)) != len(run_ids):
+        raise ValueError("run_ids must not contain duplicates")
+
+    placeholders = ", ".join("?" for _ in run_ids)
+    with closing(connect_db()) as conn:
+        rows = conn.execute(
+            f"""SELECT runID, toolName, queryText, status, startedAt, finishedAt,
+                       resultText, errorText
+                FROM ToolRuns WHERE runID IN ({placeholders})""",
+            tuple(run_ids),
+        ).fetchall()
+    by_id = {row[0]: row for row in rows}
+    if len(by_id) != len(run_ids):
+        raise ValueError("One or more selected runs do not exist")
+
+    records = []
+    for run_id in run_ids:
+        row = by_id[run_id]
+        sensitive_values = row[2], row[6], row[7]
+        if not include_sensitive:
+            sensitive_values = tuple(
+                "[REDACTED]" if value is not None else None
+                for value in sensitive_values
+            )
+        records.append(
+            {
+                "run_id": row[0],
+                "tool": row[1],
+                "input": sensitive_values[0],
+                "status": row[3],
+                "started_at": row[4],
+                "finished_at": row[5],
+                "result": sensitive_values[1],
+                "error": sensitive_values[2],
+            }
+        )
+    return json.dumps(records, ensure_ascii=False, indent=2)
 
 
 def start_tool_run(tool_name: str, query_text: str):
@@ -201,29 +325,3 @@ def finish_tool_run(
                    SELECT toolName, queryText, resultText FROM ToolRuns WHERE runID = ?""",
                 (run_id,),
             )
-
-
-def get_tool_run(run_id: int) -> Optional[dict[str, Any]]:
-    """Return non-sensitive status fields for one run."""
-    with closing(connect_db()) as conn:
-        row = conn.execute(
-            """SELECT runID, toolName, status, startedAt, finishedAt
-               FROM ToolRuns WHERE runID = ?""",
-            (run_id,),
-        ).fetchone()
-    if row is None:
-        return None
-    return dict(zip(("run_id", "tool", "status", "started_at", "finished_at"), row))
-
-
-def get_tool_result(result_id: int) -> Optional[dict[str, Any]]:
-    """Return one saved result without exposing its original query text."""
-    with closing(connect_db()) as conn:
-        row = conn.execute(
-            """SELECT resultID, toolName, resultText, createdAt
-               FROM ToolResults WHERE resultID = ?""",
-            (result_id,),
-        ).fetchone()
-    if row is None:
-        return None
-    return dict(zip(("result_id", "tool", "result", "created_at"), row))
