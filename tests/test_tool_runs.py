@@ -432,6 +432,25 @@ def test_sensitive_values_are_redacted_from_errors(
     ) == [("[redacted]", "request failed for [redacted]")]
 
 
+def test_execute_tool_run_with_id_redacts_sensitive_values(initialized_db):
+    sensitive_value = "person@example.com"
+    run_id, status, output = tool_runs.execute_tool_run_with_id(
+        "holehe",
+        sensitive_value,
+        lambda value: f"Found {value}",
+        sensitive_input=True,
+    )
+
+    assert status == "success"
+    assert output == "Found [redacted]"
+    assert database.get_tool_run(run_id)[2:6] == (
+        "[redacted]", "success", "Found [redacted]", None
+    )
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolResults"
+    ) == [("[redacted]", "Found [redacted]")]
+
+
 @pytest.mark.parametrize(
     ("menu", "prompt", "value"),
     [

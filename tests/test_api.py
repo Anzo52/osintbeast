@@ -64,12 +64,37 @@ def test_create_and_get_run_delegates_to_shared_services(
     saved = client("GET", f"/runs/{run_id}")
     assert saved["status"] == 200
     assert saved["body"] == {
-        "run_id": run_id, "tool": name, "query": normalized, "status": "success",
+        "run_id": run_id, "tool": name,
+        "query": "[redacted]" if name == "holehe" else normalized,
+        "status": "success",
         "result": "report", "error": None,
         "started_at": saved["body"]["started_at"], "finished_at": saved["body"]["finished_at"],
     }
     assert saved["body"]["started_at"] and saved["body"]["finished_at"]
     assert database.list_tool_results()[0][3] == "report"
+
+
+def test_api_redacts_sensitive_input_and_output(client, monkeypatch):
+    sensitive_value = "person@example.com"
+    monkeypatch.setattr(
+        api.holehe_integration,
+        "run_holehe",
+        Mock(return_value={"output": f"Found {sensitive_value}"}),
+    )
+
+    response = client(
+        "POST",
+        "/runs",
+        {"tool": "holehe", "query": sensitive_value, "authorized": True},
+    )
+    run_id = response["body"]["run_id"]
+    saved = client("GET", f"/runs/{run_id}")["body"]
+
+    assert saved["query"] == "[redacted]"
+    assert saved["result"] == "Found [redacted]"
+    assert database.list_tool_results()[0][2:4] == (
+        "[redacted]", "Found [redacted]"
+    )
 
 
 @pytest.mark.parametrize(

@@ -7,6 +7,7 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
+
 # Keep source-checkout paths independent of the current working directory.
 def setup_database_paths(module_file):
     module_path = Path(module_file).resolve()
@@ -194,6 +195,25 @@ def list_tool_runs(
             + " ORDER BY runID DESC LIMIT ? OFFSET ?",
             tuple(parameters),
         ).fetchall()
+
+
+def reconcile_stale_tool_runs(older_than_seconds: int = 600) -> int:
+    """Mark runs older than the tool timeout as interrupted after lost outcomes."""
+    if (
+        not isinstance(older_than_seconds, int)
+        or isinstance(older_than_seconds, bool)
+        or older_than_seconds < 1
+    ):
+        raise ValueError("older_than_seconds must be a positive integer")
+    with closing(connect_db()) as conn, conn:
+        cursor = conn.execute(
+            """UPDATE ToolRuns SET status = 'failed',
+                      errorText = 'Run outcome could not be persisted.',
+                      finishedAt = CURRENT_TIMESTAMP
+               WHERE status = 'running' AND startedAt <= datetime('now', ?)""",
+            (f"-{older_than_seconds} seconds",),
+        )
+        return cursor.rowcount
 
 
 def get_tool_run(run_id: int) -> Optional[tuple[Any, ...]]:

@@ -104,7 +104,9 @@ def create_app(token):
             except ValueError as exc:
                 return _error(start_response, "400 Bad Request", "invalid_query", str(exc))
             try:
-                run_id, status, _ = tool_runs.execute_tool_run_with_id(name, query, tools[name][1])
+                run_id, status, _ = tool_runs.execute_tool_run_with_id(
+                    name, query, tools[name][1], sensitive_input=name == "holehe"
+                )
             except (sqlite3.Error, RuntimeError):
                 return _error(start_response, "500 Internal Server Error", "storage_error",
                               "Could not record the run.")
