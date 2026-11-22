@@ -1,58 +1,77 @@
 import json
+import logging
 import re
 from collections.abc import Callable
-from urllib.parse import quote, quote_plus
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 
 import data.utils.database as database
 
+REDACTED = "[redacted]"
+
+
+class UnexpectedToolError(RuntimeError):
+    """A sanitized unexpected failure from a sensitive tool run."""
+
 
 def _redact_sensitive_value(text: str, sensitive_value: str) -> str:
-    """Redact complete query tokens from text and JSON string values."""
-    variants = sorted(
-        {sensitive_value, quote(sensitive_value, safe=""), quote_plus(sensitive_value)},
-        key=len,
-        reverse=True,
+    """Redact whole input values, including partially URL-encoded forms."""
+    if not sensitive_value:
+        return text
+    alternatives = []
+    for char in sensitive_value:
+        encoded = "".join(f"%{byte:02X}" for byte in char.encode("utf-8"))
+        representations = [re.escape(char), re.escape(encoded)]
+        if char == " ":
+            representations.append(r"\+")
+        alternatives.append(f"(?:{'|'.join(representations)})")
+    pattern = re.compile(
+        rf"(?<![A-Za-z0-9_.-])(?<!\[){''.join(alternatives)}"
+        r"(?![A-Za-z0-9_.-])(?!\])",
+        re.IGNORECASE,
     )
-    patterns = [
-        re.compile(
-            rf"(?<![A-Za-z0-9_.-]){re.escape(variant)}(?![A-Za-z0-9_.-])",
-            re.IGNORECASE,
-        )
-        for variant in variants
-        if variant
-    ]
+    return pattern.sub("[redacted]", text)
 
-    def redact_text(value: str) -> str:
-        for pattern in patterns:
-            value = pattern.sub("[redacted]", value)
-        return value
 
-    def redact_json_value(value):
-        if isinstance(value, str):
-            redacted = redact_text(value)
-            return redacted, redacted != value
-        if isinstance(value, list):
-            redacted_values = [redact_json_value(item) for item in value]
-            return [item for item, _ in redacted_values], any(
-                changed for _, changed in redacted_values
-            )
-        if isinstance(value, dict):
-            redacted_values = {
-                key: redact_json_value(item) for key, item in value.items()
-            }
-            return (
-                {key: item for key, (item, _) in redacted_values.items()},
-                any(changed for _, changed in redacted_values.values()),
-            )
-        return value, False
+def redact_sensitive_data(value, sensitive_value: str):
+    """Redact string values in structured data without changing its schema."""
+    if isinstance(value, str):
+        return _redact_sensitive_value(value, sensitive_value)
+    if isinstance(value, dict):
+        return {
+            key: redact_sensitive_data(item, sensitive_value)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_sensitive_data(item, sensitive_value) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact_sensitive_data(item, sensitive_value) for item in value)
+    return value
 
+
+def redact_sensitive_output(output: str, sensitive_value: str) -> str:
+    """Redact JSON values as data, falling back to text for other output."""
     try:
-        parsed = json.loads(text)
+        structured = json.loads(output)
     except (TypeError, json.JSONDecodeError):
-        return redact_text(text)
+        return _redact_sensitive_value(output, sensitive_value)
+    if isinstance(structured, (dict, list)):
+        return json.dumps(
+            redact_sensitive_data(structured, sensitive_value),
+            ensure_ascii=False,
+            indent=2,
+        )
+    return _redact_sensitive_value(output, sensitive_value)
 
-    redacted, changed = redact_json_value(parsed)
-    return json.dumps(redacted, ensure_ascii=False, indent=2) if changed else text
+
+def start_tool_run(
+    tool_name: str, query_text: str, *, sensitive_input: bool
+):
+    """Create a run record, redacting its input when it is sensitive."""
+    if not isinstance(sensitive_input, bool):
+        raise TypeError("sensitive_input must be a boolean.")
+    stored_query = REDACTED if sensitive_input else query_text
+    return database.start_tool_run(tool_name, stored_query)
 
 
 def execute_tool_run(
@@ -61,16 +80,64 @@ def execute_tool_run(
     runner: Callable[[str], str],
     run_id: int | None = None,
     *,
-    sensitive_input: bool = False,
+    sensitive_input: bool,
 ) -> tuple[str, str]:
     """Persist the run outcome; propagate persistence errors to the caller."""
+    if not isinstance(sensitive_input, bool):
+        raise TypeError("sensitive_input must be a boolean.")
     if run_id is None:
-        stored_query = "[redacted]" if sensitive_input else query_text
-        run_id = database.start_tool_run(tool_name, stored_query)
+        run_id = start_tool_run(
+            tool_name, query_text, sensitive_input=sensitive_input
+        )
+    elif sensitive_input:
+        run = database.get_tool_run(run_id)
+        if run is None or run[1:4] != (tool_name, REDACTED, "running"):
+            raise ValueError("Sensitive runs require a redacted running record.")
     if run_id is None:
         raise RuntimeError("Failed to start tool run.")
+    return _execute_tool_run(
+        tool_name, query_text, runner, run_id, sensitive_input=sensitive_input
+    )
+
+
+def execute_tool_run_with_id(
+    tool_name: str, query_text: str, runner: Callable[[str], str],
+    *, sensitive_input: bool,
+) -> tuple[int, str, str]:
+    """Execute a run and return its persisted identifier and outcome."""
+    run_id = start_tool_run(
+        tool_name, query_text, sensitive_input=sensitive_input
+    )
+    if run_id is None:
+        raise RuntimeError("Failed to start tool run.")
+    status, value = _execute_tool_run(
+        tool_name, query_text, runner, run_id, sensitive_input=sensitive_input
+    )
+    return run_id, status, value
+
+
+def _execute_tool_run(
+    tool_name: str,
+    query_text: str,
+    runner: Callable[[str], str],
+    run_id: int,
+    *,
+    sensitive_input: bool,
+) -> tuple[str, str]:
+    """Execute and persist a run using an existing run identifier."""
     try:
-        output = runner(query_text)
+        if sensitive_input:
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                previous_disable = logging.root.manager.disable
+                logging.disable(logging.CRITICAL)
+                try:
+                    output = runner(query_text)
+                finally:
+                    logging.disable(previous_disable)
+        else:
+            output = runner(query_text)
+        if not isinstance(output, str):
+            raise RuntimeError(f"{tool_name} returned non-text output.")
     except TimeoutError as exc:
         message = str(exc) or f"{tool_name} exceeded its time limit."
         if sensitive_input:
@@ -83,7 +150,13 @@ def execute_tool_run(
             message = _redact_sensitive_value(message, query_text)
         database.finish_tool_run(run_id, "failed", error_text=message)
         return "failed", message
+    except Exception as exc:
+        message = f"{tool_name} failed unexpectedly ({type(exc).__name__})."
+        database.finish_tool_run(run_id, "failed", error_text=message)
+        if sensitive_input:
+            raise UnexpectedToolError(message).with_traceback(exc.__traceback__) from None
+        raise
     if sensitive_input:
-        output = _redact_sensitive_value(output, query_text)
+        output = redact_sensitive_output(output, query_text)
     database.finish_tool_run(run_id, "success", result_text=output)
     return "success", output
