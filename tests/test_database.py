@@ -305,3 +305,29 @@ def test_insert_binds_values_and_rejects_identifier_injection(tmp_path, monkeypa
     assert database.query_database(
         "SELECT platform FROM Platforms WHERE platform = ?", (payload,)
     ) == [(payload,)]
+
+
+def test_reconcile_stale_tool_runs_preserves_recent_runs(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "reconcile.db"))
+    database.setup_database()
+    stale_id = database.start_tool_run("maigret", "stale")
+    recent_id = database.start_tool_run("maigret", "recent")
+    with database.connect_db() as conn:
+        conn.execute(
+            "UPDATE ToolRuns SET startedAt = datetime('now', '-11 minutes') "
+            "WHERE runID = ?",
+            (stale_id,),
+        )
+
+    assert database.reconcile_stale_tool_runs() == 1
+    assert database.get_tool_run(stale_id)[3:6] == (
+        "failed", None, "Run outcome could not be persisted."
+    )
+    assert database.get_tool_run(stale_id)[7] is not None
+    assert database.get_tool_run(recent_id)[3] == "running"
+
+
+@pytest.mark.parametrize("age", [0, -1, True, 1.5])
+def test_reconcile_stale_tool_runs_rejects_invalid_age(age):
+    with pytest.raises(ValueError, match="positive integer"):
+        database.reconcile_stale_tool_runs(age)

@@ -7,13 +7,16 @@ import os
 import signal
 import threading
 import time
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
+from io import StringIO
 
 import data.utils.database as database
 from helix_integration import run_helix, validate_username as validate_helix
 from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username as validate_maigret
 from sherlock_integration import run_sherlock, validate_username as validate_sherlock
+from tool_runs import redact_sensitive_output, start_tool_run
 
 _LOG = logging.getLogger(__name__)
 _TOOLS = {
@@ -52,11 +55,20 @@ def _worker(connection, tool_name, query, max_output_bytes):
     try:
         if os.name == "posix":
             os.setsid()
-        output = _TOOLS[tool_name][1](query)
         if tool_name == "holehe":
-            output = output["output"]
+            previous_disable = logging.root.manager.disable
+            logging.disable(logging.CRITICAL)
+            try:
+                with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                    output = _TOOLS[tool_name][1](query)["output"]
+            finally:
+                logging.disable(previous_disable)
+        else:
+            output = _TOOLS[tool_name][1](query)
         if not isinstance(output, str):
             raise ValueError("Tool returned an invalid result.")
+        if tool_name == "holehe":
+            output = redact_sensitive_output(output, query)
         payload = output.encode("utf-8")
         if len(payload) > max_output_bytes:
             raise ValueError("Tool output exceeded the configured limit.")
@@ -64,6 +76,8 @@ def _worker(connection, tool_name, query, max_output_bytes):
     except BaseException as exc:
         status = b"T" if isinstance(exc, TimeoutError) else b"F"
         message = str(exc) or f"Worker failed ({type(exc).__name__})."
+        if tool_name == "holehe":
+            message = redact_sensitive_output(message, query)
         try:
             connection.send_bytes(status + message.encode("utf-8")[:max_output_bytes])
         except (BrokenPipeError, OSError):
@@ -107,7 +121,9 @@ class BackgroundRuns:
                 raise RuntimeError("Background run service is closed.")
             if len(self._jobs) + len(self._pending) >= self.limits.max_concurrent:
                 raise CapacityError("Background run capacity reached.")
-            run_id = database.start_tool_run(tool_name, query)
+            run_id = start_tool_run(
+                tool_name, query, sensitive_input=tool_name == "holehe"
+            )
             cancel = threading.Event()
             thread = threading.Thread(
                 target=self._supervise, args=(run_id, tool_name, query, cancel),

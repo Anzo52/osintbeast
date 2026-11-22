@@ -58,6 +58,14 @@ def redact_sensitive_output(output: str, sensitive_value: str) -> str:
     return _redact_sensitive_value(output, sensitive_value)
 
 
+def start_tool_run(
+    tool_name: str, query_text: str, *, sensitive_input: bool = False
+):
+    """Create a run record, redacting its input when it is sensitive."""
+    stored_query = "[redacted]" if sensitive_input else query_text
+    return database.start_tool_run(tool_name, stored_query)
+
+
 def execute_tool_run(
     tool_name: str,
     query_text: str,
@@ -68,8 +76,8 @@ def execute_tool_run(
 ) -> tuple[str, str]:
     """Persist the run outcome; propagate persistence errors to the caller."""
     if run_id is None:
-        run_id = database.start_tool_run(
-            tool_name, "[redacted]" if sensitive_input else query_text
+        run_id = start_tool_run(
+            tool_name, query_text, sensitive_input=sensitive_input
         )
     if run_id is None:
         raise RuntimeError("Failed to start tool run.")
@@ -79,13 +87,18 @@ def execute_tool_run(
 
 
 def execute_tool_run_with_id(
-    tool_name: str, query_text: str, runner: Callable[[str], str]
+    tool_name: str, query_text: str, runner: Callable[[str], str],
+    *, sensitive_input: bool = False,
 ) -> tuple[int, str, str]:
     """Execute a run and return its persisted identifier and outcome."""
-    run_id = database.start_tool_run(tool_name, query_text)
+    run_id = start_tool_run(
+        tool_name, query_text, sensitive_input=sensitive_input
+    )
     if run_id is None:
         raise RuntimeError("Failed to start tool run.")
-    status, value = _execute_tool_run(tool_name, query_text, runner, run_id)
+    status, value = _execute_tool_run(
+        tool_name, query_text, runner, run_id, sensitive_input=sensitive_input
+    )
     return run_id, status, value
 
 
