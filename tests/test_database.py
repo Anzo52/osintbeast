@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 import data.utils.database as database
 import downloader
@@ -312,6 +313,16 @@ def test_insert_binds_values_and_rejects_identifier_injection(tmp_path, monkeypa
     assert database.query_database(
         "SELECT platform FROM Platforms WHERE platform = ?", (payload,)
     ) == [(payload,)]
+
+
+def test_insert_data_preserves_foreign_key_enforcement(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "foreign-key.db"))
+    database.setup_database()
+
+    with pytest.raises(IntegrityError):
+        database.insert_data(
+            "Services", {"serviceName": "orphan", "platformID": 999}
+        )
 
 
 def test_reconcile_stale_tool_runs_preserves_recent_runs(tmp_path, monkeypatch):

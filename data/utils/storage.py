@@ -4,6 +4,9 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol
 
+from sqlalchemy import MetaData, Table, create_engine
+from sqlalchemy.engine import URL
+
 
 class StorageError(Exception):
     """A backend-neutral storage error for application-level handling."""
@@ -91,23 +94,24 @@ class SQLiteStorage:
         if not isinstance(table, str) or table not in self.insertable_tables:
             raise ValueError(f"Unknown database table: {table}")
 
-        with closing(self.connect()) as conn, conn:
-            valid_columns = {
-                row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')
-            }
-            columns = list(data)
-            if any(
-                not isinstance(column, str) or column not in valid_columns
-                for column in columns
-            ):
-                raise ValueError(f"Unknown column for table {table}")
-
-            quoted_columns = ", ".join(f'"{column}"' for column in columns)
-            placeholders = ", ".join("?" for _ in columns)
-            conn.execute(
-                f'INSERT INTO "{table}" ({quoted_columns}) VALUES ({placeholders})',
-                tuple(data[column] for column in columns),
-            )
+        db_path = Path(self.db_file)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._enforce_private_permissions()
+        engine = create_engine(URL.create("sqlite", database=str(db_path.resolve())))
+        try:
+            with engine.begin() as connection:
+                connection.exec_driver_sql("PRAGMA foreign_keys = ON")
+                self._enforce_private_permissions()
+                reflected = Table(table, MetaData(), autoload_with=connection)
+                known_columns = {column.name for column in reflected.columns}
+                if any(
+                    not isinstance(column, str) or column not in known_columns
+                    for column in data
+                ):
+                    raise ValueError(f"Unknown column for table {table}")
+                connection.execute(reflected.insert().values(**data))
+        finally:
+            engine.dispose()
 
     def query(
         self, query: str, parameters: tuple[Any, ...] = ()
