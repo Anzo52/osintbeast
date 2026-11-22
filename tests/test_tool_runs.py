@@ -157,6 +157,7 @@ def test_list_tool_runs_filters_orders_and_paginates(initialized_db):
     assert [row[2] for row in database.list_tool_runs(
         tool_name="holehe", status="success"
     )] == ["old"]
+    assert database.list_tool_runs(tool_name="holehe' OR 1=1 --") == []
     assert [row[2] for row in database.list_tool_runs(offset=2)] == ["old"]
     assert database.list_tool_runs(offset=3) == []
     with pytest.raises(ValueError):
