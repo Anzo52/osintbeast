@@ -2,6 +2,7 @@
 
 import json
 import ipaddress
+import logging
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
@@ -12,8 +13,9 @@ from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username
 from sherlock_integration import run_sherlock, validate_username as validate_sherlock_username
 from tool_registry import get_tool_metadata
-from tool_runs import execute_tool_run
+from tool_runs import execute_tool_run, start_tool_run
 
+_LOG = logging.getLogger(__name__)
 RUNNABLE_TOOLS = {
     "holehe": ("email", validate_email, lambda value: run_holehe(value)["output"]),
     "maigret": ("username", validate_username, run_maigret),
@@ -162,16 +164,26 @@ INDEX_HTML = """<!doctype html>
 
 def _run_in_background(run_id, tool_name, query_text, runner):
     try:
-        execute_tool_run(tool_name, query_text, runner, run_id=run_id)
-    except Exception as exc:
+        execute_tool_run(
+            tool_name,
+            query_text,
+            runner,
+            run_id=run_id,
+            sensitive_input=tool_name == "holehe",
+        )
+    except (OSError, RuntimeError, ValueError, *database.DATABASE_ERRORS):
         try:
             database.finish_tool_run(
                 run_id,
                 "failed",
-                error_text=str(exc) or "The tool run could not be completed.",
+                error_text="The run outcome could not be persisted.",
             )
-        except (*database.DATABASE_ERRORS, ValueError):
-            pass
+        except (*database.DATABASE_ERRORS, ValueError) as exc:
+            _LOG.error(
+                "Could not persist completion for run %s (%s)",
+                run_id,
+                type(exc).__name__,
+            )
 
 
 class WebHandler(BaseHTTPRequestHandler):
@@ -276,6 +288,7 @@ class WebHandler(BaseHTTPRequestHandler):
             elif path.path == "/api/runs":
                 from urllib.parse import parse_qs
 
+                database.reconcile_stale_tool_runs()
                 values = parse_qs(path.query).get("limit", ["20"])
                 limit = int(values[0])
                 self._send_json(
@@ -283,6 +296,7 @@ class WebHandler(BaseHTTPRequestHandler):
                     [self._run_payload(row) for row in database.list_tool_runs(limit)],
                 )
             elif path.path.startswith("/api/runs/"):
+                database.reconcile_stale_tool_runs()
                 run_id_text = path.path.removeprefix("/api/runs/")
                 if not run_id_text.isdecimal():
                     self._send_json(404, {"error": "Run not found."})
@@ -330,7 +344,9 @@ class WebHandler(BaseHTTPRequestHandler):
                 return
             input_kind, validator, runner = tool
             query_text = validator(payload.get("input"))
-            run_id = database.start_tool_run(tool_name, query_text)
+            run_id = start_tool_run(
+                tool_name, query_text, sensitive_input=tool_name == "holehe"
+            )
             thread = threading.Thread(
                 target=_run_in_background,
                 args=(run_id, tool_name, query_text, runner),

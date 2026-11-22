@@ -5,7 +5,7 @@ import os
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from data.utils import database
+import data.utils.database as database
 from helix_integration import run_helix, validate_username as validate_helix_username
 from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username
@@ -181,7 +181,12 @@ def _make_handler(tokens):
                 self._send_json(400, {"error": str(exc)})
                 return
             try:
-                status, result = execute_tool_run(tool_name, query_text, runner)
+                status, result = execute_tool_run(
+                    tool_name,
+                    query_text,
+                    runner,
+                    sensitive_input=tool_name == "holehe",
+                )
             except (*database.DATABASE_ERRORS, RuntimeError):
                 self._send_json(500, {"error": "Could not record tool run."})
                 return

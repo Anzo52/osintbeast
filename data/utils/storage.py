@@ -36,6 +36,8 @@ class Storage(Protocol):
         error_text: Optional[str],
     ) -> None: ...
 
+    def reconcile_stale_tool_runs(self, older_than_seconds: int) -> int: ...
+
 
 class SQLiteStorage:
     _PRIVATE_FILE_MODE = 0o600
@@ -164,6 +166,17 @@ class SQLiteStorage:
                        FROM ToolRuns WHERE runID = ?""",
                     (run_id,),
                 )
+
+    def reconcile_stale_tool_runs(self, older_than_seconds: int) -> int:
+        with closing(self.connect()) as conn, conn:
+            cursor = conn.execute(
+                """UPDATE ToolRuns SET status = 'failed',
+                          errorText = 'Run outcome could not be persisted.',
+                          finishedAt = CURRENT_TIMESTAMP
+                   WHERE status = 'running' AND startedAt <= datetime('now', ?)""",
+                (f"-{older_than_seconds} seconds",),
+            )
+            return cursor.rowcount
 
 
 class MySQLStorage:
@@ -421,6 +434,23 @@ class MySQLStorage:
                            FROM ToolRuns WHERE runID = %s""",
                         (run_id,),
                     )
+        except Exception as exc:
+            if exc.__class__.__module__.startswith("sqlalchemy"):
+                raise StorageError(str(exc)) from exc
+            raise
+
+    def reconcile_stale_tool_runs(self, older_than_seconds: int) -> int:
+        try:
+            with self._get_engine().begin() as connection:
+                result = connection.exec_driver_sql(
+                    """UPDATE ToolRuns SET status = 'failed',
+                              errorText = 'Run outcome could not be persisted.',
+                              finishedAt = UTC_TIMESTAMP()
+                       WHERE status = 'running' AND
+                             startedAt <= DATE_SUB(UTC_TIMESTAMP(), INTERVAL %s SECOND)""",
+                    (older_than_seconds,),
+                )
+                return result.rowcount
         except Exception as exc:
             if exc.__class__.__module__.startswith("sqlalchemy"):
                 raise StorageError(str(exc)) from exc

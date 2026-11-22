@@ -160,3 +160,13 @@ def test_mysql_result_failure_aborts_tool_run_transaction(mysql_storage):
 
     assert len(engine.transaction_errors) == 1
     assert isinstance(engine.transaction_errors[0], FakeSQLAlchemyError)
+
+
+def test_mysql_reconciles_stale_runs_with_bound_age(mysql_storage):
+    storage, engine = mysql_storage
+
+    assert storage.reconcile_stale_tool_runs(600) == 1
+
+    statement, parameters = engine.connection.statements[-1]
+    assert "DATE_SUB(UTC_TIMESTAMP(), INTERVAL %s SECOND)" in statement
+    assert parameters == (600,)
