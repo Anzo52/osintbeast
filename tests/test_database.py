@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 import data.utils.database as database
 import downloader
@@ -94,6 +95,13 @@ def test_mysql_schemas_are_split_by_domain_and_include_run_history():
     assert "CREATE TABLE IF NOT EXISTS ToolResults" in tool_schema
     assert "CREATE TABLE IF NOT EXISTS ToolRuns" in tool_schema
     assert "CREATE TABLE IF NOT EXISTS Platforms" not in tool_schema
+    assert "UNIQUE KEY uq_domains_domain (domain)" in info_schema
+    assert "CONSTRAINT fk_usernames_services" in info_schema
+    assert "KEY idx_toolresults_tool_created (toolName, createdAt)" in tool_schema
+    assert (
+        "CHECK (status IN ('running', 'success', 'failed', 'timed_out'))"
+        in tool_schema
+    )
 
 
 def test_setup_database_preserves_existing_data_and_repairs_missing_objects(
@@ -261,11 +269,26 @@ def test_legacy_downloader_initializes_full_schema(tmp_path, monkeypatch):
 def test_holehe_result_uses_initialized_database(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "results.db"))
     database.setup_database()
-    holehe_integration.save_tool_result("holehe", "person@example.com", "output")
+    holehe_integration.save_tool_result(
+        "holehe", "person@example.com", "output for person@example.com"
+    )
 
     assert database.query_database(
         "SELECT toolName, queryText, resultText FROM ToolResults"
-    ) == [("holehe", "person@example.com", "output")]
+    ) == [("holehe", "[redacted]", "output for [redacted]")]
+
+
+def test_holehe_result_redacts_partially_encoded_input(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "encoded-results.db"))
+    database.setup_database()
+    query = "person+tag@example.com"
+    holehe_integration.save_tool_result(
+        "holehe", query, "Found person+tag%40example.com"
+    )
+
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolResults"
+    ) == [("[redacted]", "Found [redacted]")]
 
 
 def test_database_path_override_is_shared_across_modules(tmp_path):
@@ -370,3 +393,39 @@ def test_insert_binds_values_and_rejects_identifier_injection(tmp_path, monkeypa
     assert database.query_database(
         "SELECT platform FROM Platforms WHERE platform = ?", (payload,)
     ) == [(payload,)]
+
+
+def test_insert_data_preserves_foreign_key_enforcement(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "foreign-key.db"))
+    database.setup_database()
+
+    with pytest.raises(IntegrityError):
+        database.insert_data(
+            "Services", {"serviceName": "orphan", "platformID": 999}
+        )
+
+
+def test_reconcile_stale_tool_runs_preserves_recent_runs(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "reconcile.db"))
+    database.setup_database()
+    stale_id = database.start_tool_run("maigret", "stale")
+    recent_id = database.start_tool_run("maigret", "recent")
+    with database.connect_db() as conn:
+        conn.execute(
+            "UPDATE ToolRuns SET startedAt = datetime('now', '-11 minutes') "
+            "WHERE runID = ?",
+            (stale_id,),
+        )
+
+    assert database.reconcile_stale_tool_runs() == 1
+    assert database.get_tool_run(stale_id)[3:6] == (
+        "failed", None, "Run outcome could not be persisted."
+    )
+    assert database.get_tool_run(stale_id)[7] is not None
+    assert database.get_tool_run(recent_id)[3] == "running"
+
+
+@pytest.mark.parametrize("age", [0, -1, True, 1.5])
+def test_reconcile_stale_tool_runs_rejects_invalid_age(age):
+    with pytest.raises(ValueError, match="positive integer"):
+        database.reconcile_stale_tool_runs(age)

@@ -113,11 +113,12 @@ in the same environment. Preserve the existing `OSINTBEAST_DB_PATH` setting
 and optional integrations. Start OSINT Beast and select **Initialize
 Database** before using the upgraded version with existing data.
 
-Initialization is repeatable and transactional. It creates missing tables
+SQLite initialization is repeatable and transactional. It creates missing tables
 and indexes and, once per database, redacts legacy tool queries and their
 direct and URL-encoded occurrences in results and errors. It preserves other
 record fields and does not sanitize unrelated sensitive values or new records.
 Existing backups and SQLite journals may still contain the original data.
+MySQL initialization does not perform this legacy redaction.
 It is not a general-purpose
 schema migration: it does not alter or repair existing tables whose columns
 or definitions are incompatible with the current code. In particular, do not

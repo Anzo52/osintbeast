@@ -58,7 +58,8 @@ def test_run_helix_calls_builtin_api_and_returns_json(monkeypatch):
     output = helix_integration.run_helix(" @user ")
 
     assert seen == [("user", {"sources": "builtin"})]
-    assert json.loads(output) == report
+    expected_report = {**report, "username": "[redacted]"}
+    assert json.loads(output) == expected_report
 
 
 def test_run_helix_times_out_and_cancels_scan(monkeypatch):
