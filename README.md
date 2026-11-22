@@ -142,6 +142,10 @@ remain after interruption or a database-write failure. Successful outputs are
 also saved to the existing `ToolResults` table. Existing `ToolResults` rows
 are preserved but do not gain historical run statuses.
 
+Callers of the shared run helpers must explicitly declare whether an input is
+sensitive. Unexpected runner defects are recorded as failures and propagated
+instead of being returned as ordinary tool errors.
+
 Use **Query Database → Run History** to browse `ToolRuns`. History pages are
 ordered newest first by stable run ID and contain the tool, input summary,
 status, and timestamps. Filter by tool or status, move between 20-run pages,

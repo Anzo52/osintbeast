@@ -115,11 +115,34 @@ def test_failure_and_timeout_are_recorded(client, monkeypatch, error, status):
 def test_unexpected_runner_failure_is_recorded_without_leaking_details(client, monkeypatch):
     monkeypatch.setattr(api.maigret_integration, "run_maigret", Mock(side_effect=TypeError("private")))
     response = client("POST", "/runs", {"tool": "maigret", "query": "user", "authorized": True})
-    assert response["status"] == 201
-    saved = client("GET", response["headers"]["Location"])["body"]
+    assert response["status"] == 500
+    assert response["body"]["error"]["code"] == "internal_error"
+    saved = client("GET", "/runs/1")["body"]
     assert saved["status"] == "failed"
-    assert saved["error"] == "maigret failed unexpectedly."
+    assert saved["error"] == "maigret failed unexpectedly (TypeError)."
     assert saved["result"] is None
+
+
+def test_unexpected_sensitive_failure_is_logged_without_input(client, monkeypatch, caplog):
+    sensitive_value = "person@example.com"
+    monkeypatch.setattr(
+        api.holehe_integration,
+        "run_holehe",
+        Mock(side_effect=TypeError(f"broken lookup for {sensitive_value}")),
+    )
+
+    response = client(
+        "POST", "/runs",
+        {"tool": "holehe", "query": sensitive_value, "authorized": True},
+    )
+
+    assert response["status"] == 500
+    assert response["body"]["error"]["code"] == "internal_error"
+    assert sensitive_value not in caplog.text
+    assert "TypeError" in caplog.text
+    saved = client("GET", "/runs/1")["body"]
+    assert saved["query"] == "[redacted]"
+    assert saved["error"] == "holehe failed unexpectedly (TypeError)."
 
 
 @pytest.mark.parametrize(

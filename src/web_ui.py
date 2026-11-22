@@ -13,7 +13,7 @@ from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username
 from sherlock_integration import run_sherlock, validate_username as validate_sherlock_username
 from tool_registry import get_tool_metadata
-from tool_runs import execute_tool_run, start_tool_run
+from tool_runs import UnexpectedToolError, execute_tool_run, start_tool_run
 
 _LOG = logging.getLogger(__name__)
 RUNNABLE_TOOLS = {
@@ -171,6 +171,8 @@ def _run_in_background(run_id, tool_name, query_text, runner):
             run_id=run_id,
             sensitive_input=tool_name == "holehe",
         )
+    except UnexpectedToolError:
+        _LOG.exception("Unexpected tool failure for run %s", run_id)
     except (OSError, RuntimeError, ValueError, *database.DATABASE_ERRORS):
         try:
             database.finish_tool_run(

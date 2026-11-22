@@ -2,6 +2,7 @@
 
 import hmac
 import json
+import logging
 import os
 import re
 from socketserver import ThreadingMixIn
@@ -17,6 +18,7 @@ from tool_registry import get_tool_metadata
 
 MAX_BODY_SIZE = 4096
 REQUEST_TIMEOUT = 10
+_LOG = logging.getLogger(__name__)
 
 
 def _holehe_runner(value):
@@ -106,10 +108,15 @@ def create_app(token):
                 run_id, status, _ = tool_runs.execute_tool_run_with_id(
                     name, query, tools[name][1], sensitive_input=name == "holehe"
                 )
+            except tool_runs.UnexpectedToolError:
+                _LOG.exception("Unexpected sensitive tool failure")
+                return _error(start_response, "500 Internal Server Error", "internal_error",
+                              "Could not complete the request.")
             except (*database.DATABASE_ERRORS, RuntimeError):
                 return _error(start_response, "500 Internal Server Error", "storage_error",
                               "Could not record the run.")
             except Exception:
+                _LOG.exception("Unexpected tool failure")
                 return _error(start_response, "500 Internal Server Error", "internal_error",
                               "Could not complete the request.")
             return _response(start_response, "201 Created", {"run_id": run_id, "status": status},
