@@ -140,11 +140,12 @@ def run_sherlock_check(username):
 
 def query_view(view):
     try:
+        database.setup_database()
         if view == "runs":
             result = get_recent_tool_runs()
         else:
             result = get_saved_tool_results()
-    except database.DATABASE_ERRORS as exc:
+    except (OSError, UnicodeError, *database.DATABASE_ERRORS) as exc:
         print(
             f"Database query failed: {exc}. Initialize the database and check its permissions."
         )
@@ -162,6 +163,12 @@ def query_menu():
         ],
         "Choose database view",
     )
+    if choice in (0, 1):
+        try:
+            database.setup_database()
+        except (OSError, UnicodeError, *database.DATABASE_ERRORS) as exc:
+            print(f"Database initialization failed: {exc}")
+            return
     if choice == 0:
         run_history_menu()
     elif choice == 1:

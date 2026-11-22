@@ -92,7 +92,7 @@ def connect_db():
 
 
 def setup_database() -> None:
-    """Create missing schema objects without replacing existing data."""
+    """Create missing schema objects and migrate legacy SQLite records."""
     _get_storage().setup()
 
 

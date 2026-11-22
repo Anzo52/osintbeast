@@ -165,7 +165,7 @@ def test_finish_is_atomic_if_legacy_result_insert_fails(initialized_db):
     ) == [("running", None, None)]
 
 
-def test_reinitializing_legacy_database_preserves_results(tmp_path, monkeypatch):
+def test_reinitializing_legacy_database_redacts_results(tmp_path, monkeypatch):
     path = tmp_path / "legacy.db"
     monkeypatch.setattr(database, "DB_FILE", str(path))
     with sqlite3.connect(path) as conn:
@@ -179,7 +179,7 @@ def test_reinitializing_legacy_database_preserves_results(tmp_path, monkeypatch)
     database.setup_database()
 
     assert database.query_database("SELECT queryText, resultText FROM ToolResults") == [
-        ("old", "old result")
+        ("[redacted]", "[redacted] result")
     ]
     assert database.query_database("SELECT * FROM ToolRuns") == []
 

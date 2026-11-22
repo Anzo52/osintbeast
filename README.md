@@ -167,6 +167,12 @@ plain text in the local database; restrict its permissions and delete records
 when no longer needed. See the [local data retention and privacy guide](doc/data-retention-and-privacy.md)
 for exactly what is retained, how to restrict database and backup access, and
 safe practices for viewing, removing, and sharing sensitive output.
+On the first SQLite initialization after upgrading, existing tool queries are replaced
+with `[redacted]`, and case-insensitive direct and URL-encoded matches of each
+query are removed from its result and error text. Other sensitive information
+may remain in those texts, and explicitly non-sensitive new records are stored in plain text.
+Backups and SQLite journal files may also contain the original values.
+MySQL initialization does not perform this legacy redaction.
 
 Valid attempts are stored in `ToolRuns` with the tool, input, status (`running`,
 `success`, `failed`, or `timed_out`), and a UTC `startedAt` timestamp. A run
@@ -228,10 +234,11 @@ server-side authentication and authorization.
 
 Select **Initialize Database** from the menu. In a source checkout, the default
 database is `osintbeast.db` in the repository root, regardless of the current
-working directory. SQLite initialization creates missing tables and indexes in
-one transaction; running it again preserves existing records and recreates
-missing schema objects, including the run-history table in existing databases.
-It does not migrate or repair incompatible existing tables.
+working directory. SQLite initialization creates missing tables and indexes in one
+transaction; running it again preserves existing records and recreates missing
+schema objects, including the new run-history table in existing databases. The
+legacy tool-record redaction runs once per database; it does not repair
+incompatible existing tables.
 
 To use SQLite at a different location, set `OSINTBEAST_DB_PATH` before starting
 the application. For a source checkout, the default remains the repository-root
