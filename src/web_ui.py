@@ -3,7 +3,6 @@
 import json
 import ipaddress
 import logging
-import sqlite3
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
@@ -14,7 +13,7 @@ from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username
 from sherlock_integration import run_sherlock, validate_username as validate_sherlock_username
 from tool_registry import get_tool_metadata
-from tool_runs import execute_tool_run, start_tool_run
+from tool_runs import UnexpectedToolError, execute_tool_run, start_tool_run
 
 _LOG = logging.getLogger(__name__)
 RUNNABLE_TOOLS = {
@@ -172,14 +171,16 @@ def _run_in_background(run_id, tool_name, query_text, runner):
             run_id=run_id,
             sensitive_input=tool_name == "holehe",
         )
-    except (OSError, RuntimeError, ValueError, sqlite3.Error):
+    except UnexpectedToolError:
+        _LOG.exception("Unexpected tool failure for run %s", run_id)
+    except (OSError, RuntimeError, ValueError, *database.DATABASE_ERRORS):
         try:
             database.finish_tool_run(
                 run_id,
                 "failed",
                 error_text="The run outcome could not be persisted.",
             )
-        except (sqlite3.Error, ValueError) as exc:
+        except (*database.DATABASE_ERRORS, ValueError) as exc:
             _LOG.error(
                 "Could not persist completion for run %s (%s)",
                 run_id,
@@ -311,7 +312,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 self._send_json(404, {"error": "Not found."})
         except ValueError as exc:
             self._send_json(400, {"error": str(exc)})
-        except sqlite3.Error:
+        except database.DATABASE_ERRORS:
             self._send_json(500, {"error": "Could not access the run database."})
 
     def do_POST(self):
@@ -374,7 +375,7 @@ class WebHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Request body must contain valid JSON."})
         except ValueError as exc:
             self._send_json(400, {"error": str(exc)})
-        except sqlite3.Error:
+        except database.DATABASE_ERRORS:
             self._send_json(500, {"error": "Could not access the run database."})
 
     def log_message(self, format, *args):

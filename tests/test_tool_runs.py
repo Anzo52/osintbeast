@@ -24,7 +24,6 @@ def initialized_db(tmp_path, monkeypatch):
     [
         ("holehe", RuntimeError("missing dependency"), "failed"),
         ("maigret", ValueError("invalid site database"), "failed"),
-        ("helix", KeyError("missing field"), "failed"),
         ("sherlock", RuntimeError("missing dependency"), "failed"),
         ("holehe", HoleheTimeoutError("timeout"), "timed_out"),
         ("maigret", TimeoutError(), "timed_out"),
@@ -36,7 +35,9 @@ def test_failed_runs_are_recorded(initialized_db, tool, error, status):
     def fail(_):
         raise error
 
-    outcome, message = tool_runs.execute_tool_run(tool, "test", fail)
+    outcome, message = tool_runs.execute_tool_run(
+        tool, "test", fail, sensitive_input=False
+    )
 
     assert outcome == status
     assert message
@@ -49,7 +50,9 @@ def test_failed_runs_are_recorded(initialized_db, tool, error, status):
 
 @pytest.mark.parametrize("tool", ["holehe", "maigret", "helix", "sherlock"])
 def test_success_run_preserves_legacy_results(initialized_db, tool):
-    assert tool_runs.execute_tool_run(tool, "test", lambda _: "output") == (
+    assert tool_runs.execute_tool_run(
+        tool, "test", lambda _: "output", sensitive_input=False
+    ) == (
         "success", "output"
     )
     assert database.query_database(
@@ -62,7 +65,9 @@ def test_success_run_preserves_legacy_results(initialized_db, tool):
 
 
 def test_non_text_output_is_recorded_as_a_failure(initialized_db):
-    status, message = tool_runs.execute_tool_run("helix", "test", lambda _: None)
+    status, message = tool_runs.execute_tool_run(
+        "helix", "test", lambda _: None, sensitive_input=False
+    )
 
     assert status == "failed"
     assert message == "helix returned non-text output."
@@ -324,7 +329,7 @@ def test_cli_reports_and_records_failure(initialized_db, monkeypatch, capsys):
 
 
 def test_sensitive_values_are_redacted_from_output_and_run_records(
-    initialized_db, monkeypatch, capsys
+    initialized_db, monkeypatch, capsys, caplog
 ):
     sensitive_value = "person@example.com"
 
@@ -343,6 +348,8 @@ def test_sensitive_values_are_redacted_from_output_and_run_records(
 
     output = capsys.readouterr().out
     assert sensitive_value not in output
+    assert sensitive_value not in caplog.text
+    assert all(sensitive_value not in record.getMessage() for record in caplog.records)
     assert "[redacted]" in output
     assert database.query_database(
         "SELECT queryText, resultText FROM ToolRuns"
@@ -413,15 +420,29 @@ def test_short_username_redaction_preserves_numeric_json_fields(initialized_db):
     }
 
 
-@pytest.mark.parametrize("error_type", [RuntimeError, TypeError])
+@pytest.mark.parametrize("query", ["a", "2"])
+def test_short_username_redaction_does_not_replace_substrings(query):
+    result = json.dumps({
+        "status": "data and 200",
+        "url": f"https://example.test/{query}",
+        "message": f"found {query}, not data or 200",
+    })
+
+    record = json.loads(tool_runs.redact_sensitive_output(result, query))
+
+    assert record["status"] == "data and 200"
+    assert record["url"] == "https://example.test/[redacted]"
+    assert record["message"] == "found [redacted], not data or 200"
+
+
 def test_sensitive_values_are_redacted_from_errors(
-    initialized_db, monkeypatch, capsys, error_type
+    initialized_db, monkeypatch, capsys
 ):
     sensitive_value = "person@example.com"
     monkeypatch.setattr(
         main,
         "run_holehe",
-        Mock(side_effect=error_type(f"request failed for {sensitive_value}")),
+        Mock(side_effect=RuntimeError(f"request failed for {sensitive_value}")),
     )
 
     main.run_holehe_check(sensitive_value)
@@ -431,6 +452,34 @@ def test_sensitive_values_are_redacted_from_errors(
     assert database.query_database(
         "SELECT queryText, errorText FROM ToolRuns"
     ) == [("[redacted]", "request failed for [redacted]")]
+
+
+def test_sensitive_unexpected_failure_is_recorded_and_propagated(initialized_db):
+    sensitive_value = "person@example.com"
+
+    def fail(value):
+        raise TypeError(f"unexpected value: {value}")
+
+    with pytest.raises(tool_runs.UnexpectedToolError) as error:
+        tool_runs.execute_tool_run(
+            "holehe", sensitive_value, fail, sensitive_input=True
+        )
+
+    assert "TypeError" in str(error.value)
+    assert sensitive_value not in str(error.value)
+    assert any(frame.name == "fail" for frame in error.traceback)
+    assert database.query_database(
+        "SELECT queryText, status, errorText FROM ToolRuns"
+    ) == [("[redacted]", "failed", "holehe failed unexpectedly (TypeError).")]
+
+
+def test_sensitivity_must_be_explicit():
+    with pytest.raises(TypeError, match="sensitive_input"):
+        tool_runs.execute_tool_run("holehe", "private", lambda _: "output")
+    with pytest.raises(TypeError, match="sensitive_input"):
+        tool_runs.execute_tool_run_with_id("holehe", "private", lambda _: "output")
+    with pytest.raises(TypeError, match="sensitive_input"):
+        tool_runs.start_tool_run("holehe", "private")
 
 
 def test_execute_tool_run_with_id_redacts_sensitive_values(initialized_db):

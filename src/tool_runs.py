@@ -8,6 +8,10 @@ from io import StringIO
 import data.utils.database as database
 
 
+class UnexpectedToolError(RuntimeError):
+    """A sanitized unexpected failure from a sensitive tool run."""
+
+
 def _redact_sensitive_value(text: str, sensitive_value: str) -> str:
     """Redact whole input values, including partially URL-encoded forms."""
     if not sensitive_value:
@@ -59,7 +63,7 @@ def redact_sensitive_output(output: str, sensitive_value: str) -> str:
 
 
 def start_tool_run(
-    tool_name: str, query_text: str, *, sensitive_input: bool = False
+    tool_name: str, query_text: str, *, sensitive_input: bool
 ):
     """Create a run record, redacting its input when it is sensitive."""
     stored_query = "[redacted]" if sensitive_input else query_text
@@ -72,7 +76,7 @@ def execute_tool_run(
     runner: Callable[[str], str],
     run_id: int | None = None,
     *,
-    sensitive_input: bool = False,
+    sensitive_input: bool,
 ) -> tuple[str, str]:
     """Persist the run outcome; propagate persistence errors to the caller."""
     if run_id is None:
@@ -88,7 +92,7 @@ def execute_tool_run(
 
 def execute_tool_run_with_id(
     tool_name: str, query_text: str, runner: Callable[[str], str],
-    *, sensitive_input: bool = False,
+    *, sensitive_input: bool,
 ) -> tuple[int, str, str]:
     """Execute a run and return its persisted identifier and outcome."""
     run_id = start_tool_run(
@@ -108,7 +112,7 @@ def _execute_tool_run(
     runner: Callable[[str], str],
     run_id: int,
     *,
-    sensitive_input: bool = False,
+    sensitive_input: bool,
 ) -> tuple[str, str]:
     """Execute and persist a run using an existing run identifier."""
     try:
@@ -137,15 +141,11 @@ def _execute_tool_run(
         database.finish_tool_run(run_id, "failed", error_text=message)
         return "failed", message
     except Exception as exc:
-        message = (
-            str(exc) or f"{tool_name} failed ({type(exc).__name__})."
-            if sensitive_input
-            else f"{tool_name} failed unexpectedly."
-        )
-        if sensitive_input:
-            message = _redact_sensitive_value(message, query_text)
+        message = f"{tool_name} failed unexpectedly ({type(exc).__name__})."
         database.finish_tool_run(run_id, "failed", error_text=message)
-        return "failed", message
+        if sensitive_input:
+            raise UnexpectedToolError(message).with_traceback(exc.__traceback__) from None
+        raise
     if sensitive_input:
         output = redact_sensitive_output(output, query_text)
     database.finish_tool_run(run_id, "success", result_text=output)

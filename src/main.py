@@ -1,6 +1,5 @@
 import argparse
 import os
-import sqlite3
 import subprocess
 import sys
 import zipfile
@@ -9,6 +8,7 @@ import zlib
 from simple_term_menu import TerminalMenu
 
 from checkers import _run_email_check_menu, _run_username_check_menu
+import data.utils.database as database
 from backend_services import get_recent_tool_runs, get_saved_tool_results
 from data.utils.init_db import init_db
 from menu_utils import _choose_option, _download_tool_menu, _install_tool_menu
@@ -108,7 +108,7 @@ def _run_check(tool_name, query_text, validator, runner):
         status, value = execute_tool_run(
             tool_name, query_text, runner, sensitive_input=True
         )
-    except sqlite3.Error as exc:
+    except database.DATABASE_ERRORS as exc:
         print(f"Could not record {tool_name} run: {exc}. Initialize the database and check its permissions.")
         return 1
     if status == "success":
@@ -144,7 +144,7 @@ def query_view(view):
             result = get_recent_tool_runs()
         else:
             result = get_saved_tool_results()
-    except sqlite3.Error as exc:
+    except database.DATABASE_ERRORS as exc:
         print(
             f"Database query failed: {exc}. Initialize the database and check its permissions."
         )
@@ -173,7 +173,7 @@ def show_run_history(tool_name=None, status=None, offset=0):
         runs = list_tool_runs(
             limit=20, offset=offset, tool_name=tool_name, status=status
         )
-    except sqlite3.Error as exc:
+    except database.DATABASE_ERRORS as exc:
         print(f"Run history query failed: {exc}")
         return
     if not runs:
@@ -190,7 +190,10 @@ def show_run_history(tool_name=None, status=None, offset=0):
 def inspect_tool_run(run_id):
     try:
         run = get_tool_run(run_id)
-    except (ValueError, sqlite3.Error) as exc:
+    except ValueError as exc:
+        print(f"Could not inspect run: {exc}")
+        return
+    except database.DATABASE_ERRORS as exc:
         print(f"Could not inspect run: {exc}")
         return
     if run is None:
@@ -237,7 +240,7 @@ def export_selected_runs():
             opener=lambda path, flags: os.open(path, flags, 0o600),
         ) as export_file:
             export_file.write(content + "\n")
-    except (OSError, ValueError, sqlite3.Error) as exc:
+    except (OSError, ValueError, *database.DATABASE_ERRORS) as exc:
         print(f"Could not export runs: {exc}")
         return
     print(f"Exported {len(run_ids)} run(s) to {output_path}.")
@@ -276,7 +279,7 @@ def run_history_menu():
             except ValueError as exc:
                 print(f"Invalid history filter: {exc}")
                 tool_name = status = None
-            except sqlite3.Error as exc:
+            except database.DATABASE_ERRORS as exc:
                 print(f"Run history query failed: {exc}")
                 continue
             show_run_history(tool_name, status, offset)
@@ -382,7 +385,7 @@ def cli(argv=None):
             main_menu()
     try:
         return args.handler(args)
-    except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError, *database.DATABASE_ERRORS) as exc:
         print(f"Command failed: {exc}", file=sys.stderr)
         return 1
 
