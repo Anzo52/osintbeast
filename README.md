@@ -373,6 +373,15 @@ tests are skipped.
 GitHub Actions runs the test suite and Ruff checks on Python 3.10–3.13 for pushes and pull requests.
 It also installs the Maigret extra so its offline API-contract tests run.
 
+### Flask web API
+
+The optional Flask API requires an `OSINTBEAST_API_TOKEN`; it rejects all API
+requests when no token is configured. Start it with
+`OSINTBEAST_API_TOKEN=<token> python -m flask --app web:create_app run`.
+Authenticated clients can launch a run with `POST /api/runs` and retrieve
+status and saved output from `GET /api/runs/<run_id>` and
+`GET /api/results/<result_id>`. Requests use a `Bearer` authorization token.
+
 ### Background run service
 
 `background_runs.BackgroundRuns` is a shared service for web handlers, not a

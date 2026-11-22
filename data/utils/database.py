@@ -178,6 +178,18 @@ def get_tool_run(run_id: int) -> Optional[tuple[Any, ...]]:
     return rows[0] if rows else None
 
 
+def get_tool_result(result_id: int) -> Optional[dict[str, Any]]:
+    """Return one saved result without exposing its original query text."""
+    rows = _get_storage().query(
+        """SELECT resultID, toolName, resultText, createdAt
+           FROM ToolResults WHERE resultID = ?""",
+        (result_id,),
+    )
+    if not rows:
+        return None
+    return dict(zip(("result_id", "tool", "result", "created_at"), rows[0]))
+
+
 def export_tool_runs_json(
     run_ids: list[int], include_sensitive: bool = False,
 ) -> str:
@@ -244,3 +256,20 @@ def finish_tool_run(
     ):
         raise ValueError("Success requires a result; failures require an error.")
     _get_storage().finish_tool_run(run_id, status, result_text, error_text)
+
+
+def get_tool_run_status(run_id: int) -> Optional[dict[str, Any]]:
+    """Return non-sensitive status fields for one run."""
+    rows = _get_storage().query(
+        """SELECT runID, toolName, status, startedAt, finishedAt
+           FROM ToolRuns WHERE runID = ?""",
+        (run_id,),
+    )
+    if not rows:
+        return None
+    return dict(
+        zip(
+            ("run_id", "tool", "status", "started_at", "finished_at"),
+            rows[0],
+        )
+    )
