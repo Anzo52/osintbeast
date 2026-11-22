@@ -325,3 +325,14 @@ def finish_tool_run(
                    SELECT toolName, queryText, resultText FROM ToolRuns WHERE runID = ?""",
                 (run_id,),
             )
+def get_tool_run_status(run_id: int) -> Optional[dict[str, Any]]:
+    """Return non-sensitive status fields for one run."""
+    with closing(connect_db()) as conn:
+        row = conn.execute(
+            """SELECT runID, toolName, status, startedAt, finishedAt
+               FROM ToolRuns WHERE runID = ?""",
+            (run_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return dict(zip(("run_id", "tool", "status", "started_at", "finished_at"), row))

@@ -72,25 +72,9 @@ def create_app(config=None):
 
     @app.get("/api/runs/<int:run_id>")
     def get_run(run_id):
-        run = database.get_tool_run(run_id)
+        run = database.get_tool_run_status(run_id)
         if run is None:
             return jsonify(error="Not found."), 404
-        if not isinstance(run, dict):
-            run = dict(
-                zip(
-                    (
-                        "run_id",
-                        "tool",
-                        "query",
-                        "status",
-                        "result",
-                        "error",
-                        "started_at",
-                        "finished_at",
-                    ),
-                    run,
-                )
-            )
         public_fields = ("run_id", "tool", "status", "started_at", "finished_at")
         return jsonify({field: run[field] for field in public_fields}), 200
 
