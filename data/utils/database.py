@@ -175,25 +175,15 @@ def list_tool_runs(
     }:
         raise ValueError("Invalid run status")
 
-    filters = []
-    parameters = []
-    if tool_name is not None:
-        filters.append("toolName = ?")
-        parameters.append(tool_name)
-    if status is not None:
-        filters.append("status = ?")
-        parameters.append(status)
-    where_clause = f" WHERE {' AND '.join(filters)}" if filters else ""
-    parameters.extend((limit, offset))
-
     with closing(connect_db()) as conn:
         return conn.execute(
             """SELECT runID, toolName, queryText, status, startedAt, finishedAt,
                       errorText
-               FROM ToolRuns"""
-            + where_clause
-            + " ORDER BY runID DESC LIMIT ? OFFSET ?",
-            tuple(parameters),
+               FROM ToolRuns
+               WHERE (? IS NULL OR toolName = ?)
+                 AND (? IS NULL OR status = ?)
+               ORDER BY runID DESC LIMIT ? OFFSET ?""",
+            (tool_name, tool_name, status, status, limit, offset),
         ).fetchall()
 
 
