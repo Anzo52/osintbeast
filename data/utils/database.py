@@ -203,7 +203,7 @@ def finish_tool_run(
             )
 
 
-def get_tool_run(run_id: int) -> Optional[dict[str, Any]]:
+def get_tool_run_status(run_id: int) -> Optional[dict[str, Any]]:
     """Return non-sensitive status fields for one run."""
     with closing(connect_db()) as conn:
         row = conn.execute(

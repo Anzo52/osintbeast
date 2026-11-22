@@ -72,7 +72,7 @@ def create_app(config=None):
 
     @app.get("/api/runs/<int:run_id>")
     def get_run(run_id):
-        run = database.get_tool_run(run_id)
+        run = database.get_tool_run_status(run_id)
         if run is None:
             return jsonify(error="Not found."), 404
         public_fields = (

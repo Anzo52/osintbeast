@@ -112,7 +112,7 @@ def test_status_route_returns_only_public_status_fields(client, monkeypatch):
             "error": "internal exception",
         }
     )
-    monkeypatch.setattr(database, "get_tool_run", get_run)
+    monkeypatch.setattr(database, "get_tool_run_status", get_run)
 
     response = client.get("/api/runs/7", headers=auth_headers())
 
