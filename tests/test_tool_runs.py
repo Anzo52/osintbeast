@@ -64,6 +64,81 @@ def test_success_run_preserves_legacy_results(initialized_db, tool):
     ) == [(tool, "test", "output")]
 
 
+@pytest.mark.parametrize("sensitive_input", [None, 0, "false"])
+def test_sensitivity_must_be_boolean(initialized_db, sensitive_input):
+    runner = Mock()
+    with pytest.raises(TypeError):
+        tool_runs.execute_tool_run("holehe", "private", runner, sensitive_input=sensitive_input)
+    with pytest.raises(TypeError):
+        tool_runs.execute_tool_run_with_id(
+            "holehe", "private", runner, sensitive_input=sensitive_input
+        )
+    with pytest.raises(TypeError):
+        tool_runs.start_tool_run("holehe", "private", sensitive_input=sensitive_input)
+    runner.assert_not_called()
+    assert database.list_tool_runs() == []
+
+
+def test_sensitivity_is_required(initialized_db):
+    runner = Mock()
+    with pytest.raises(TypeError):
+        tool_runs.execute_tool_run("holehe", "private", runner)
+    runner.assert_not_called()
+    assert database.list_tool_runs() == []
+
+
+@pytest.mark.parametrize(
+    ("outcome", "error"),
+    [("success", None), ("failed", RuntimeError("private input error")),
+     ("timed_out", TimeoutError("private input timeout"))],
+)
+def test_sensitive_run_redacts_persistence(initialized_db, outcome, error):
+    runner = Mock(return_value="private input result", side_effect=error)
+    status, value = tool_runs.execute_tool_run(
+        "holehe", "private input", runner, sensitive_input=True
+    )
+    runner.assert_called_once_with("private input")
+    assert status == outcome
+    assert value == (
+        "[redacted] result" if error is None else str(error).replace("private input", "[redacted]")
+    )
+    assert database.query_database(
+        "SELECT queryText, status, resultText, errorText FROM ToolRuns"
+    ) == [(
+        tool_runs.REDACTED, outcome,
+        value if error is None else None,
+        value if error is not None else None,
+    )]
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolResults"
+    ) == ([(tool_runs.REDACTED, value)] if error is None else [])
+
+
+def test_sensitive_existing_run_must_already_be_redacted(initialized_db):
+    run_id = database.start_tool_run("holehe", "private input")
+    runner = Mock()
+    with pytest.raises(ValueError, match="redacted running record"):
+        tool_runs.execute_tool_run(
+            "holehe", "private input", runner, run_id=run_id, sensitive_input=True
+        )
+    runner.assert_not_called()
+    assert database.get_tool_run(run_id)[3] == "running"
+
+
+def test_sensitive_existing_redacted_run_is_completed(initialized_db):
+    run_id = database.start_tool_run("holehe", tool_runs.REDACTED)
+    assert tool_runs.execute_tool_run(
+        "holehe", "private input", lambda value: f"result: {value}",
+        run_id=run_id, sensitive_input=True,
+    ) == ("success", "result: [redacted]")
+    assert database.get_tool_run(run_id)[2:6] == (
+        tool_runs.REDACTED, "success", "result: [redacted]", None
+    )
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolResults"
+    ) == [(tool_runs.REDACTED, "result: [redacted]")]
+
+
 def test_non_text_output_is_recorded_as_a_failure(initialized_db):
     status, message = tool_runs.execute_tool_run(
         "helix", "test", lambda _: None, sensitive_input=False
@@ -313,9 +388,11 @@ def test_cli_saves_success(
     monkeypatch.setattr(main, target, runner)
     function(value)
     runner.assert_called_once_with(query_text)
-    assert f"{tool.capitalize()} check saved to the database." in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert (result["output"] if isinstance(result, dict) else result) in output
+    assert f"{tool.capitalize()} check saved to the database." in output
     assert database.query_database("SELECT toolName, queryText, status FROM ToolRuns") == [
-        (tool, "[redacted]", "success")
+        (tool, tool_runs.REDACTED, "success")
     ]
 
 

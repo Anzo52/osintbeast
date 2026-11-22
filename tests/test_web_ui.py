@@ -75,6 +75,7 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
         status, running = _request(f"{base_url}/api/runs/{launched['id']}")
         assert status == 200
         assert running["status"] == "running"
+        assert running["input"] == "alice"
         release_runner.set()
 
         deadline = time.monotonic() + 2
@@ -260,3 +261,27 @@ def test_terminal_tool_error_is_available_for_review(tmp_path, monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_unexpected_background_error_is_redacted(tmp_path, monkeypatch, caplog):
+    runner = Mock(side_effect=Exception("private exception"))
+    server, base_url = _server(tmp_path, monkeypatch, runner)
+    try:
+        status, launched = _request(
+            f"{base_url}/api/runs",
+            {"tool": "sherlock", "input": "alice", "authorized": True},
+        )
+        assert status == 202
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            _, detail = _request(f"{base_url}/api/runs/{launched['id']}")
+            if detail["status"] != "running":
+                break
+            time.sleep(0.01)
+        assert detail["status"] == "failed"
+        assert detail["input"] == "alice"
+        assert detail["error"] == "sherlock failed unexpectedly (Exception)."
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert "private exception" not in caplog.text

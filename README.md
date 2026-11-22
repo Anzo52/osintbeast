@@ -143,7 +143,8 @@ also saved to the existing `ToolResults` table. Existing `ToolResults` rows
 are preserved but do not gain historical run statuses.
 
 Callers of the shared run helpers must explicitly declare whether an input is
-sensitive. Unexpected runner defects are recorded as failures and propagated
+sensitive using a boolean. Set it to `False` only when unredacted storage is
+appropriate. Unexpected runner defects are recorded as failures and propagated
 instead of being returned as ordinary tool errors.
 
 Use **Query Database → Run History** to browse `ToolRuns`. History pages are
@@ -427,7 +428,8 @@ supports authorized runs with Holehe, Maigret, Helix, and Sherlock; tools in the
 registry without a runnable integration are not offered. Confirm authorization
 before each run. Runs execute through the existing validators, integrations,
 and persistence service, and their status and saved output are available in
-the recent-runs view. Keep the interface bound to loopback: it has no login or
+the recent-runs view. Holehe input is redacted in stored records and output.
+Keep the interface bound to loopback: it has no login or
 remote-access authentication, and its database and results may contain
 sensitive information.
 

@@ -7,6 +7,8 @@ from io import StringIO
 
 import data.utils.database as database
 
+REDACTED = "[redacted]"
+
 
 class UnexpectedToolError(RuntimeError):
     """A sanitized unexpected failure from a sensitive tool run."""
@@ -66,7 +68,9 @@ def start_tool_run(
     tool_name: str, query_text: str, *, sensitive_input: bool
 ):
     """Create a run record, redacting its input when it is sensitive."""
-    stored_query = "[redacted]" if sensitive_input else query_text
+    if not isinstance(sensitive_input, bool):
+        raise TypeError("sensitive_input must be a boolean.")
+    stored_query = REDACTED if sensitive_input else query_text
     return database.start_tool_run(tool_name, stored_query)
 
 
@@ -79,10 +83,16 @@ def execute_tool_run(
     sensitive_input: bool,
 ) -> tuple[str, str]:
     """Persist the run outcome; propagate persistence errors to the caller."""
+    if not isinstance(sensitive_input, bool):
+        raise TypeError("sensitive_input must be a boolean.")
     if run_id is None:
         run_id = start_tool_run(
             tool_name, query_text, sensitive_input=sensitive_input
         )
+    elif sensitive_input:
+        run = database.get_tool_run(run_id)
+        if run is None or run[1:4] != (tool_name, REDACTED, "running"):
+            raise ValueError("Sensitive runs require a redacted running record.")
     if run_id is None:
         raise RuntimeError("Failed to start tool run.")
     return _execute_tool_run(

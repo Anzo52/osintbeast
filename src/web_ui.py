@@ -173,7 +173,7 @@ def _run_in_background(run_id, tool_name, query_text, runner):
         )
     except UnexpectedToolError:
         _LOG.exception("Unexpected tool failure for run %s", run_id)
-    except (OSError, RuntimeError, ValueError, *database.DATABASE_ERRORS):
+    except Exception:
         try:
             database.finish_tool_run(
                 run_id,
@@ -367,7 +367,7 @@ class WebHandler(BaseHTTPRequestHandler):
             self._send_json(202, {
                 "id": run_id,
                 "tool": tool_name,
-                "input": query_text,
+                "input": "[redacted]" if tool_name == "holehe" else query_text,
                 "input_kind": input_kind,
                 "status": "running",
             })
