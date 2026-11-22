@@ -173,7 +173,7 @@ def _run_in_background(run_id, tool_name, query_text, runner):
         )
     except UnexpectedToolError:
         _LOG.exception("Unexpected tool failure for run %s", run_id)
-    except (OSError, RuntimeError, ValueError, *database.DATABASE_ERRORS):
+    except Exception:
         try:
             database.finish_tool_run(
                 run_id,

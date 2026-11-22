@@ -263,7 +263,7 @@ def test_terminal_tool_error_is_available_for_review(tmp_path, monkeypatch):
         server.server_close()
 
 
-def test_unexpected_background_error_is_redacted(tmp_path, monkeypatch):
+def test_unexpected_background_error_is_redacted(tmp_path, monkeypatch, caplog):
     runner = Mock(side_effect=Exception("private exception"))
     server, base_url = _server(tmp_path, monkeypatch, runner)
     try:
@@ -284,3 +284,4 @@ def test_unexpected_background_error_is_redacted(tmp_path, monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
+    assert "private exception" not in caplog.text
