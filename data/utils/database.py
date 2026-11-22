@@ -7,6 +7,9 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
+from sqlalchemy import MetaData, Table, create_engine
+from sqlalchemy.engine import URL
+
 
 # Keep source-checkout paths independent of the current working directory.
 def setup_database_paths(module_file):
@@ -91,33 +94,32 @@ def setup_database() -> None:
 
 
 def insert_data(table: str, data: Mapping[str, Any]) -> None:
-    """Insert a mapping into a known table using bound SQLite parameters.
+    """Insert a mapping into a known table using SQLAlchemy Core.
 
     The table allowlist and live column check constrain SQL identifiers; values
-    are always passed separately to SQLite.
+    are always bound by SQLAlchemy.
     """
     if not data:
         raise ValueError("data must contain at least one column")
     if not isinstance(table, str) or table not in INSERTABLE_TABLES:
         raise ValueError(f"Unknown database table: {table}")
 
-    with closing(connect_db()) as conn, conn:
-        valid_columns = {
-            row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')
-        }
-        columns = list(data)
+    Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
+    engine = create_engine(URL.create("sqlite", database=str(Path(DB_FILE).resolve())))
+    try:
+        metadata = MetaData()
+        reflected = Table(table, metadata, autoload_with=engine)
+        known_columns = {column.name for column in reflected.columns}
         if any(
-            not isinstance(column, str) or column not in valid_columns
-            for column in columns
+            not isinstance(column, str) or column not in known_columns
+            for column in data
         ):
             raise ValueError(f"Unknown column for table {table}")
-
-        quoted_columns = ", ".join(f'"{column}"' for column in columns)
-        placeholders = ", ".join("?" for _ in columns)
-        conn.execute(
-            f'INSERT INTO "{table}" ({quoted_columns}) VALUES ({placeholders})',
-            tuple(data[column] for column in columns),
-        )
+        with engine.begin() as connection:
+            connection.exec_driver_sql("PRAGMA foreign_keys = ON")
+            connection.execute(reflected.insert().values(**data))
+    finally:
+        engine.dispose()
 
 
 def query_database(query: str, parameters: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
