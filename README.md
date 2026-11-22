@@ -133,7 +133,8 @@ Partial results are not saved when the overall search times out. Individual
 site failures appear as `Unknown` results; a successful run means the search
 completed, not that every site was reachable or every match is confirmed.
 
-The CLI validates input before recording a run and uses a non-echoing prompt.
+The CLI validates input before recording a run and displays target input as it
+is typed. Be aware of people who can see your terminal.
 Holehe, Maigret, Helix, and Sherlock receive sensitive input through their
 in-process Python APIs, not process arguments. Their run records use a
 `[redacted]` query; direct and URL-encoded occurrences of the input are also

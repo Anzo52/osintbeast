@@ -1,24 +1,10 @@
-import warnings
-from getpass import GetPassWarning, getpass
-
-
-def _read_sensitive_input(prompt):
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", GetPassWarning)
-        try:
-            return getpass(prompt).strip()
-        except GetPassWarning:
-            print("Unable to securely read sensitive input; terminal echo is enabled.")
-            return None
+def _read_input(prompt):
+    return input(prompt).strip()
 
 
 def _run_email_check_menu(check):
-    email = _read_sensitive_input("Enter the email to check: ")
-    if email is not None:
-        check(email)
+    check(_read_input("Enter the email to check: "))
 
 
 def _run_username_check_menu(check):
-    username = _read_sensitive_input("Enter the username to check: ")
-    if username is not None:
-        check(username)
+    check(_read_input("Enter the username to check: "))
