@@ -11,8 +11,11 @@ class FakeResult:
     lastrowid = 41
     rowcount = 1
 
+    def __init__(self, rows=None):
+        self.rows = rows or [("platform",), ("platformID",)]
+
     def fetchall(self):
-        return [("platform",), ("platformID",)]
+        return self.rows
 
 
 class FakeConnection:
@@ -24,6 +27,8 @@ class FakeConnection:
         self.statements.append((statement, parameters))
         if self.fail_on and self.fail_on in statement:
             raise FakeSQLAlchemyError("database unavailable")
+        if "SUBSTR(resultText" in statement:
+            return FakeResult([(1, "holehe", "query", "xxxx", 1, "created")])
         return FakeResult()
 
 
@@ -109,6 +114,17 @@ def test_mysql_core_operations_use_bound_values_and_preserve_transactional_flow(
         for sql, params in statements
     )
     assert any("INSERT INTO ToolResults" in sql for sql, _ in statements)
+
+
+def test_mysql_result_listing_caps_output_in_the_query(mysql_storage):
+    storage, engine = mysql_storage
+
+    assert storage.list_tool_results(20, max_result_text_chars=17) == [
+        (1, "holehe", "query", "xxxx… [truncated]", "created")
+    ]
+    statement, parameters = engine.connection.statements[-1]
+    assert "SUBSTR(resultText, 1, %s)" in statement
+    assert parameters == (4, 5, 20)
 
 
 def test_mysql_identifier_validation_and_placeholders(mysql_storage):

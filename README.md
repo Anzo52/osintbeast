@@ -66,9 +66,11 @@ This indicates presence, not whether the tool or all its dependencies work.
 Use the arrow keys and Enter to choose a tool to download or install; installing
 uses the default `tools/<name>` download folder. A custom installation folder is
 available as an alternate menu choice. Database views include recent runs and
-saved results. Type only the information that cannot be selected in advance,
-such as a username, email address, or custom folder. Errors are reported in the
-menu so you can correct the input or environment and try again.
+saved results; saved-result browsing is limited to 20 rows with result text
+truncated at 16,384 characters. Type only the information that cannot be
+selected in advance, such as a username, email address, or custom folder.
+Errors are reported in the menu so you can correct the input or environment
+and try again.
 
 ### Command-line commands
 

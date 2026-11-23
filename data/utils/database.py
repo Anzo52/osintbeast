@@ -119,10 +119,20 @@ def save_tool_result(
     return _get_storage().save_tool_result(tool_name, query_text, result_text)
 
 
-def list_tool_results(limit: int = 100) -> list[tuple[Any, ...]]:
-    """Return saved tool results, newest first, with a bounded page size."""
+def list_tool_results(
+    limit: int = 100, max_result_text_chars: Optional[int] = None
+) -> list[tuple[Any, ...]]:
+    """Return saved results, optionally truncating result text in storage."""
     _validate_list_limit(limit)
-    return _get_storage().list_tool_results(limit)
+    if max_result_text_chars is not None and (
+        not isinstance(max_result_text_chars, int)
+        or isinstance(max_result_text_chars, bool)
+        or max_result_text_chars < 1
+    ):
+        raise ValueError("max_result_text_chars must be a positive integer")
+    if max_result_text_chars is None:
+        return _get_storage().list_tool_results(limit)
+    return _get_storage().list_tool_results(limit, max_result_text_chars)
 
 
 def _validate_list_limit(limit: int) -> None:

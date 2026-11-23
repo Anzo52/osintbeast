@@ -21,8 +21,10 @@ error in `ToolRuns`, not `ToolResults`. Other structured records saved through
 the database are retained there as well.
 
 Values remaining after any configured redaction are stored as plain text.
-Output is displayed in the terminal and database views. OSINT Beast does not
-provide a built-in export, backup, or cleanup feature.
+Output is displayed in the terminal and database views. The saved-results
+database view displays up to 20 rows and truncates displayed result text at
+16,384 characters; this does not change the stored output. Direct database
+writes can bypass application redaction.
 
 ## Database location and retention
 
