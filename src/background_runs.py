@@ -75,7 +75,10 @@ def _worker(connection, tool_name, query, max_output_bytes):
         connection.send_bytes(b"S" + payload)
     except BaseException as exc:
         status = b"T" if isinstance(exc, TimeoutError) else b"F"
-        message = str(exc) or f"Worker failed ({type(exc).__name__})."
+        if isinstance(exc, (TimeoutError, RuntimeError, OSError, ImportError, ValueError)):
+            message = str(exc) or f"Worker failed ({type(exc).__name__})."
+        else:
+            message = f"{tool_name} failed unexpectedly ({type(exc).__name__})."
         if tool_name == "holehe":
             message = redact_sensitive_output(message, query)
         try:
@@ -125,15 +128,15 @@ class BackgroundRuns:
                 tool_name, query, sensitive_input=tool_name == "holehe"
             )
             cancel = threading.Event()
-            thread = threading.Thread(
-                target=self._supervise, args=(run_id, tool_name, query, cancel),
-                name=f"tool-run-{run_id}", daemon=True,
-            )
-            self._jobs[run_id] = (cancel, thread)
             try:
+                thread = threading.Thread(
+                    target=self._supervise, args=(run_id, tool_name, query, cancel),
+                    name=f"tool-run-{run_id}", daemon=True,
+                )
+                self._jobs[run_id] = (cancel, thread)
                 thread.start()
             except BaseException:
-                del self._jobs[run_id]
+                self._jobs.pop(run_id, None)
                 database.finish_tool_run(
                     run_id, "failed", error_text="Could not start background worker."
                 )

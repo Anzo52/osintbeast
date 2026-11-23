@@ -305,7 +305,7 @@ status and saved output from `GET /api/runs/<run_id>` and
 ### Background run service
 
 `background_runs.BackgroundRuns` is a shared service for web handlers, not a
-web server. It is not yet connected to the browser interface below. Initialize
+web server. The browser interface below uses one instance. Initialize
 the database first and create one service per application
 process. `submit(tool_name, query)` validates the input, records a run and
 returns its integer ID without waiting for tool execution; `status(run_id)`
@@ -347,7 +347,9 @@ supports authorized runs with Holehe, Maigret, Helix, and Sherlock; tools in the
 registry without a runnable integration are not offered. Confirm authorization
 before each run. Runs execute through the existing validators, integrations,
 and persistence service, and their status and saved output are available in
-the recent-runs view. Holehe input is redacted in stored records and output.
+the recent-runs view. At most two browser runs can be active at once; additional
+requests receive HTTP 503 until capacity is available. Holehe input is redacted
+in stored records and output.
 Keep the interface bound to loopback: it has no login or
 remote-access authentication, and its database and results may contain
 sensitive information.
