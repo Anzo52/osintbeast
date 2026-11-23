@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 import data.utils.database as database
 import downloader
@@ -94,6 +95,13 @@ def test_mysql_schemas_are_split_by_domain_and_include_run_history():
     assert "CREATE TABLE IF NOT EXISTS ToolResults" in tool_schema
     assert "CREATE TABLE IF NOT EXISTS ToolRuns" in tool_schema
     assert "CREATE TABLE IF NOT EXISTS Platforms" not in tool_schema
+    assert "UNIQUE KEY uq_domains_domain (domain)" in info_schema
+    assert "CONSTRAINT fk_usernames_services" in info_schema
+    assert "KEY idx_toolresults_tool_created (toolName, createdAt)" in tool_schema
+    assert (
+        "CHECK (status IN ('running', 'success', 'failed', 'timed_out'))"
+        in tool_schema
+    )
 
 
 def test_setup_database_preserves_existing_data_and_repairs_missing_objects(
@@ -117,6 +125,86 @@ def test_setup_database_preserves_existing_data_and_repairs_missing_objects(
         "SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?",
         ("idx_services_platform",),
     ) == [("idx_services_platform",)]
+
+
+def test_setup_database_redacts_legacy_runs_and_results_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "legacy.db"))
+    database.setup_database()
+    with database.connect_db() as conn:
+        conn.execute("DELETE FROM OsintBeastMigrations")
+        conn.execute(
+            "INSERT INTO ToolResults VALUES (7, 'holehe', ?, ?, '2020-01-01')",
+            ("Person+tag@example.com", "PERSON+TAG@example.com person%2btag%40example.com"),
+        )
+        conn.execute(
+            "INSERT INTO ToolRuns VALUES (8, 'holehe', ?, 'failed', NULL, ?, "
+            "'2020-01-01', '2020-01-02')",
+            ("Person+tag@example.com", "failed: Person%2Btag%40example.com"),
+        )
+        conn.execute(
+            "INSERT INTO ToolRuns VALUES (9, 'maigret', 'alice', 'success', "
+            "'found ALICE', NULL, '2020-01-03', '2020-01-04')"
+        )
+        conn.execute(
+            "INSERT INTO ToolRuns VALUES (10, 'maigret', '', 'running', "
+            "NULL, NULL, '2020-01-05', NULL)"
+        )
+        conn.execute(
+            "INSERT INTO ToolResults VALUES (11, 'holehe', '[redacted]', "
+            "'already sanitized', '2020-01-06')"
+        )
+
+    database.setup_database()
+
+    assert database.list_tool_results() == [
+        (11, "holehe", "[redacted]", "already sanitized", "2020-01-06"),
+        (7, "holehe", "[redacted]", "[redacted] [redacted]", "2020-01-01"),
+    ]
+    assert database.get_tool_run(8) == (
+        8, "holehe", "[redacted]", "failed", None, "failed: [redacted]",
+        "2020-01-01", "2020-01-02",
+    )
+    assert database.get_tool_run(9) == (
+        9, "maigret", "[redacted]", "success", "found [redacted]", None,
+        "2020-01-03", "2020-01-04",
+    )
+    assert database.get_tool_run(10) == (
+        10, "maigret", "[redacted]", "running", None, None, "2020-01-05", None,
+    )
+    database.save_tool_result("holehe", "new", "new result")
+    database.setup_database()
+    assert database.list_tool_results()[0][2:4] == ("new", "new result")
+    assert database.get_tool_run(8)[5] == "failed: [redacted]"
+
+
+def test_legacy_redaction_rolls_back_on_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "rollback.db"))
+    database.setup_database()
+    with database.connect_db() as conn:
+        conn.execute("DELETE FROM OsintBeastMigrations")
+        conn.execute(
+            "INSERT INTO ToolResults (toolName, queryText, resultText) "
+            "VALUES ('holehe', 'private', 'private result')"
+        )
+        conn.execute(
+            "INSERT INTO ToolRuns (toolName, queryText, status) "
+            "VALUES ('holehe', 'private', 'running')"
+        )
+        conn.execute(
+            "CREATE TRIGGER fail_redaction BEFORE UPDATE ON ToolRuns "
+            "BEGIN SELECT RAISE(ABORT, 'migration failed'); END"
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="migration failed"):
+        database.setup_database()
+
+    assert database.list_tool_results()[0][2:4] == ("private", "private result")
+    assert database.list_tool_runs()[0][2] == "private"
+    assert database.query_database("SELECT name FROM OsintBeastMigrations") == []
+    with database.connect_db() as conn:
+        conn.execute("DROP TRIGGER fail_redaction")
+    database.setup_database()
+    assert database.list_tool_results()[0][2:4] == ("[redacted]", "[redacted] result")
 
 
 def test_setup_database_rolls_back_all_schemas_on_sql_error(tmp_path, monkeypatch):
@@ -182,12 +270,18 @@ def test_holehe_result_uses_initialized_database(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "results.db"))
     database.setup_database()
     holehe_integration.save_tool_result(
-        "holehe", "person@example.com", "output for person@example.com"
+        "holehe",
+        "person@example.com",
+        "output for person@example.com and person@example.com.invalid",
     )
 
     assert database.query_database(
         "SELECT toolName, queryText, resultText FROM ToolResults"
-    ) == [("holehe", "[redacted]", "output for [redacted]")]
+    ) == [(
+        "holehe",
+        "[redacted]",
+        "output for [redacted] and person@example.com.invalid",
+    )]
 
 
 def test_holehe_result_redacts_partially_encoded_input(tmp_path, monkeypatch):
@@ -303,3 +397,39 @@ def test_insert_binds_values_and_rejects_identifier_injection(tmp_path, monkeypa
     assert database.query_database(
         "SELECT platform FROM Platforms WHERE platform = ?", (payload,)
     ) == [(payload,)]
+
+
+def test_insert_data_preserves_foreign_key_enforcement(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "foreign-key.db"))
+    database.setup_database()
+
+    with pytest.raises(IntegrityError):
+        database.insert_data(
+            "Services", {"serviceName": "orphan", "platformID": 999}
+        )
+
+
+def test_reconcile_stale_tool_runs_preserves_recent_runs(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "reconcile.db"))
+    database.setup_database()
+    stale_id = database.start_tool_run("maigret", "stale")
+    recent_id = database.start_tool_run("maigret", "recent")
+    with database.connect_db() as conn:
+        conn.execute(
+            "UPDATE ToolRuns SET startedAt = datetime('now', '-11 minutes') "
+            "WHERE runID = ?",
+            (stale_id,),
+        )
+
+    assert database.reconcile_stale_tool_runs() == 1
+    assert database.get_tool_run(stale_id)[3:6] == (
+        "failed", None, "Run outcome could not be persisted."
+    )
+    assert database.get_tool_run(stale_id)[7] is not None
+    assert database.get_tool_run(recent_id)[3] == "running"
+
+
+@pytest.mark.parametrize("age", [0, -1, True, 1.5])
+def test_reconcile_stale_tool_runs_rejects_invalid_age(age):
+    with pytest.raises(ValueError, match="positive integer"):
+        database.reconcile_stale_tool_runs(age)

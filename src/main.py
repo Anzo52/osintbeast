@@ -1,14 +1,22 @@
-import sqlite3
+import argparse
+import os
 import subprocess
+import sys
 import zipfile
 import zlib
 
 from simple_term_menu import TerminalMenu
 
 from checkers import _run_email_check_menu, _run_username_check_menu
+import data.utils.database as database
 from backend_services import get_recent_tool_runs, get_saved_tool_results
 from data.utils.init_db import init_db
 from menu_utils import _choose_option, _download_tool_menu, _install_tool_menu
+from data.utils.database import (
+    export_tool_runs_json,
+    get_tool_run,
+    list_tool_runs,
+)
 from downloader import download_tool
 from helix_integration import run_helix, validate_username as validate_helix_username
 from installer import install_tool
@@ -63,7 +71,7 @@ def menu_ops():
 def initialize_database():
     try:
         init_db()
-    except (OSError, sqlite3.Error, UnicodeError) as exc:
+    except (OSError, UnicodeError, *database.DATABASE_ERRORS) as exc:
         print(f"Database initialization failed: {exc}")
 
 
@@ -81,8 +89,9 @@ def download(tool_name):
         EOFError, NotImplementedError, zlib.error,
     ) as exc:
         print(f"Download failed: {exc}")
-        return
+        return 1
     print(f"{tool_name} downloaded successfully to {target_dir}.")
+    return 0
 
 
 def install(tool_name, tool_path=None):
@@ -91,8 +100,9 @@ def install(tool_name, tool_path=None):
         install_tool(tool_name, tool_path)
     except (ValueError, OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         print(f"Installation failed: {exc}")
-        return
+        return 1
     print(f"{tool_name} installed successfully.")
+    return 0
 
 
 def _run_check(tool_name, query_text, validator, runner):
@@ -100,61 +110,299 @@ def _run_check(tool_name, query_text, validator, runner):
         query_text = validator(query_text)
     except ValueError as exc:
         print(f"Input error: {exc}")
-        return
+        return 2
     try:
         status, value = execute_tool_run(
             tool_name, query_text, runner, sensitive_input=True
         )
-    except sqlite3.Error as exc:
+    except database.DATABASE_ERRORS as exc:
         print(f"Could not record {tool_name} run: {exc}. Initialize the database and check its permissions.")
-        return
+        return 1
     if status == "success":
         print(value)
         print(f"{tool_name.capitalize()} check saved to the database.")
+        return 0
     elif status == "timed_out":
         print(f"{tool_name.capitalize()} timed out: {value}")
     else:
         print(f"{tool_name.capitalize()} could not run: {value}")
+    return 1
 
 
 def run_holehe_check(email):
-    _run_check("holehe", email, validate_email, lambda value: run_holehe(value)["output"])
+    return _run_check("holehe", email, validate_email, lambda value: run_holehe(value)["output"])
 
 
 def run_maigret_check(username):
-    _run_check("maigret", username, validate_username, run_maigret)
+    return _run_check("maigret", username, validate_username, run_maigret)
 
 
 def run_helix_check(username):
-    _run_check("helix", username, validate_helix_username, run_helix)
+    return _run_check("helix", username, validate_helix_username, run_helix)
 
 
 def run_sherlock_check(username):
-    _run_check("sherlock", username, validate_sherlock_username, run_sherlock)
+    return _run_check("sherlock", username, validate_sherlock_username, run_sherlock)
+
+
+def query_view(view):
+    try:
+        database.setup_database()
+        if view == "runs":
+            result = get_recent_tool_runs()
+        else:
+            result = get_saved_tool_results()
+    except (OSError, UnicodeError, *database.DATABASE_ERRORS) as exc:
+        print(
+            f"Database query failed: {exc}. Initialize the database and check its permissions."
+        )
+        return 1
+    print(f"Query result: {result}")
+    return 0
 
 
 def query_menu():
     choice = _choose_option(
         [
-            "Recent Tool Runs",
+            "Run History",
             "Saved Tool Results",
             "Back",
         ],
         "Choose database view",
     )
-    try:
-        if choice == 0:
-            result = get_recent_tool_runs()
-        elif choice == 1:
-            result = get_saved_tool_results()
-        else:
+    if choice in (0, 1):
+        try:
+            database.setup_database()
+        except (OSError, UnicodeError, *database.DATABASE_ERRORS) as exc:
+            print(f"Database initialization failed: {exc}")
             return
-    except sqlite3.Error as exc:
-        print(f"Database query failed: {exc}")
+    if choice == 0:
+        run_history_menu()
+    elif choice == 1:
+        return query_view("results")
+
+
+def show_run_history(tool_name=None, status=None, offset=0):
+    try:
+        runs = list_tool_runs(
+            limit=20, offset=offset, tool_name=tool_name, status=status
+        )
+    except database.DATABASE_ERRORS as exc:
+        print(f"Run history query failed: {exc}")
         return
-    print(f"Query result: {result}")
+    if not runs:
+        print("No matching runs.")
+        return
+    for run_id, tool, query_text, run_status, started, finished, _error in runs:
+        summary = query_text[:80] + ("…" if len(query_text) > 80 else "")
+        print(
+            f"Run {run_id} | {tool} | input={summary!r} | {run_status} | "
+            f"started={started} | finished={finished or '—'}"
+        )
+
+
+def inspect_tool_run(run_id):
+    try:
+        run = get_tool_run(run_id)
+    except ValueError as exc:
+        print(f"Could not inspect run: {exc}")
+        return
+    except database.DATABASE_ERRORS as exc:
+        print(f"Could not inspect run: {exc}")
+        return
+    if run is None:
+        print(f"Run {run_id} was not found.")
+        return
+    print(
+        f"Run {run[0]} | {run[1]} | input={run[2]!r} | {run[3]} | "
+        f"started={run[6]} | finished={run[7] or '—'}"
+    )
+    print(f"Result: {run[4]!r}" if run[4] else "Result: (empty)")
+    if run[5] is not None:
+        print(f"Error: {run[5]!r}")
+
+
+def _parse_run_ids(value):
+    try:
+        run_ids = [int(item.strip()) for item in value.split(",") if item.strip()]
+    except ValueError:
+        print("Enter run IDs separated by commas.")
+        return None
+    if not run_ids:
+        print("Select at least one run ID.")
+        return None
+    return run_ids
+
+
+def export_selected_runs():
+    run_ids = _parse_run_ids(input("Run IDs to export (comma-separated): "))
+    if run_ids is None:
+        return
+    output_path = input("New JSON file path: ").strip()
+    if not output_path:
+        print("Export cancelled.")
+        return
+    include_sensitive = input(
+        "Include sensitive input, result, and error text? [y/N]: "
+    ).strip().casefold() in {"y", "yes"}
+    try:
+        content = export_tool_runs_json(run_ids, include_sensitive=include_sensitive)
+        with open(
+            output_path,
+            "x",
+            encoding="utf-8",
+            opener=lambda path, flags: os.open(path, flags, 0o600),
+        ) as export_file:
+            export_file.write(content + "\n")
+    except (OSError, ValueError, *database.DATABASE_ERRORS) as exc:
+        print(f"Could not export runs: {exc}")
+        return
+    print(f"Exported {len(run_ids)} run(s) to {output_path}.")
+
+
+def run_history_menu():
+    tool_name = None
+    status = None
+    offset = 0
+    show_run_history(tool_name, status, offset)
+    options = [
+        "Refresh history",
+        "Filter by tool/status",
+        "Inspect a run result",
+        "Next page",
+        "Previous page",
+        "Export selected runs as JSON",
+        "Back",
+    ]
+    while True:
+        choice = _choose_option(options, "Run History")
+        if choice is None or choice == 6:
+            return
+        if choice == 0:
+            show_run_history(tool_name, status, offset)
+        elif choice == 1:
+            tool_value = input("Tool name (blank for any): ").strip()
+            status_value = input(
+                "Status (running, success, failed, timed_out; blank for any): "
+            ).strip()
+            tool_name = tool_value or None
+            status = status_value or None
+            offset = 0
+            try:
+                list_tool_runs(tool_name=tool_name, status=status)
+            except ValueError as exc:
+                print(f"Invalid history filter: {exc}")
+                tool_name = status = None
+            except database.DATABASE_ERRORS as exc:
+                print(f"Run history query failed: {exc}")
+                continue
+            show_run_history(tool_name, status, offset)
+        elif choice == 2:
+            value = input("Run ID to inspect: ").strip()
+            try:
+                inspect_tool_run(int(value))
+            except ValueError:
+                print("Enter a valid run ID.")
+        elif choice == 3:
+            offset += 20
+            show_run_history(tool_name, status, offset)
+        elif choice == 4:
+            offset = max(0, offset - 20)
+            show_run_history(tool_name, status, offset)
+        elif choice == 5:
+            export_selected_runs()
+
+
+def _cli_initialize_database(_args):
+    init_db()
+    return 0
+
+
+def _cli_list_tools(_args):
+    list_supported_tools()
+    return 0
+
+
+def _build_parser():
+    parser = argparse.ArgumentParser(
+        prog="osintbeast",
+        description="Run authorized OSINT workflows or start the interactive menu.",
+    )
+    commands = parser.add_subparsers(dest="command")
+
+    initialize = commands.add_parser("init-db", help="initialize the local database")
+    initialize.set_defaults(handler=_cli_initialize_database)
+
+    listing = commands.add_parser("list-tools", help="list registered tools and installation status")
+    listing.set_defaults(handler=_cli_list_tools)
+
+    download_command = commands.add_parser("download", help="download a registered tool")
+    download_command.add_argument("tool", help="registered tool name")
+    download_command.set_defaults(handler=lambda args: download(args.tool))
+
+    install_command = commands.add_parser("install", help="install a supported Python tool")
+    install_command.add_argument("tool", help="registered Python tool name")
+    install_command.add_argument(
+        "--path",
+        help="tool project directory (defaults to tools/<tool>)",
+    )
+    install_command.set_defaults(handler=lambda args: install(args.tool, args.path))
+
+    email_command = commands.add_parser("check-email", help="check an email address with Holehe")
+    email_command.add_argument(
+        "email",
+        help="email address (for example, person@example.com)",
+    )
+    email_command.set_defaults(handler=lambda args: run_holehe_check(args.email))
+
+    username_command = commands.add_parser(
+        "check-username",
+        help="check a username with Maigret, Helix, or Sherlock",
+    )
+    username_command.add_argument(
+        "tool",
+        choices=("maigret", "helix", "sherlock"),
+        help="username search integration",
+    )
+    username_command.add_argument(
+        "username",
+        help=(
+            "up to 100 ASCII letters, digits, dots, underscores or hyphens; "
+            "Helix accepts up to 50 and an optional leading @"
+        ),
+    )
+    username_command.set_defaults(
+        handler=lambda args: {
+            "maigret": run_maigret_check,
+            "helix": run_helix_check,
+            "sherlock": run_sherlock_check,
+        }[args.tool](args.username)
+    )
+
+    query_command = commands.add_parser(
+        "query", help="view recent tool runs or saved tool results"
+    )
+    query_command.add_argument(
+        "view",
+        choices=("runs", "results"),
+        help="which saved data to view",
+    )
+    query_command.set_defaults(handler=lambda args: query_view(args.view))
+    return parser
+
+
+def cli(argv=None):
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.command is None:
+        while True:
+            main_menu()
+    try:
+        return args.handler(args)
+    except (OSError, RuntimeError, ValueError, *database.DATABASE_ERRORS) as exc:
+        print(f"Command failed: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
-    while True:
-        main_menu()
+    raise SystemExit(cli())

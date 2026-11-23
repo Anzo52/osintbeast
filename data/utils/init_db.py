@@ -1,4 +1,6 @@
-from data.utils.database import setup_database
+import data.utils.database as database
+
+setup_database = database.setup_database
 
 
 def init_db():
