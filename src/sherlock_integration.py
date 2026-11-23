@@ -125,7 +125,6 @@ def run_sherlock(username: str, *, process_context=None, search_function=None) -
                 payload.extend(receiver.recv_bytes(_WORKER_MESSAGE_CHUNK_SIZE))
             except EOFError:
                 break
-
         worker.join(timeout=max(0, deadline - time.monotonic()))
         if worker.is_alive():
             raise TimeoutError(

@@ -180,7 +180,17 @@ def test_run_sherlock_timeout_stops_worker_and_allows_next_run(monkeypatch):
     )[0]["site"] == "Example"
 
 
-def test_missing_sherlock_dependency_is_actionable(monkeypatch):
+def test_search_worker_propagates_request_timeout():
+    def timeout(_):
+        raise TimeoutError("request timed out")
+
+    assert _run_search_worker(timeout) == {
+        "outcome": "timed_out",
+        "message": "request timed out",
+    }
+
+
+def test_search_missing_sherlock_dependency_is_actionable(monkeypatch):
     original_import = builtins.__import__
 
     def missing(name, *args, **kwargs):

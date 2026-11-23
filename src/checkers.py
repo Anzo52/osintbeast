@@ -10,6 +10,9 @@ def _read_sensitive_input(prompt):
         except GetPassWarning:
             print("Unable to securely read sensitive input; terminal echo is enabled.")
             return None
+        except (EOFError, OSError):
+            print("Cannot read input securely. Please use an interactive terminal.")
+            return None
 
 
 def _run_email_check_menu(check):

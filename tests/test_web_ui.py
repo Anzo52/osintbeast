@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import threading
 import time
 from http.server import ThreadingHTTPServer
@@ -74,6 +75,7 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
         status, running = _request(f"{base_url}/api/runs/{launched['id']}")
         assert status == 200
         assert running["status"] == "running"
+        assert running["input"] == "alice"
         release_runner.set()
 
         deadline = time.monotonic() + 2
@@ -85,6 +87,7 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
 
         assert status == 200
         assert detail["status"] == "success"
+        assert detail["input"] == "alice"
         assert detail["result"] == f"alice: {output}"
         assert database.query_database(
             "SELECT toolName, queryText, resultText FROM ToolResults"
@@ -103,6 +106,101 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
         assert "innerHTML" not in page
     finally:
         release_runner.set()
+        server.shutdown()
+        server.server_close()
+
+
+def test_web_run_views_show_migrated_legacy_records(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "web.db"))
+    database.setup_database()
+    with database.connect_db() as conn:
+        conn.execute("DELETE FROM OsintBeastMigrations")
+        conn.execute(
+            "INSERT INTO ToolRuns (toolName, queryText, status, errorText) "
+            "VALUES ('holehe', 'private@example.com', 'failed', 'private%40example.com')"
+        )
+
+    server, base_url = _server(tmp_path, monkeypatch, Mock())
+    try:
+        status, recent = _request(f"{base_url}/api/runs")
+        assert status == 200
+        assert recent[0]["input"] == "[redacted]"
+        status, detail = _request(f"{base_url}/api/runs/{recent[0]['id']}")
+        assert status == 200
+        assert detail["input"] == "[redacted]"
+        assert detail["error"] == "[redacted]"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_unpersisted_completion_is_logged_and_reconciled(tmp_path, monkeypatch, caplog):
+    server, base_url = _server(tmp_path, monkeypatch, Mock(return_value="output"))
+    finish = database.finish_tool_run
+    monkeypatch.setattr(
+        database,
+        "finish_tool_run",
+        Mock(side_effect=sqlite3.OperationalError("database unavailable")),
+    )
+    try:
+        status, launched = _request(
+            f"{base_url}/api/runs",
+            {"tool": "sherlock", "input": "alice", "authorized": True},
+        )
+        assert status == 202
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not caplog.records:
+            time.sleep(0.01)
+        assert "Could not persist completion" in caplog.text
+        assert str(launched["id"]) in caplog.text
+
+        monkeypatch.setattr(database, "finish_tool_run", finish)
+        with database.connect_db() as conn:
+            conn.execute(
+                "UPDATE ToolRuns SET startedAt = datetime('now', '-11 minutes') "
+                "WHERE runID = ?",
+                (launched["id"],),
+            )
+        status, detail = _request(f"{base_url}/api/runs/{launched['id']}")
+        assert status == 200
+        assert detail["status"] == "failed"
+        assert detail["error"] == "Run outcome could not be persisted."
+    finally:
+        monkeypatch.setattr(database, "finish_tool_run", finish)
+        server.shutdown()
+        server.server_close()
+
+
+def test_holehe_email_is_redacted_in_web_ui_history(tmp_path, monkeypatch):
+    sensitive_value = "person@example.com"
+    server, base_url = _server(
+        tmp_path, monkeypatch, Mock(return_value=f"Found {sensitive_value}")
+    )
+    monkeypatch.setattr(
+        web_ui,
+        "RUNNABLE_TOOLS",
+        {"holehe": ("email", lambda value: value, Mock(return_value=f"Found {sensitive_value}"))},
+    )
+    try:
+        status, launched = _request(
+            f"{base_url}/api/runs",
+            {"tool": "holehe", "input": sensitive_value, "authorized": True},
+        )
+        assert status == 202
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            status, detail = _request(f"{base_url}/api/runs/{launched['id']}")
+            if detail["status"] != "running":
+                break
+            time.sleep(0.01)
+
+        assert status == 200
+        assert detail["input"] == "[redacted]"
+        assert detail["result"] == "Found [redacted]"
+        assert database.query_database(
+            "SELECT queryText, resultText FROM ToolResults"
+        ) == [("[redacted]", "Found [redacted]")]
+    finally:
         server.shutdown()
         server.server_close()
 
@@ -187,3 +285,27 @@ def test_terminal_tool_error_is_available_for_review(tmp_path, monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_unexpected_background_error_is_redacted(tmp_path, monkeypatch, caplog):
+    runner = Mock(side_effect=Exception("private exception"))
+    server, base_url = _server(tmp_path, monkeypatch, runner)
+    try:
+        status, launched = _request(
+            f"{base_url}/api/runs",
+            {"tool": "sherlock", "input": "alice", "authorized": True},
+        )
+        assert status == 202
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            _, detail = _request(f"{base_url}/api/runs/{launched['id']}")
+            if detail["status"] != "running":
+                break
+            time.sleep(0.01)
+        assert detail["status"] == "failed"
+        assert detail["input"] == "alice"
+        assert detail["error"] == "sherlock failed unexpectedly (Exception)."
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert "private exception" not in caplog.text

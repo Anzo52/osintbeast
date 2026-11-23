@@ -24,10 +24,10 @@ def initialized_db(tmp_path, monkeypatch):
     [
         ("holehe", RuntimeError("missing dependency"), "failed"),
         ("maigret", ValueError("invalid site database"), "failed"),
-        ("maigret", OSError("network error"), "failed"),
         ("sherlock", RuntimeError("missing dependency"), "failed"),
         ("holehe", HoleheTimeoutError("timeout"), "timed_out"),
         ("maigret", TimeoutError(), "timed_out"),
+        ("helix", TimeoutError("timed out"), "timed_out"),
         ("sherlock", TimeoutError(), "timed_out"),
     ],
 )
@@ -35,7 +35,9 @@ def test_failed_runs_are_recorded(initialized_db, tool, error, status):
     def fail(_):
         raise error
 
-    outcome, message = tool_runs.execute_tool_run(tool, "test", fail)
+    outcome, message = tool_runs.execute_tool_run(
+        tool, "test", fail, sensitive_input=False
+    )
 
     assert outcome == status
     assert message
@@ -46,9 +48,11 @@ def test_failed_runs_are_recorded(initialized_db, tool, error, status):
     assert database.list_tool_results() == []
 
 
-@pytest.mark.parametrize("tool", ["holehe", "maigret", "sherlock"])
+@pytest.mark.parametrize("tool", ["holehe", "maigret", "helix", "sherlock"])
 def test_success_run_preserves_legacy_results(initialized_db, tool):
-    assert tool_runs.execute_tool_run(tool, "test", lambda _: "output") == (
+    assert tool_runs.execute_tool_run(
+        tool, "test", lambda _: "output", sensitive_input=False
+    ) == (
         "success", "output"
     )
     assert database.query_database(
@@ -58,6 +62,94 @@ def test_success_run_preserves_legacy_results(initialized_db, tool):
     assert database.query_database(
         "SELECT toolName, queryText, resultText FROM ToolResults"
     ) == [(tool, "test", "output")]
+
+
+@pytest.mark.parametrize("sensitive_input", [None, 0, "false"])
+def test_sensitivity_must_be_boolean(initialized_db, sensitive_input):
+    runner = Mock()
+    with pytest.raises(TypeError):
+        tool_runs.execute_tool_run("holehe", "private", runner, sensitive_input=sensitive_input)
+    with pytest.raises(TypeError):
+        tool_runs.execute_tool_run_with_id(
+            "holehe", "private", runner, sensitive_input=sensitive_input
+        )
+    with pytest.raises(TypeError):
+        tool_runs.start_tool_run("holehe", "private", sensitive_input=sensitive_input)
+    runner.assert_not_called()
+    assert database.list_tool_runs() == []
+
+
+def test_sensitivity_is_required(initialized_db):
+    runner = Mock()
+    with pytest.raises(TypeError):
+        tool_runs.execute_tool_run("holehe", "private", runner)
+    runner.assert_not_called()
+    assert database.list_tool_runs() == []
+
+
+@pytest.mark.parametrize(
+    ("outcome", "error"),
+    [("success", None), ("failed", RuntimeError("private input error")),
+     ("timed_out", TimeoutError("private input timeout"))],
+)
+def test_sensitive_run_redacts_persistence(initialized_db, outcome, error):
+    runner = Mock(return_value="private input result", side_effect=error)
+    status, value = tool_runs.execute_tool_run(
+        "holehe", "private input", runner, sensitive_input=True
+    )
+    runner.assert_called_once_with("private input")
+    assert status == outcome
+    assert value == (
+        "[redacted] result" if error is None else str(error).replace("private input", "[redacted]")
+    )
+    assert database.query_database(
+        "SELECT queryText, status, resultText, errorText FROM ToolRuns"
+    ) == [(
+        tool_runs.REDACTED, outcome,
+        value if error is None else None,
+        value if error is not None else None,
+    )]
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolResults"
+    ) == ([(tool_runs.REDACTED, value)] if error is None else [])
+
+
+def test_sensitive_existing_run_must_already_be_redacted(initialized_db):
+    run_id = database.start_tool_run("holehe", "private input")
+    runner = Mock()
+    with pytest.raises(ValueError, match="redacted running record"):
+        tool_runs.execute_tool_run(
+            "holehe", "private input", runner, run_id=run_id, sensitive_input=True
+        )
+    runner.assert_not_called()
+    assert database.get_tool_run(run_id)[3] == "running"
+
+
+def test_sensitive_existing_redacted_run_is_completed(initialized_db):
+    run_id = database.start_tool_run("holehe", tool_runs.REDACTED)
+    assert tool_runs.execute_tool_run(
+        "holehe", "private input", lambda value: f"result: {value}",
+        run_id=run_id, sensitive_input=True,
+    ) == ("success", "result: [redacted]")
+    assert database.get_tool_run(run_id)[2:6] == (
+        tool_runs.REDACTED, "success", "result: [redacted]", None
+    )
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolResults"
+    ) == [(tool_runs.REDACTED, "result: [redacted]")]
+
+
+def test_non_text_output_is_recorded_as_a_failure(initialized_db):
+    status, message = tool_runs.execute_tool_run(
+        "helix", "test", lambda _: None, sensitive_input=False
+    )
+
+    assert status == "failed"
+    assert message == "helix returned non-text output."
+    assert database.query_database(
+        "SELECT status, resultText, errorText, finishedAt IS NOT NULL FROM ToolRuns"
+    ) == [("failed", None, message, 1)]
+    assert database.list_tool_results() == []
 
 
 def test_finish_is_atomic_if_legacy_result_insert_fails(initialized_db):
@@ -73,7 +165,7 @@ def test_finish_is_atomic_if_legacy_result_insert_fails(initialized_db):
     ) == [("running", None, None)]
 
 
-def test_reinitializing_legacy_database_preserves_results(tmp_path, monkeypatch):
+def test_reinitializing_legacy_database_redacts_results(tmp_path, monkeypatch):
     path = tmp_path / "legacy.db"
     monkeypatch.setattr(database, "DB_FILE", str(path))
     with sqlite3.connect(path) as conn:
@@ -87,7 +179,7 @@ def test_reinitializing_legacy_database_preserves_results(tmp_path, monkeypatch)
     database.setup_database()
 
     assert database.query_database("SELECT queryText, resultText FROM ToolResults") == [
-        ("old", "old result")
+        ("[redacted]", "[redacted] result")
     ]
     assert database.query_database("SELECT * FROM ToolRuns") == []
 
@@ -127,6 +219,133 @@ def test_run_finish_rejects_repeated_completion(initialized_db):
     database.finish_tool_run(run_id, "failed", error_text="error")
     with pytest.raises(ValueError, match="already finished"):
         database.finish_tool_run(run_id, "success", result_text="output")
+
+
+def test_list_tool_runs_filters_orders_and_paginates(initialized_db):
+    oldest = database.start_tool_run("holehe", "old")
+    database.finish_tool_run(oldest, "success", result_text="old result")
+    database.start_tool_run("maigret", "middle")
+    newest = database.start_tool_run("holehe", "new")
+    database.finish_tool_run(newest, "failed", error_text="failed")
+
+    assert [row[0] for row in database.list_tool_runs(limit=2)] == [newest, newest - 1]
+    assert [row[2] for row in database.list_tool_runs(
+        tool_name="holehe", status="success"
+    )] == ["old"]
+    assert database.list_tool_runs(tool_name="holehe' OR 1=1 --") == []
+    assert [row[2] for row in database.list_tool_runs(offset=2)] == ["old"]
+    assert database.list_tool_runs(offset=3) == []
+    with pytest.raises(ValueError):
+        database.list_tool_runs(status="unknown")
+
+
+def test_export_tool_runs_json_escapes_content_and_handles_empty_results(
+    initialized_db,
+):
+    malformed = '{"broken":\n"value"'
+    malformed_id = database.start_tool_run("maigret", 'user,"example"')
+    database.finish_tool_run(malformed_id, "success", result_text=malformed)
+    empty_id = database.start_tool_run("holehe", "empty")
+    database.finish_tool_run(empty_id, "success", result_text="")
+
+    exported = json.loads(
+        database.export_tool_runs_json([malformed_id, empty_id])
+    )
+
+    assert exported[0]["input"] == "[REDACTED]"
+    assert exported[0]["result"] == "[REDACTED]"
+    assert exported[1]["result"] == "[REDACTED]"
+    included = json.loads(
+        database.export_tool_runs_json([malformed_id, empty_id], include_sensitive=True)
+    )
+    assert included[0]["input"] == 'user,"example"'
+    assert included[0]["result"] == malformed
+    assert included[1]["result"] == ""
+
+
+def test_export_tool_runs_json_rejects_missing_or_invalid_ids(initialized_db):
+    with pytest.raises(ValueError):
+        database.export_tool_runs_json([])
+    with pytest.raises(ValueError):
+        database.export_tool_runs_json([0])
+    with pytest.raises(ValueError, match="do not exist"):
+        database.export_tool_runs_json([99])
+
+
+def test_history_menu_filters_and_inspects_results(
+    initialized_db, monkeypatch, capsys
+):
+    first_id = database.start_tool_run("maigret", "first")
+    failed_id = database.start_tool_run("holehe", "target")
+    database.finish_tool_run(failed_id, "failed", error_text="broken output")
+    choices = iter([1, 2, 6])
+    answers = iter(["holehe", "failed", str(failed_id)])
+
+    class FakeMenu:
+        def __init__(self, options, title):
+            assert title == "Run History"
+
+        def show(self):
+            return next(choices)
+
+    monkeypatch.setattr("menu_utils.TerminalMenu", FakeMenu)
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+
+    main.run_history_menu()
+
+    output = capsys.readouterr().out
+    assert f"Run {failed_id} | holehe | input='target' | failed" in output
+    assert "Error: 'broken output'" in output
+    assert output.count(f"Run {first_id} |") == 1
+
+
+def test_export_selected_runs_creates_json_with_explicit_sensitive_opt_in(
+    initialized_db, monkeypatch, tmp_path, capsys
+):
+    result = '{"matched":\nfalse}'
+    run_id = database.start_tool_run("holehe", "person@example.com")
+    database.finish_tool_run(run_id, "success", result_text=result)
+    output_path = tmp_path / "selected.json"
+    answers = iter([str(run_id), str(output_path), "yes"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+
+    main.export_selected_runs()
+
+    exported = json.loads(output_path.read_text(encoding="utf-8"))
+    assert exported[0]["input"] == "person@example.com"
+    assert exported[0]["result"] == result
+    assert output_path.stat().st_mode & 0o077 == 0
+    assert f"Exported 1 run(s) to {output_path}." in capsys.readouterr().out
+
+    original_content = output_path.read_bytes()
+    answers = iter([str(run_id), str(output_path), "yes"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    main.export_selected_runs()
+
+    assert output_path.read_bytes() == original_content
+    assert "Could not export runs:" in capsys.readouterr().out
+
+
+def test_history_menu_filter_handles_sqlite_errors(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "missing.db"))
+    choices = iter([1, 6])
+    answers = iter(["holehe", "success"])
+
+    class FakeMenu:
+        def __init__(self, options, title):
+            assert title == "Run History"
+
+        def show(self):
+            return next(choices)
+
+    monkeypatch.setattr("menu_utils.TerminalMenu", FakeMenu)
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+
+    main.run_history_menu()
+
+    output = capsys.readouterr().out
+    assert "Invalid history filter:" not in output
+    assert output.count("Run history query failed: no such table: ToolRuns") == 2
 
 
 @pytest.mark.parametrize(
@@ -169,9 +388,11 @@ def test_cli_saves_success(
     monkeypatch.setattr(main, target, runner)
     function(value)
     runner.assert_called_once_with(query_text)
-    assert f"{tool.capitalize()} check saved to the database." in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert (result["output"] if isinstance(result, dict) else result) in output
+    assert f"{tool.capitalize()} check saved to the database." in output
     assert database.query_database("SELECT toolName, queryText, status FROM ToolRuns") == [
-        (tool, "[redacted]", "success")
+        (tool, tool_runs.REDACTED, "success")
     ]
 
 
@@ -185,7 +406,7 @@ def test_cli_reports_and_records_failure(initialized_db, monkeypatch, capsys):
 
 
 def test_sensitive_values_are_redacted_from_output_and_run_records(
-    initialized_db, monkeypatch, capsys
+    initialized_db, monkeypatch, capsys, caplog
 ):
     sensitive_value = "person@example.com"
 
@@ -204,6 +425,8 @@ def test_sensitive_values_are_redacted_from_output_and_run_records(
 
     output = capsys.readouterr().out
     assert sensitive_value not in output
+    assert sensitive_value not in caplog.text
+    assert all(sensitive_value not in record.getMessage() for record in caplog.records)
     assert "[redacted]" in output
     assert database.query_database(
         "SELECT queryText, resultText FROM ToolRuns"
@@ -274,15 +497,29 @@ def test_short_username_redaction_preserves_numeric_json_fields(initialized_db):
     }
 
 
-@pytest.mark.parametrize("error_type", [RuntimeError, TypeError])
+@pytest.mark.parametrize("query", ["a", "2"])
+def test_short_username_redaction_does_not_replace_substrings(query):
+    result = json.dumps({
+        "status": "data and 200",
+        "url": f"https://example.test/{query}",
+        "message": f"found {query}, not data or 200",
+    })
+
+    record = json.loads(tool_runs.redact_sensitive_output(result, query))
+
+    assert record["status"] == "data and 200"
+    assert record["url"] == "https://example.test/[redacted]"
+    assert record["message"] == "found [redacted], not data or 200"
+
+
 def test_sensitive_values_are_redacted_from_errors(
-    initialized_db, monkeypatch, capsys, error_type
+    initialized_db, monkeypatch, capsys
 ):
     sensitive_value = "person@example.com"
     monkeypatch.setattr(
         main,
         "run_holehe",
-        Mock(side_effect=error_type(f"request failed for {sensitive_value}")),
+        Mock(side_effect=RuntimeError(f"request failed for {sensitive_value}")),
     )
 
     main.run_holehe_check(sensitive_value)
@@ -293,6 +530,52 @@ def test_sensitive_values_are_redacted_from_errors(
         "SELECT queryText, errorText FROM ToolRuns"
     ) == [("[redacted]", "request failed for [redacted]")]
 
+
+def test_sensitive_unexpected_failure_is_recorded_and_propagated(initialized_db):
+    sensitive_value = "person@example.com"
+
+    def fail(value):
+        raise TypeError(f"unexpected value: {value}")
+
+    with pytest.raises(tool_runs.UnexpectedToolError) as error:
+        tool_runs.execute_tool_run(
+            "holehe", sensitive_value, fail, sensitive_input=True
+        )
+
+    assert "TypeError" in str(error.value)
+    assert sensitive_value not in str(error.value)
+    assert any(frame.name == "fail" for frame in error.traceback)
+    assert database.query_database(
+        "SELECT queryText, status, errorText FROM ToolRuns"
+    ) == [("[redacted]", "failed", "holehe failed unexpectedly (TypeError).")]
+
+
+def test_sensitivity_must_be_explicit():
+    with pytest.raises(TypeError, match="sensitive_input"):
+        tool_runs.execute_tool_run("holehe", "private", lambda _: "output")
+    with pytest.raises(TypeError, match="sensitive_input"):
+        tool_runs.execute_tool_run_with_id("holehe", "private", lambda _: "output")
+    with pytest.raises(TypeError, match="sensitive_input"):
+        tool_runs.start_tool_run("holehe", "private")
+
+
+def test_execute_tool_run_with_id_redacts_sensitive_values(initialized_db):
+    sensitive_value = "person@example.com"
+    run_id, status, output = tool_runs.execute_tool_run_with_id(
+        "holehe",
+        sensitive_value,
+        lambda value: f"Found {value}",
+        sensitive_input=True,
+    )
+
+    assert status == "success"
+    assert output == "Found [redacted]"
+    assert database.get_tool_run(run_id)[2:6] == (
+        "[redacted]", "success", "Found [redacted]", None
+    )
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolResults"
+    ) == [("[redacted]", "Found [redacted]") ]
 
 @pytest.mark.parametrize(
     ("menu", "prompt", "value"),
@@ -384,6 +667,26 @@ def test_cli_reports_timeout_without_claiming_success(initialized_db, monkeypatc
         "SELECT status, resultText, errorText FROM ToolRuns"
     ) == [("timed_out", None, "Maigret exceeded its time limit")]
     assert database.list_tool_results() == []
+
+
+def test_cli_can_start_another_run_after_timeout(initialized_db, monkeypatch, capsys):
+    monkeypatch.setattr(
+        main,
+        "run_maigret",
+        Mock(side_effect=[TimeoutError("Maigret exceeded its time limit"), "output"]),
+    )
+
+    main.run_maigret_check("user")
+    main.run_maigret_check("user")
+
+    assert capsys.readouterr().out == (
+        "Maigret timed out: Maigret exceeded its time limit\n"
+        "output\n"
+        "Maigret check saved to the database.\n"
+    )
+    assert database.query_database(
+        "SELECT status FROM ToolRuns ORDER BY runID"
+    ) == [("timed_out",), ("success",)]
 
 
 def test_maigret_menu_action_dispatches_username(monkeypatch):
