@@ -217,18 +217,31 @@ class BackgroundRuns:
                 deadline = time.monotonic() + self.limits.timeout_seconds
                 while not cancel.is_set():
                     remaining = deadline - time.monotonic()
-                    if receiver.poll(max(0, min(remaining, 0.05))):
+                    ready = receiver.poll(max(0, min(remaining, 0.05)))
+                    if cancel.is_set():
+                        break
+                    if ready:
                         try:
                             payload = receiver.recv_bytes(self.limits.max_output_bytes + 1)
                         except (EOFError, OSError):
+                            with self._lock:
+                                if not cancel.is_set():
+                                    completed.set()
                             break
                         if payload and payload[:1] in (b"S", b"F", b"T"):
                             status = {b"S": "success", b"F": "failed", b"T": "timed_out"}[payload[:1]]
                             value = payload[1:].decode("utf-8", errors="replace")
                             with self._lock:
                                 completed.set()
+                        else:
+                            with self._lock:
+                                if not cancel.is_set():
+                                    completed.set()
                         break
                     if not process.is_alive():
+                        with self._lock:
+                            if not cancel.is_set():
+                                completed.set()
                         break
                     if remaining <= 0:
                         with self._lock:

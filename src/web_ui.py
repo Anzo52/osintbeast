@@ -69,7 +69,10 @@ INDEX_HTML = """<!doctype html>
     async function request(url, options) {
       const response = await fetch(url, options);
       const body = await response.json();
-      if (!response.ok) throw new Error(body.error || "Request failed.");
+      if (!response.ok) {
+        const run = Number.isSafeInteger(body.id) ? ` Run #${body.id}.` : "";
+        throw new Error((body.error || "Request failed.") + run);
+      }
       return body;
     }
 

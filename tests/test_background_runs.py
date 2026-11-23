@@ -207,7 +207,7 @@ def test_terminal_outcomes_survive_late_cancellation(service, monkeypatch, outco
     monkeypatch.setattr(background_runs.time, "monotonic", Mock(side_effect=[0, 2]))
 
     def stop(_):
-        if outcome == "timeout":
+        if outcome in ("timeout", "crash"):
             assert not service.cancel(run_id)
 
     monkeypatch.setattr(background_runs, "_stop_process", stop)
@@ -219,6 +219,27 @@ def test_terminal_outcomes_survive_late_cancellation(service, monkeypatch, outco
         "timeout": "Background run exceeded its time limit.",
         "crash": "Background worker failed.",
     }[outcome]
+
+
+def test_cancellation_during_poll_is_not_replaced_by_a_later_result(service, monkeypatch):
+    run_id = database.start_tool_run("maigret", "user")
+    cancel, completed = threading.Event(), threading.Event()
+    service._jobs[run_id] = (cancel, Mock(), completed)
+    receiver, sender, process = Mock(), Mock(), Mock()
+    process.pid = 1
+
+    def poll(_):
+        assert service.cancel(run_id)
+        return True
+
+    receiver.poll.side_effect = poll
+    receiver.recv_bytes.return_value = b"Soutput"
+    monkeypatch.setattr(service._context, "Pipe", lambda **kwargs: (receiver, sender))
+    monkeypatch.setattr(service._context, "Process", lambda **kwargs: process)
+    monkeypatch.setattr(background_runs, "_stop_process", lambda _: None)
+    service._supervise(run_id, "maigret", "user", cancel, completed)
+    assert service.status(run_id)["errorText"] == "Run cancelled."
+    receiver.recv_bytes.assert_not_called()
 
 
 @pytest.mark.parametrize(
