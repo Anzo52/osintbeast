@@ -89,6 +89,20 @@ def test_install_reports_errors(monkeypatch, capsys, error):
     assert capsys.readouterr().out == f"Installation failed: {error}\n"
 
 
+def test_query_reports_sqlite_error(monkeypatch, capsys):
+    monkeypatch.setattr(
+        main,
+        "get_recent_tool_runs",
+        Mock(side_effect=sqlite3.OperationalError("database is locked")),
+    )
+
+    assert main.query_view("runs") == 1
+    assert capsys.readouterr().out == (
+        "Database query failed: database is locked. "
+        "Initialize the database and check its permissions.\n"
+    )
+
+
 @pytest.mark.parametrize(
     ("choices", "inputs", "failure"),
     [
@@ -136,17 +150,13 @@ def test_menu_remains_usable_after_failure(
 def test_successful_actions_keep_their_output(monkeypatch, capsys):
     monkeypatch.setattr(main, "download_tool", lambda *args, **kwargs: "tools/holehe")
     monkeypatch.setattr(main, "install_tool", lambda *args, **kwargs: None)
-    monkeypatch.setattr(main, "get_recent_tool_runs", lambda: [])
 
     main.download("holehe")
     main.install("holehe")
-    monkeypatch.setattr(main, "_choose_option", lambda options, title: 0)
-    main.query_menu()
 
     assert capsys.readouterr().out == (
         "holehe downloaded successfully to tools/holehe.\n"
         "holehe installed successfully.\n"
-        "Query result: []\n"
     )
 
 
@@ -268,45 +278,179 @@ def test_install_menu_selects_pip_tool_and_default_source(monkeypatch):
     install.assert_called_once_with("helix")
 
 
-@pytest.mark.parametrize(
-    ("choice", "service_name"),
-    [(0, "get_recent_tool_runs"), (1, "get_saved_tool_results")],
-)
-def test_query_menu_offers_history_views_without_custom_sql(
-    monkeypatch, choice, service_name
-):
-    service = Mock(return_value=[])
+def test_query_menu_offers_structured_run_history(monkeypatch):
+    history = Mock()
 
     class FakeMenu:
         def __init__(self, options, title):
             assert options == [
-                "Recent Tool Runs",
+                "Run History",
                 "Saved Tool Results",
                 "Back",
             ]
 
         def show(self):
-            return choice
+            return 0
 
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
     monkeypatch.setattr(menu_utils, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr(main, service_name, service)
+    monkeypatch.setattr(database, "setup_database", Mock())
+    monkeypatch.setattr(main, "run_history_menu", history)
 
     main.query_menu()
 
-    service.assert_called_once_with()
+    history.assert_called_once_with()
 
 
-def test_query_menu_reports_sqlite_error(monkeypatch, capsys):
+@pytest.mark.parametrize("choice", [0, 1])
+def test_saved_views_migrate_legacy_records(tmp_path, monkeypatch, capsys, choice):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "legacy.db"))
+    database.setup_database()
+    with database.connect_db() as conn:
+        conn.execute("DELETE FROM OsintBeastMigrations")
+        conn.execute(
+            "INSERT INTO ToolResults (toolName, queryText, resultText) "
+            "VALUES ('holehe', 'private@example.com', 'private@example.com result')"
+        )
+        conn.execute(
+            "INSERT INTO ToolRuns (toolName, queryText, status, errorText) "
+            "VALUES ('holehe', 'private@example.com', 'failed', 'private@example.com error')"
+        )
+    choices = iter((choice, 6))
+    monkeypatch.setattr(main, "_choose_option", lambda *args: next(choices))
+
+    main.query_menu()
+
+    output = capsys.readouterr().out
+    assert "private@example.com" not in output
+    assert "[redacted]" in output
+
+
+def test_saved_view_does_not_query_if_migration_fails(monkeypatch, capsys):
+    monkeypatch.setattr(main, "_choose_option", lambda *args: 0)
+    monkeypatch.setattr(
+        database, "setup_database", Mock(side_effect=sqlite3.OperationalError("failed"))
+    )
+    history = Mock()
+    monkeypatch.setattr(main, "run_history_menu", history)
+
+    main.query_menu()
+
+    history.assert_not_called()
+    assert "Database initialization failed" in capsys.readouterr().out
+
+
+def test_cli_help_lists_commands_and_input_formats(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main.cli(["--help"])
+
+    assert exc_info.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "check-email" in help_text
+    assert "check-username" in help_text
+    assert "init-db" in help_text
+
+    with pytest.raises(SystemExit) as exc_info:
+        main.cli(["check-email", "--help"])
+
+    assert exc_info.value.code == 0
+    assert "check-email [-h] email" in capsys.readouterr().out
+
+    with pytest.raises(SystemExit) as exc_info:
+        main.cli(["check-username", "--help"])
+
+    assert exc_info.value.code == 0
+    username_help = capsys.readouterr().out
+    assert "ASCII letters" in username_help
+    assert "underscores" in username_help
+    assert "hyphens" in username_help
+
+
+def test_cli_requires_command_arguments(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main.cli(["check-email"])
+
+    assert exc_info.value.code == 2
+    assert "the following arguments are required: email" in capsys.readouterr().err
+
+
+def test_cli_rejects_invalid_email_without_running_tool(monkeypatch, capsys):
+    runner = Mock()
+    monkeypatch.setattr(main, "run_holehe", runner)
+
+    result = main.cli(["check-email", "not-an-email"])
+
+    assert result == 2
+    assert "Input error: A valid email address is required." in capsys.readouterr().out
+    runner.assert_not_called()
+
+
+def test_cli_rejects_invalid_username_with_accepted_format(monkeypatch, capsys):
+    runner = Mock()
+    monkeypatch.setattr(main, "run_sherlock", runner)
+
+    result = main.cli(["check-username", "sherlock", "invalid username"])
+
+    assert result == 2
+    assert (
+        "Use a username of up to 100 letters, digits, dots, underscores or hyphens."
+        in capsys.readouterr().out
+    )
+    runner.assert_not_called()
+
+
+def test_cli_reports_optional_dependency_failure_and_nonzero_status(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "test.db"))
+    database.setup_database()
+
+    def missing_dependency(username):
+        raise RuntimeError(
+            "Maigret is required. Install it with `python -m pip install '.[maigret]'`."
+        )
+
+    monkeypatch.setattr(main, "run_maigret", missing_dependency)
+
+    result = main.cli(["check-username", "maigret", "valid_user"])
+
+    assert result == 1
+    assert (
+        "Maigret could not run: Maigret is required. "
+        "Install it with `python -m pip install '.[maigret]'`."
+    ) in capsys.readouterr().out
+
+
+def test_cli_returns_nonzero_for_database_execution_error(monkeypatch, capsys):
+    monkeypatch.setattr(database, "setup_database", Mock())
     monkeypatch.setattr(
         main,
         "get_recent_tool_runs",
-        Mock(side_effect=sqlite3.OperationalError("database unavailable")),
+        Mock(side_effect=sqlite3.OperationalError("database is locked")),
     )
-    monkeypatch.setattr(main, "_choose_option", lambda options, title: 0)
 
-    main.query_menu()
+    result = main.cli(["query", "runs"])
 
-    assert capsys.readouterr().out == (
-        "Database query failed: database unavailable\n"
-    )
+    assert result == 1
+    assert "Initialize the database and check its permissions." in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("view", ["runs", "results"])
+def test_cli_query_migrates_legacy_records(tmp_path, monkeypatch, capsys, view):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "legacy-cli.db"))
+    database.setup_database()
+    with database.connect_db() as conn:
+        conn.execute("DELETE FROM OsintBeastMigrations")
+        conn.execute(
+            "INSERT INTO ToolResults (toolName, queryText, resultText) "
+            "VALUES ('holehe', 'private@example.com', 'private@example.com result')"
+        )
+        conn.execute(
+            "INSERT INTO ToolRuns (toolName, queryText, status, errorText) "
+            "VALUES ('holehe', 'private@example.com', 'failed', 'private@example.com error')"
+        )
+
+    assert main.cli(["query", view]) == 0
+    output = capsys.readouterr().out
+    assert "private@example.com" not in output
+    assert "[redacted]" in output

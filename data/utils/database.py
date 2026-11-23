@@ -1,10 +1,12 @@
+import json
 import os
 import sqlite3
 import sys
-from contextlib import closing
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, Mapping, Optional
+
+from data.utils.storage import MySQLStorage, SQLiteStorage, Storage, StorageError
 
 # Keep source-checkout paths independent of the current working directory.
 def setup_database_paths(module_file):
@@ -54,87 +56,73 @@ def _user_data_directory():
 
 
 DB_FILE, SCHEMA_DIR, SCHEMA_FILES, INSERTABLE_TABLES = setup_database_paths(__file__)
+MYSQL_SCHEMA_FILES = ("mysql-infoschema.sql", "mysql-toolschema.sql")
+_STORAGE_CACHE: dict[tuple[Any, ...], Storage] = {}
+DATABASE_ERRORS = (sqlite3.Error, StorageError)
 
 
-def connect_db() -> sqlite3.Connection:
-    """Open the SQLite database with foreign-key enforcement enabled."""
-    Path(DB_FILE).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+def _get_storage() -> Storage:
+    database_url = os.environ.get("OSINTBEAST_DATABASE_URL")
+    if database_url:
+        if not database_url.startswith(("mysql://", "mysql+pymysql://")):
+            raise StorageError(
+                "OSINTBEAST_DATABASE_URL must use mysql:// or mysql+pymysql://."
+            )
+        key = ("mysql", database_url, str(SCHEMA_DIR))
+        if key not in _STORAGE_CACHE:
+            _STORAGE_CACHE[key] = MySQLStorage(
+                database_url,
+                SCHEMA_DIR,
+                MYSQL_SCHEMA_FILES,
+                INSERTABLE_TABLES,
+            )
+        return _STORAGE_CACHE[key]
+
+    key = ("sqlite", DB_FILE, str(SCHEMA_DIR), SCHEMA_FILES)
+    if key not in _STORAGE_CACHE:
+        _STORAGE_CACHE[key] = SQLiteStorage(
+            DB_FILE, SCHEMA_DIR, SCHEMA_FILES, INSERTABLE_TABLES
+        )
+    return _STORAGE_CACHE[key]
+
+
+def connect_db():
+    """Open the selected backend's connection for legacy callers."""
+    return _get_storage().connect()
 
 
 def setup_database() -> None:
-    """Create missing schema objects atomically without replacing existing data."""
-    schemas = []
-    for schema_name in SCHEMA_FILES:
-        schema_path = SCHEMA_DIR.joinpath(schema_name)
-        if not schema_path.is_file():
-            raise FileNotFoundError(f"SQLite schema file not found: {schema_path}")
-        schemas.append(schema_path.read_text(encoding="utf-8"))
-
-    with closing(connect_db()) as conn, conn:
-        conn.executescript("BEGIN IMMEDIATE;\n" + "\n".join(schemas))
+    """Create missing schema objects and migrate legacy SQLite records."""
+    _get_storage().setup()
 
 
 def insert_data(table: str, data: Mapping[str, Any]) -> None:
-    """Insert a mapping into a known table using bound SQLite parameters.
-
-    The table allowlist and live column check constrain SQL identifiers; values
-    are always passed separately to SQLite.
-    """
-    if not data:
-        raise ValueError("data must contain at least one column")
-    if not isinstance(table, str) or table not in INSERTABLE_TABLES:
-        raise ValueError(f"Unknown database table: {table}")
-
-    with closing(connect_db()) as conn, conn:
-        valid_columns = {
-            row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')
-        }
-        columns = list(data)
-        if any(
-            not isinstance(column, str) or column not in valid_columns
-            for column in columns
-        ):
-            raise ValueError(f"Unknown column for table {table}")
-
-        quoted_columns = ", ".join(f'"{column}"' for column in columns)
-        placeholders = ", ".join("?" for _ in columns)
-        conn.execute(
-            f'INSERT INTO "{table}" ({quoted_columns}) VALUES ({placeholders})',
-            tuple(data[column] for column in columns),
-        )
+    """Insert a mapping into an allowlisted table using bound values."""
+    _get_storage().insert(table, data)
 
 
-def query_database(query: str, parameters: tuple[Any, ...] = ()) -> list[tuple[Any, ...]]:
+def query_database(
+    query: str, parameters: tuple[Any, ...] = ()
+) -> list[tuple[Any, ...]]:
     """Execute a SQL query and return its rows.
 
     This is retained for the local CLI. Web routes should use specific,
     parameterized repository functions rather than accepting arbitrary SQL.
     """
-    with closing(connect_db()) as conn:
-        cursor = conn.execute(query, parameters)
-        return cursor.fetchall()
+    return _get_storage().query(query, parameters)
 
 
 def save_tool_result(
     tool_name: str, query_text: str, result_text: Optional[str]
 ):
     """Persist a tool run and return its result row ID."""
-    with closing(connect_db()) as conn, conn:
-        cursor = conn.execute(
-            """INSERT INTO ToolResults (toolName, queryText, resultText)
-               VALUES (?, ?, ?)""",
-            (tool_name, query_text, result_text),
-        )
-        return cursor.lastrowid
+    return _get_storage().save_tool_result(tool_name, query_text, result_text)
 
 
 def list_tool_results(
     limit: int = 100, max_result_text_chars: Optional[int] = None
 ) -> list[tuple[Any, ...]]:
-    """Return saved results, optionally truncating result text in the query."""
+    """Return saved results, optionally truncating result text in storage."""
     _validate_list_limit(limit)
     if max_result_text_chars is not None and (
         not isinstance(max_result_text_chars, int)
@@ -142,44 +130,9 @@ def list_tool_results(
         or max_result_text_chars < 1
     ):
         raise ValueError("max_result_text_chars must be a positive integer")
-    result_text = "resultText"
-    parameters: tuple[Any, ...]
     if max_result_text_chars is None:
-        parameters = (limit,)
-    else:
-        truncation_marker = "… [truncated]"
-        result_text = (
-            "CASE WHEN length(resultText) > ? "
-            "THEN substr(resultText, 1, max(0, ? - length(?))) "
-            "|| substr(?, 1, ?) "
-            "ELSE resultText END"
-        )
-        parameters = (
-            max_result_text_chars,
-            max_result_text_chars,
-            truncation_marker,
-            truncation_marker,
-            max_result_text_chars,
-            limit,
-        )
-    with closing(connect_db()) as conn:
-        return conn.execute(
-            f"""SELECT resultID, toolName, queryText, {result_text}, createdAt
-                FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
-            parameters,
-        ).fetchall()
-
-
-def list_tool_runs(limit: int = 100) -> list[tuple[Any, ...]]:
-    """Return recent tool runs, newest first, with a bounded page size."""
-    _validate_list_limit(limit)
-    with closing(connect_db()) as conn:
-        return conn.execute(
-            """SELECT runID, toolName, queryText, status, startedAt, finishedAt,
-                      errorText
-               FROM ToolRuns ORDER BY runID DESC LIMIT ?""",
-            (limit,),
-        ).fetchall()
+        return _get_storage().list_tool_results(limit)
+    return _get_storage().list_tool_results(limit, max_result_text_chars)
 
 
 def _validate_list_limit(limit: int) -> None:
@@ -187,25 +140,118 @@ def _validate_list_limit(limit: int) -> None:
         raise ValueError("limit must be between 1 and 500")
 
 
+def list_tool_runs(
+    limit: int = 20, offset: int = 0, tool_name: Optional[str] = None,
+    status: Optional[str] = None,
+) -> list[tuple[Any, ...]]:
+    """Return a page of structured run history, newest first."""
+    _validate_list_limit(limit)
+    if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
+        raise ValueError("offset must be a non-negative integer")
+    if tool_name is not None and (not isinstance(tool_name, str) or not tool_name):
+        raise ValueError("tool_name must be a non-empty string")
+    if status is not None and status not in {
+        "running", "success", "failed", "timed_out",
+    }:
+        raise ValueError("Invalid run status")
+
+    return _get_storage().query(
+        """SELECT runID, toolName, queryText, status, startedAt, finishedAt,
+                  errorText
+           FROM ToolRuns
+           WHERE (? IS NULL OR toolName = ?)
+             AND (? IS NULL OR status = ?)
+           ORDER BY runID DESC LIMIT ? OFFSET ?""",
+        (tool_name, tool_name, status, status, limit, offset),
+    )
+
+
+def reconcile_stale_tool_runs(older_than_seconds: int = 600) -> int:
+    """Mark runs older than the tool timeout as interrupted after lost outcomes."""
+    if (
+        not isinstance(older_than_seconds, int)
+        or isinstance(older_than_seconds, bool)
+        or older_than_seconds < 1
+    ):
+        raise ValueError("older_than_seconds must be a positive integer")
+    return _get_storage().reconcile_stale_tool_runs(older_than_seconds)
+
+
 def get_tool_run(run_id: int) -> Optional[tuple[Any, ...]]:
     """Return a run and its persisted result or error, if it exists."""
-    with closing(connect_db()) as conn:
-        return conn.execute(
-            """SELECT runID, toolName, queryText, status, resultText, errorText,
-                      startedAt, finishedAt
-               FROM ToolRuns WHERE runID = ?""",
-            (run_id,),
-        ).fetchone()
+    rows = _get_storage().query(
+        """SELECT runID, toolName, queryText, status, resultText, errorText,
+                  startedAt, finishedAt
+           FROM ToolRuns WHERE runID = ?""",
+        (run_id,),
+    )
+    return rows[0] if rows else None
+
+
+def get_tool_result(result_id: int) -> Optional[dict[str, Any]]:
+    """Return one saved result without exposing its original query text."""
+    rows = _get_storage().query(
+        """SELECT resultID, toolName, resultText, createdAt
+           FROM ToolResults WHERE resultID = ?""",
+        (result_id,),
+    )
+    if not rows:
+        return None
+    return dict(zip(("result_id", "tool", "result", "created_at"), rows[0]))
+
+
+def export_tool_runs_json(
+    run_ids: list[int], include_sensitive: bool = False,
+) -> str:
+    """Serialize selected run records as JSON, redacting sensitive text by default."""
+    if not run_ids or len(run_ids) > 500:
+        raise ValueError("Select between 1 and 500 runs")
+    if any(
+        not isinstance(run_id, int) or isinstance(run_id, bool) or run_id < 1
+        for run_id in run_ids
+    ):
+        raise ValueError("run_ids must contain positive integers")
+    if len(set(run_ids)) != len(run_ids):
+        raise ValueError("run_ids must not contain duplicates")
+
+    placeholders = ", ".join("?" for _ in run_ids)
+    rows = _get_storage().query(
+        f"""SELECT runID, toolName, queryText, status, startedAt, finishedAt,
+                   resultText, errorText
+            FROM ToolRuns WHERE runID IN ({placeholders})""",
+        tuple(run_ids),
+    )
+    by_id = {row[0]: row for row in rows}
+    if len(by_id) != len(run_ids):
+        raise ValueError("One or more selected runs do not exist")
+
+    records = []
+    for run_id in run_ids:
+        row = by_id[run_id]
+        sensitive_values = row[2], row[6], row[7]
+        if not include_sensitive:
+            sensitive_values = tuple(
+                "[REDACTED]" if value is not None else None
+                for value in sensitive_values
+            )
+        records.append(
+            {
+                "run_id": row[0],
+                "tool": row[1],
+                "input": sensitive_values[0],
+                "status": row[3],
+                "started_at": row[4],
+                "finished_at": row[5],
+                "result": sensitive_values[1],
+                "error": sensitive_values[2],
+            }
+        )
+    return json.dumps(records, ensure_ascii=False, indent=2)
 
 
 def start_tool_run(tool_name: str, query_text: str):
     """Create a running record before starting an external check."""
-    with closing(connect_db()) as conn, conn:
-        cursor = conn.execute(
-            "INSERT INTO ToolRuns (toolName, queryText, status) VALUES (?, ?, 'running')",
-            (tool_name, query_text),
-        )
-        return cursor.lastrowid
+    return _get_storage().start_tool_run(tool_name, query_text)
 
 
 def finish_tool_run(
@@ -219,17 +265,21 @@ def finish_tool_run(
         status != "success" and (error_text is None or result_text is not None)
     ):
         raise ValueError("Success requires a result; failures require an error.")
-    with closing(connect_db()) as conn, conn:
-        cursor = conn.execute(
-            """UPDATE ToolRuns SET status = ?, resultText = ?, errorText = ?,
-               finishedAt = CURRENT_TIMESTAMP WHERE runID = ? AND status = 'running'""",
-            (status, result_text, error_text, run_id),
+    _get_storage().finish_tool_run(run_id, status, result_text, error_text)
+
+
+def get_tool_run_status(run_id: int) -> Optional[dict[str, Any]]:
+    """Return non-sensitive status fields for one run."""
+    rows = _get_storage().query(
+        """SELECT runID, toolName, status, startedAt, finishedAt
+           FROM ToolRuns WHERE runID = ?""",
+        (run_id,),
+    )
+    if not rows:
+        return None
+    return dict(
+        zip(
+            ("run_id", "tool", "status", "started_at", "finished_at"),
+            rows[0],
         )
-        if cursor.rowcount != 1:
-            raise ValueError("Run does not exist or is already finished.")
-        if status == "success":
-            conn.execute(
-                """INSERT INTO ToolResults (toolName, queryText, resultText)
-                   SELECT toolName, queryText, resultText FROM ToolRuns WHERE runID = ?""",
-                (run_id,),
-            )
+    )

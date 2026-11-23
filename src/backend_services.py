@@ -44,9 +44,11 @@ def get_recent_tool_runs(limit: int = 20) -> list[RecentToolRun]:
 
 def get_saved_tool_results(limit: int = 20) -> list[SavedToolResult]:
     """Return a bounded page of saved results with capped output text."""
-    if not isinstance(limit, int) or isinstance(limit, bool):
-        raise ValueError("limit must be between 1 and 20")
-    if not 1 <= limit <= MAX_SAVED_RESULT_PAGE_SIZE:
+    if (
+        not isinstance(limit, int)
+        or isinstance(limit, bool)
+        or not 1 <= limit <= MAX_SAVED_RESULT_PAGE_SIZE
+    ):
         raise ValueError("limit must be between 1 and 20")
     rows = _list_tool_results(
         limit, max_result_text_chars=MAX_SAVED_RESULT_TEXT_CHARS
