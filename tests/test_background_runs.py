@@ -294,6 +294,25 @@ def test_worker_redacts_sensitive_output_and_suppresses_console_output(
     connection.close.assert_called_once()
 
 
+def test_holehe_worker_starts_watchdog_and_executes_once(monkeypatch):
+    sensitive_value = "person@example.com"
+    runner = Mock(return_value={"output": f"Found {sensitive_value}"})
+    watchdog = Mock()
+    parent = SimpleNamespace(sentinel=object())
+    if os.name == "posix":
+        monkeypatch.setattr(os, "setsid", lambda: None)
+    monkeypatch.setattr(background_runs.multiprocessing, "parent_process", lambda: parent)
+    monkeypatch.setattr(background_runs.threading, "Thread", Mock(return_value=watchdog))
+    monkeypatch.setitem(background_runs._TOOLS, "holehe", (lambda value: value, runner))
+    connection = Mock()
+
+    background_runs._worker(connection, "holehe", sensitive_value, 1024, deadline=123)
+
+    watchdog.start.assert_called_once_with()
+    runner.assert_called_once_with(sensitive_value)
+    connection.send_bytes.assert_called_once_with(b"SFound [redacted]")
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
