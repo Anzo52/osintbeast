@@ -270,12 +270,18 @@ def test_holehe_result_uses_initialized_database(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "results.db"))
     database.setup_database()
     holehe_integration.save_tool_result(
-        "holehe", "person@example.com", "output for person@example.com"
+        "holehe",
+        "person@example.com",
+        "output for person@example.com and person@example.com.invalid",
     )
 
     assert database.query_database(
         "SELECT toolName, queryText, resultText FROM ToolResults"
-    ) == [("holehe", "[redacted]", "output for [redacted]")]
+    ) == [(
+        "holehe",
+        "[redacted]",
+        "output for [redacted] and person@example.com.invalid",
+    )]
 
 
 def test_holehe_result_redacts_partially_encoded_input(tmp_path, monkeypatch):

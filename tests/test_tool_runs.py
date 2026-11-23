@@ -575,8 +575,7 @@ def test_execute_tool_run_with_id_redacts_sensitive_values(initialized_db):
     )
     assert database.query_database(
         "SELECT queryText, resultText FROM ToolResults"
-    ) == [("[redacted]", "Found [redacted]")]
-
+    ) == [("[redacted]", "Found [redacted]") ]
 
 @pytest.mark.parametrize(
     ("menu", "prompt", "value"),
