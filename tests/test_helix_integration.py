@@ -22,7 +22,7 @@ def test_validate_username_normalizes_accepted_input(username, expected):
 
 @pytest.mark.parametrize(
     "username",
-    ["", "  ", "@", "user name", "a" * 51, "../name", None],
+    ["", "  ", "@", "@@user", " @@@user ", "user name", "a" * 51, "../name", None],
 )
 def test_validate_username_rejects_invalid_input(username):
     with pytest.raises(ValueError):

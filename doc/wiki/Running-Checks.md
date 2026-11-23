@@ -47,8 +47,9 @@ The CLI validates input before recording a run and uses a non-echoing prompt.
 Holehe, Maigret, Helix, and Sherlock receive sensitive input through their
 in-process Python APIs, not process arguments. Their run records use a
 `[redacted]` query; direct and URL-encoded occurrences of the input are also
-redacted from saved and displayed results and errors. A `running` record can
-remain after interruption or a database-write failure. Successful outputs are
+redacted from saved and displayed results and errors. Ctrl+C during a check marks
+the run as failed before exiting. A `running` record can remain after abrupt
+termination or a database-write failure. Successful outputs are
 also saved to the existing `ToolResults` table. Existing `ToolResults` rows
 are preserved but do not gain historical run statuses.
 

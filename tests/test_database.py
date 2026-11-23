@@ -324,16 +324,14 @@ def test_database_path_override_is_shared_across_modules(tmp_path):
     assert (tmp_path / "custom.db").is_file()
 
 
-def test_cli_reports_initialization_failure(monkeypatch, capsys):
+def test_initialization_failure_propagates(monkeypatch):
     def fail():
         raise sqlite3.OperationalError("unable to open database file")
 
     monkeypatch.setattr(init_db, "setup_database", fail)
-    init_db.init_db()
+    with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
+        init_db.init_db()
 
-    assert capsys.readouterr().out == (
-        "Database initialization failed: unable to open database file\n"
-    )
 
 
 def test_insert_query_and_save_tool_result(tmp_path, monkeypatch):

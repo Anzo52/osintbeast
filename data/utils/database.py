@@ -106,8 +106,8 @@ def query_database(
 ) -> list[tuple[Any, ...]]:
     """Execute a SQL query and return its rows.
 
-    This is retained for the local CLI. Web routes should use specific,
-    parameterized repository functions rather than accepting arbitrary SQL.
+    Web routes should use specific, parameterized repository functions rather
+    than accepting arbitrary SQL.
     """
     return _get_storage().query(query, parameters)
 
@@ -175,6 +175,11 @@ def reconcile_stale_tool_runs(older_than_seconds: int = 600) -> int:
     ):
         raise ValueError("older_than_seconds must be a positive integer")
     return _get_storage().reconcile_stale_tool_runs(older_than_seconds)
+
+
+def _validate_list_limit(limit: int) -> None:
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
+        raise ValueError("limit must be between 1 and 500")
 
 
 def get_tool_run(run_id: int) -> Optional[tuple[Any, ...]]:

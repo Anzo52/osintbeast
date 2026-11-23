@@ -39,7 +39,7 @@ def main_menu():
 
 def menu_actions():
     actions = {
-        0: init_db,
+        0: initialize_database,
         1: list_supported_tools,
         2: lambda: _download_tool_menu(download),
         3: lambda: _install_tool_menu(install),
@@ -66,6 +66,13 @@ def menu_ops():
         "Exit",
     ]
     return options
+
+
+def initialize_database():
+    try:
+        init_db()
+    except (OSError, UnicodeError, *database.DATABASE_ERRORS) as exc:
+        print(f"Database initialization failed: {exc}")
 
 
 def list_supported_tools():

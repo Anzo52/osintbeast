@@ -48,6 +48,26 @@ def test_failed_runs_are_recorded(initialized_db, tool, error, status):
     assert database.list_tool_results() == []
 
 
+@pytest.mark.parametrize("existing_run", [False, True])
+@pytest.mark.parametrize("sensitive_input", [False, True])
+def test_interrupted_runs_are_recorded(initialized_db, existing_run, sensitive_input):
+    run_id = database.start_tool_run("helix", "[redacted]") if existing_run else None
+
+    def interrupt(_):
+        raise KeyboardInterrupt("private-user")
+
+    with pytest.raises(KeyboardInterrupt):
+        tool_runs.execute_tool_run(
+            "helix", "private-user", interrupt, run_id=run_id,
+            sensitive_input=sensitive_input,
+        )
+
+    assert database.query_database(
+        "SELECT status, resultText, errorText, finishedAt IS NOT NULL FROM ToolRuns"
+    ) == [("failed", None, "Tool run interrupted.", 1)]
+    assert database.list_tool_results() == []
+
+
 @pytest.mark.parametrize("tool", ["holehe", "maigret", "helix", "sherlock"])
 def test_success_run_preserves_legacy_results(initialized_db, tool):
     assert tool_runs.execute_tool_run(
@@ -189,6 +209,7 @@ def test_reinitializing_legacy_database_redacts_results(tmp_path, monkeypatch):
     [
         (main.run_holehe_check, "bad email"),
         (main.run_maigret_check, "bad username"),
+        (main.run_helix_check, "@@user"),
         (main.run_sherlock_check, "bad username"),
     ],
 )
@@ -196,6 +217,36 @@ def test_invalid_input_is_not_recorded(initialized_db, capsys, function, invalid
     function(invalid)
     assert "Input error:" in capsys.readouterr().out
     assert database.query_database("SELECT * FROM ToolRuns") == []
+
+
+@pytest.mark.parametrize(
+    ("choice", "identifier", "target", "result"),
+    [
+        (4, "-user@example.com", "run_holehe", {"output": "output"}),
+        (6, "-user", "run_maigret", "output"),
+        (7, "-user", "run_helix", "output"),
+        (8, "-user", "run_sherlock", "output"),
+    ],
+)
+def test_menu_accepts_leading_hyphen_identifiers(
+    initialized_db, monkeypatch, choice, identifier, target, result
+):
+    class FakeMenu:
+        def __init__(self, options, title):
+            pass
+
+        def show(self):
+            return choice
+
+    runner = Mock(return_value=result)
+    monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
+    monkeypatch.setattr(checkers, "getpass", lambda prompt: identifier)
+    monkeypatch.setattr(main, target, runner)
+
+    main.main_menu()
+
+    runner.assert_called_once_with(identifier)
+    assert database.query_database("SELECT status FROM ToolRuns") == [("success",)]
 
 
 @pytest.mark.parametrize(
