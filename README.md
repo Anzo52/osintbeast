@@ -305,9 +305,9 @@ status and saved output from `GET /api/runs/<run_id>` and
 ### Background run service
 
 `background_runs.BackgroundRuns` is a shared service for web handlers, not a
-web server. It is not yet connected to the browser interface below. Initialize
-the database first and create one service per application
-process. `submit(tool_name, query)` validates the input, records a run and
+web server. The browser interface below uses one instance. Initialize the
+database first and create one service per application process.
+`submit(tool_name, query)` validates the input, records a run and
 returns its integer ID without waiting for tool execution; `status(run_id)`
 returns the persisted record (or `None`), and `cancel(run_id)` requests
 cancellation and returns whether the run was active. Poll status for the
@@ -321,9 +321,10 @@ all slots are occupied. Execution occurs in child processes, which are stopped
 on timeout or cancellation; tool failures and unexpected worker exits are
 recorded as failures. Call `close()` during orderly application shutdown.
 If saving an outcome fails, the service retains it in memory and keeps its
-capacity slot reserved. Calling `status(run_id)` retries the write and raises
-`RuntimeError` if it still cannot be saved; retry after restoring database
-access. Pending outcomes are lost if the application process exits.
+capacity slot reserved while retrying the write independently of status
+requests. Calling `status(run_id)` also retries immediately and raises
+`RuntimeError` if the outcome still cannot be saved. Pending outcomes are lost
+if the application process exits.
 
 These limits apply per service instance, not across web server processes or
 hosts. Use a single application process or an external coordinator to enforce
@@ -347,7 +348,10 @@ supports authorized runs with Holehe, Maigret, Helix, and Sherlock; tools in the
 registry without a runnable integration are not offered. Confirm authorization
 before each run. Runs execute through the existing validators, integrations,
 and persistence service, and their status and saved output are available in
-the recent-runs view. Holehe input is redacted in stored records and output.
+the recent-runs view. Submissions accept an `Idempotency-Key`; retries with the
+same key and input return the existing run, while reusing a key for a different
+run returns HTTP 409. Keys are retained for the lifetime of the service.
+Holehe input is redacted in stored records and output.
 Keep the interface bound to loopback: it has no login or
 remote-access authentication, and its database and results may contain
 sensitive information.
