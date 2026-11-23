@@ -1,23 +1,30 @@
 # Local data retention and privacy
 
-OSINT Beast uses a local SQLite database. It does not encrypt, redact, or
-automatically expire database contents. Treat the database and any copies as
-containing sensitive information.
+OSINT Beast uses a local SQLite database. It does not encrypt or automatically
+expire database contents. Tool-run services redact configured sensitive
+inputs and matching output or errors before storage; the CLI enables this for
+all checks, while API and browser runs enable it for Holehe email checks.
+Direct database writes may still store values as supplied. Treat the database
+and any copies as containing sensitive information.
 
 ## What is stored
 
 Before a validated check starts, OSINT Beast records its tool name and input in
 `ToolRuns`. When the check finishes, the row also contains its status, UTC
 timestamps, and either the result or an error message. A process interruption
-or database-write failure can leave a row with status `running`. Successful
+or database-write failure can leave a row with status `running`; browser
+run-history requests mark runs older than ten minutes as failed when their
+outcome could not be persisted. Successful
 results are stored a second time in `ToolResults`, including the tool name,
 input, output, and creation timestamp. Failed and timed-out checks store their
 error in `ToolRuns`, not `ToolResults`. Other structured records saved through
 the database are retained there as well.
 
-Inputs, results, and errors are stored as plain text. Output is displayed in
-the terminal and database views. OSINT Beast does not provide a built-in
-export, backup, redaction, or cleanup feature.
+Values remaining after any configured redaction are stored as plain text.
+Output is displayed in the terminal and database views. The saved-results
+database view displays up to 20 rows and truncates displayed result text at
+16,384 characters; this does not change the stored output. Direct database
+writes can bypass application redaction.
 
 ## Database location and retention
 

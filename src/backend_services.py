@@ -1,77 +1,56 @@
 """Narrow application services for backend and future web-facing callers."""
 
-import sqlite3
-import threading
+from typing import NamedTuple
 
-import data.utils.database as database
 from data.utils.database import (
     list_tool_results as _list_tool_results,
     list_tool_runs as _list_tool_runs,
 )
-from tool_runs import execute_tool_run
 
-__all__ = ("get_recent_tool_runs", "get_saved_tool_results", "BackgroundRunService")
-
-
-class RunCapacityError(Exception):
-    """The background run limit has been reached."""
+MAX_SAVED_RESULT_PAGE_SIZE = 20
+MAX_SAVED_RESULT_TEXT_CHARS = 16_384
 
 
-class RunStartError(Exception):
-    """A background worker could not be started."""
+class RecentToolRun(NamedTuple):
+    run_id: int
+    tool_name: str
+    query_text: str
+    status: str
+    started_at: str
+    finished_at: str | None
+    error_text: str | None
 
 
-class BackgroundRunService:
-    """Submit runs without exceeding a fixed number of background workers."""
-
-    def __init__(self, max_workers=2):
-        if max_workers < 1:
-            raise ValueError("max_workers must be positive")
-        self._slots = threading.BoundedSemaphore(max_workers)
-
-    def submit(self, tool_name, query_text, runner):
-        if not self._slots.acquire(blocking=False):
-            raise RunCapacityError("Too many runs are active. Try again later.")
-        try:
-            run_id = database.start_tool_run(tool_name, query_text)
-            try:
-                thread = threading.Thread(
-                    target=self._run,
-                    args=(run_id, tool_name, query_text, runner),
-                    daemon=True,
-                )
-                thread.start()
-            except Exception as exc:
-                database.finish_tool_run(
-                    run_id, "failed", error_text="The tool run could not be started."
-                )
-                raise RunStartError("The tool run could not be started.") from exc
-        except Exception:
-            self._slots.release()
-            raise
-        return run_id
-
-    def _run(self, run_id, tool_name, query_text, runner):
-        try:
-            execute_tool_run(tool_name, query_text, runner, run_id=run_id)
-        except Exception as exc:
-            try:
-                database.finish_tool_run(
-                    run_id,
-                    "failed",
-                    error_text=str(exc) or "The tool run could not be completed.",
-                )
-            except (sqlite3.Error, ValueError):
-                pass
-        finally:
-            self._slots.release()
+class SavedToolResult(NamedTuple):
+    result_id: int
+    tool_name: str
+    query_text: str
+    result_text: str | None
+    created_at: str
 
 
-def get_recent_tool_runs(limit: int = 20):
-    """Return a bounded page of recent tool runs."""
-    return _list_tool_runs(limit)
+__all__ = (
+    "RecentToolRun",
+    "SavedToolResult",
+    "get_recent_tool_runs",
+    "get_saved_tool_results",
+)
 
 
-def get_saved_tool_results(limit: int = 20):
-    """Return a bounded page of saved tool results."""
-    return _list_tool_results(limit)
+def get_recent_tool_runs(limit: int = 20) -> list[RecentToolRun]:
+    """Return a bounded page of named recent tool runs."""
+    return [RecentToolRun(*row) for row in _list_tool_runs(limit)]
+
+
+def get_saved_tool_results(limit: int = 20) -> list[SavedToolResult]:
+    """Return a bounded page of saved results with capped output text."""
+    if (
+        not isinstance(limit, int)
+        or isinstance(limit, bool)
+        or not 1 <= limit <= MAX_SAVED_RESULT_PAGE_SIZE
+    ):
+        raise ValueError("limit must be between 1 and 20")
+    rows = _list_tool_results(
+        limit, max_result_text_chars=MAX_SAVED_RESULT_TEXT_CHARS
+    )
+    return [SavedToolResult(*row) for row in rows]
