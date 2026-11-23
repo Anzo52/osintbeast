@@ -1,4 +1,5 @@
 import os
+import threading
 import time
 from unittest.mock import Mock
 
@@ -152,6 +153,72 @@ def test_persistence_failure_is_reported_and_retried(service, monkeypatch):
     assert service.status(run_id)["status"] == "success"
     assert len(database.list_tool_results()) == 1
     assert wait_for_run(service, service.submit("maigret", "another"))["status"] == "success"
+
+
+def test_thread_start_and_persistence_failure_exposes_run_id(service, monkeypatch):
+    with monkeypatch.context() as patch:
+        patch.setattr(background_runs.threading, "Thread", Mock(side_effect=RuntimeError("unavailable")))
+        patch.setattr(database, "finish_tool_run", Mock(side_effect=OSError("unavailable")))
+        with pytest.raises(background_runs.StartupPersistenceError) as error:
+            service.submit("maigret", "user")
+        run_id = error.value.run_id
+        assert database.get_tool_run(run_id)[3] == "running"
+        with pytest.raises(background_runs.CapacityError):
+            service.submit("maigret", "another")
+    assert service.status(run_id)["errorText"] == "Could not start background worker."
+    assert wait_for_run(service, service.submit("maigret", "another"))["status"] == "success"
+
+
+def test_reconciled_pending_failure_releases_capacity(service, monkeypatch):
+    with monkeypatch.context() as patch:
+        patch.setattr(background_runs.threading, "Thread", Mock(side_effect=RuntimeError("unavailable")))
+        patch.setattr(database, "finish_tool_run", Mock(side_effect=OSError("unavailable")))
+        with pytest.raises(background_runs.StartupPersistenceError) as error:
+            service.submit("maigret", "user")
+    run_id = error.value.run_id
+    with database.connect_db() as connection:
+        connection.execute(
+            "UPDATE ToolRuns SET startedAt = '2000-01-01 00:00:00' WHERE runID = ?",
+            (run_id,),
+        )
+    assert database.reconcile_stale_tool_runs(1) == 1
+    assert service.status(run_id)["errorText"] == "Run outcome could not be persisted."
+    assert wait_for_run(service, service.submit("maigret", "another"))["status"] == "success"
+
+
+@pytest.mark.parametrize("outcome", ["result", "timeout", "crash"])
+def test_terminal_outcomes_survive_late_cancellation(service, monkeypatch, outcome):
+    run_id = database.start_tool_run("maigret", "user")
+    cancel, completed = threading.Event(), threading.Event()
+    service._jobs[run_id] = (cancel, Mock(), completed)
+    receiver, sender, process = Mock(), Mock(), Mock()
+    process.pid = 1
+    process.is_alive.return_value = outcome != "crash"
+    receiver.poll.return_value = outcome in ("result", "crash")
+    if outcome == "result":
+        def receive(*args):
+            assert service.cancel(run_id)
+            return b"Soutput"
+        receiver.recv_bytes.side_effect = receive
+    elif outcome == "crash":
+        receiver.recv_bytes.side_effect = EOFError()
+    monkeypatch.setattr(service._context, "Pipe", lambda **kwargs: (receiver, sender))
+    monkeypatch.setattr(service._context, "Process", lambda **kwargs: process)
+    monkeypatch.setattr(background_runs.time, "monotonic", Mock(side_effect=[0, 2]))
+
+    def stop(_):
+        if outcome == "timeout":
+            assert not service.cancel(run_id)
+
+    monkeypatch.setattr(background_runs, "_stop_process", stop)
+    service._supervise(run_id, "maigret", "user", cancel, completed)
+    run = service.status(run_id)
+    assert run["status"] == {"result": "success", "timeout": "timed_out", "crash": "failed"}[outcome]
+    assert run["resultText" if outcome == "result" else "errorText"] == {
+        "result": "output",
+        "timeout": "Background run exceeded its time limit.",
+        "crash": "Background worker failed.",
+    }[outcome]
 
 
 @pytest.mark.parametrize(

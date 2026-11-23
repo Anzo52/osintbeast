@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 import data.utils.database as database
-from background_runs import BackgroundRuns, CapacityError
+from background_runs import BackgroundRuns, CapacityError, StartupPersistenceError
 from helix_integration import run_helix, validate_username as validate_helix_username
 from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username
@@ -335,6 +335,11 @@ class WebHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(exc)})
         except CapacityError:
             self._send_json(503, {"error": "Background run capacity reached. Try again later."})
+        except StartupPersistenceError as exc:
+            self._send_json(503, {
+                "error": "Could not persist the run outcome. Retry status later.",
+                "id": exc.run_id,
+            })
         except (RuntimeError, OSError):
             self._send_json(503, {"error": "The tool run could not be started. Try again later."})
         except database.DATABASE_ERRORS:
