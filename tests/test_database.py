@@ -353,6 +353,19 @@ def test_insert_query_and_save_tool_result(tmp_path, monkeypatch):
     )
 
 
+def test_query_database_commits_state_changes(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "query-commit.db"))
+    database.setup_database()
+
+    assert database.query_database(
+        "INSERT INTO Platforms (platform) VALUES (?)", ("committed",)
+    ) == []
+
+    assert database.query_database(
+        "SELECT platform FROM Platforms WHERE platform = ?", ("committed",)
+    ) == [("committed",)]
+
+
 def test_list_tool_results_orders_newest_first_and_enforces_limit(
     tmp_path, monkeypatch
 ):

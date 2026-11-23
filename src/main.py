@@ -386,6 +386,13 @@ def _build_parser():
 
 def cli(argv=None):
     parser = _build_parser()
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv and argv[0] == "check-email" and len(argv) > 1:
+        if argv[1].startswith("-") and argv[1] not in ("--", "-h", "--help"):
+            argv.insert(1, "--")
+    elif argv and argv[0] == "check-username" and len(argv) > 2:
+        if argv[2].startswith("-") and argv[2] not in ("--", "-h", "--help"):
+            argv.insert(2, "--")
     args = parser.parse_args(argv)
     if args.command is None:
         while True:
