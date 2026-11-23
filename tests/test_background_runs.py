@@ -145,10 +145,14 @@ def test_process_start_failure_is_recorded(service, monkeypatch):
     assert (run["status"], run["errorText"]) == ("failed", "Background worker failed.")
 
 
-def test_thread_start_and_persistence_failure_is_retried(service, monkeypatch):
+@pytest.mark.parametrize("failure_point", ["constructor", "start"])
+def test_thread_start_and_persistence_failure_is_retried(service, monkeypatch, failure_point):
     finish = database.finish_tool_run
     monkeypatch.setattr(database, "finish_tool_run", Mock(side_effect=OSError("unavailable")))
-    monkeypatch.setattr(background_runs.threading.Thread, "start", Mock(side_effect=RuntimeError("start")))
+    if failure_point == "constructor":
+        monkeypatch.setattr(background_runs.threading, "Thread", Mock(side_effect=RuntimeError("start")))
+    else:
+        monkeypatch.setattr(background_runs.threading.Thread, "start", Mock(side_effect=RuntimeError("start")))
     with pytest.raises(RuntimeError, match="start"):
         service.submit("maigret", "user")
     run_id = database.list_tool_runs()[0][0]
@@ -219,6 +223,22 @@ def test_worker_exits_when_parent_dies():
         sender.close()
 
 
+def test_thread_start_failure_releases_capacity(service, monkeypatch):
+    with monkeypatch.context() as patch:
+        patch.setattr(background_runs.threading, "Thread", Mock(side_effect=RuntimeError("unavailable")))
+        with pytest.raises(RuntimeError):
+            service.submit("maigret", "user")
+    assert wait_for_run(service, service.submit("maigret", "user"))["status"] == "success"
+
+
+def test_database_start_failure_releases_capacity(service, monkeypatch):
+    with monkeypatch.context() as patch:
+        patch.setattr(background_runs, "start_tool_run", Mock(side_effect=OSError("unavailable")))
+        with pytest.raises(OSError):
+            service.submit("maigret", "user")
+    assert wait_for_run(service, service.submit("maigret", "user"))["status"] == "success"
+
+
 def test_persistence_failure_is_reported_and_retried(service, monkeypatch):
     finish = database.finish_tool_run
     monkeypatch.setattr(database, "finish_tool_run", Mock(side_effect=OSError("database unavailable")))
@@ -262,6 +282,18 @@ def test_worker_wraps_mocked_execution(monkeypatch, result, limit, prefix):
     assert len(payload) <= limit + 1
     runner.assert_called_once_with("user")
     connection.close.assert_called_once()
+
+
+def test_worker_sanitizes_unexpected_exception(monkeypatch):
+    if os.name == "posix":
+        monkeypatch.setattr(os, "setsid", lambda: None)
+    monkeypatch.setitem(
+        background_runs._TOOLS, "maigret",
+        (lambda value: value, Mock(side_effect=Exception("private exception"))),
+    )
+    connection = Mock()
+    background_runs._worker(connection, "maigret", "user", 1024)
+    assert connection.send_bytes.call_args.args[0] == b"Fmaigret failed unexpectedly (Exception)."
 
 
 def test_worker_redacts_sensitive_output_and_suppresses_console_output(

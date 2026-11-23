@@ -92,7 +92,10 @@ def _worker(connection, tool_name, query, max_output_bytes, deadline=None):
         connection.send_bytes(b"S" + payload)
     except BaseException as exc:
         status = b"T" if isinstance(exc, TimeoutError) else b"F"
-        message = str(exc) or f"Worker failed ({type(exc).__name__})."
+        if isinstance(exc, (TimeoutError, RuntimeError, OSError, ImportError, ValueError)):
+            message = str(exc) or f"Worker failed ({type(exc).__name__})."
+        else:
+            message = f"{tool_name} failed unexpectedly ({type(exc).__name__})."
         if tool_name == "holehe":
             message = redact_sensitive_output(message, query)
         try:
@@ -143,15 +146,15 @@ class BackgroundRuns:
             )
             cancel = threading.Event()
             completed = threading.Event()
-            thread = threading.Thread(
-                target=self._supervise, args=(run_id, tool_name, query, cancel, completed),
-                name=f"tool-run-{run_id}", daemon=True,
-            )
-            self._jobs[run_id] = (cancel, thread, completed)
             try:
+                thread = threading.Thread(
+                    target=self._supervise, args=(run_id, tool_name, query, cancel, completed),
+                    name=f"tool-run-{run_id}", daemon=True,
+                )
+                self._jobs[run_id] = (cancel, thread, completed)
                 thread.start()
             except BaseException:
-                del self._jobs[run_id]
+                self._jobs.pop(run_id, None)
                 self._pending[run_id] = ("failed", "Could not start background worker.")
                 try:
                     self._persist(run_id, *self._pending[run_id])

@@ -2,20 +2,18 @@
 
 import json
 import ipaddress
-import logging
-import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 import data.utils.database as database
+from background_runs import BackgroundRuns, CapacityError
 from helix_integration import run_helix, validate_username as validate_helix_username
 from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username
 from sherlock_integration import run_sherlock, validate_username as validate_sherlock_username
 from tool_registry import get_tool_metadata
-from tool_runs import UnexpectedToolError, execute_tool_run, start_tool_run
 
-_LOG = logging.getLogger(__name__)
+RUN_SERVICE = BackgroundRuns()
 RUNNABLE_TOOLS = {
     "holehe": ("email", validate_email, lambda value: run_holehe(value)["output"]),
     "maigret": ("username", validate_username, run_maigret),
@@ -162,32 +160,6 @@ INDEX_HTML = """<!doctype html>
 """
 
 
-def _run_in_background(run_id, tool_name, query_text, runner):
-    try:
-        execute_tool_run(
-            tool_name,
-            query_text,
-            runner,
-            run_id=run_id,
-            sensitive_input=tool_name == "holehe",
-        )
-    except UnexpectedToolError:
-        _LOG.exception("Unexpected tool failure for run %s", run_id)
-    except Exception:
-        try:
-            database.finish_tool_run(
-                run_id,
-                "failed",
-                error_text="The run outcome could not be persisted.",
-            )
-        except (*database.DATABASE_ERRORS, ValueError) as exc:
-            _LOG.error(
-                "Could not persist completion for run %s (%s)",
-                run_id,
-                type(exc).__name__,
-            )
-
-
 class WebHandler(BaseHTTPRequestHandler):
     server_version = "OSINTBeast"
 
@@ -298,11 +270,12 @@ class WebHandler(BaseHTTPRequestHandler):
                     [self._run_payload(row) for row in database.list_tool_runs(limit)],
                 )
             elif path.path.startswith("/api/runs/"):
-                database.reconcile_stale_tool_runs()
                 run_id_text = path.path.removeprefix("/api/runs/")
                 if not run_id_text.isdecimal():
                     self._send_json(404, {"error": "Run not found."})
                     return
+                RUN_SERVICE.status(int(run_id_text))
+                database.reconcile_stale_tool_runs()
                 row = database.get_tool_run(int(run_id_text))
                 if row is None:
                     self._send_json(404, {"error": "Run not found."})
@@ -314,6 +287,8 @@ class WebHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(exc)})
         except database.DATABASE_ERRORS:
             self._send_json(500, {"error": "Could not access the run database."})
+        except RuntimeError:
+            self._send_json(503, {"error": "Could not persist the run outcome. Try again later."})
 
     def do_POST(self):
         if not self._has_local_host():
@@ -344,26 +319,9 @@ class WebHandler(BaseHTTPRequestHandler):
             if tool is None:
                 self._send_json(400, {"error": "Choose a supported registered tool."})
                 return
-            input_kind, validator, runner = tool
+            input_kind, validator, _ = tool
             query_text = validator(payload.get("input"))
-            run_id = start_tool_run(
-                tool_name, query_text, sensitive_input=tool_name == "holehe"
-            )
-            thread = threading.Thread(
-                target=_run_in_background,
-                args=(run_id, tool_name, query_text, runner),
-                daemon=True,
-            )
-            try:
-                thread.start()
-            except RuntimeError:
-                database.finish_tool_run(
-                    run_id,
-                    "failed",
-                    error_text="The tool run could not be started.",
-                )
-                self._send_json(503, {"error": "The tool run could not be started."})
-                return
+            run_id = RUN_SERVICE.submit(tool_name, query_text)
             self._send_json(202, {
                 "id": run_id,
                 "tool": tool_name,
@@ -375,6 +333,10 @@ class WebHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Request body must contain valid JSON."})
         except ValueError as exc:
             self._send_json(400, {"error": str(exc)})
+        except CapacityError:
+            self._send_json(503, {"error": "Background run capacity reached. Try again later."})
+        except (RuntimeError, OSError):
+            self._send_json(503, {"error": "The tool run could not be started. Try again later."})
         except database.DATABASE_ERRORS:
             self._send_json(500, {"error": "Could not access the run database."})
 
@@ -394,6 +356,7 @@ def serve(host="127.0.0.1", port=8000):
         pass
     finally:
         server.server_close()
+        RUN_SERVICE.close()
 
 
 if __name__ == "__main__":
