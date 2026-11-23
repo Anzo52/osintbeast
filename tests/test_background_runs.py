@@ -95,6 +95,17 @@ def test_background_outcomes_are_persisted(service, query, status, text):
     assert len(database.list_tool_results()) == (1 if status == "success" else 0)
 
 
+def test_background_runs_redact_sensitive_input_and_output(service):
+    sensitive_value = "person@example.com"
+    run = wait_for_run(service, service.submit("holehe", sensitive_value))
+
+    assert run["queryText"] == "[redacted]"
+    assert run["resultText"] == "output"
+    assert database.list_tool_results()[0][2:4] == (
+        "[redacted]", "output"
+    )
+
+
 def test_capacity_rejection_and_cancellation(service):
     start = time.monotonic()
     run_id = service.submit("maigret", "slow")
@@ -250,6 +261,36 @@ def test_worker_wraps_mocked_execution(monkeypatch, result, limit, prefix):
     assert payload.startswith(prefix)
     assert len(payload) <= limit + 1
     runner.assert_called_once_with("user")
+    connection.close.assert_called_once()
+
+
+def test_worker_redacts_sensitive_output_and_suppresses_console_output(
+    monkeypatch, capsys
+):
+    sensitive_value = "person@example.com"
+
+    def run(query):
+        print(f"Starting lookup for {query}")
+        return f"Found {query}"
+
+    if os.name == "posix":
+        monkeypatch.setattr(os, "setsid", lambda: None)
+    monkeypatch.setitem(
+        background_runs._TOOLS,
+        "holehe",
+        (lambda value: value, lambda value: {"output": run(value)}),
+    )
+    connection = Mock()
+
+    background_runs._worker(
+        connection, "holehe", sensitive_value, 1024
+    )
+
+    payload = connection.send_bytes.call_args.args[0]
+    captured = capsys.readouterr()
+    assert payload == b"SFound [redacted]"
+    assert sensitive_value not in captured.out
+    assert sensitive_value not in captured.err
     connection.close.assert_called_once()
 
 
