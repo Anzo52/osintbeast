@@ -16,6 +16,8 @@ from tool_registry import get_tool_metadata
 from tool_runs import UnexpectedToolError, execute_tool_run, start_tool_run
 
 _LOG = logging.getLogger(__name__)
+_ACTIVE_RUNS = set()
+_ACTIVE_RUNS_LOCK = threading.Lock()
 RUNNABLE_TOOLS = {
     "holehe": ("email", validate_email, lambda value: run_holehe(value)["output"]),
     "maigret": ("username", validate_username, run_maigret),
@@ -186,6 +188,29 @@ def _run_in_background(run_id, tool_name, query_text, runner):
                 run_id,
                 type(exc).__name__,
             )
+    finally:
+        with _ACTIVE_RUNS_LOCK:
+            _ACTIVE_RUNS.discard(run_id)
+
+
+def _fail_active_runs():
+    with _ACTIVE_RUNS_LOCK:
+        run_ids = tuple(_ACTIVE_RUNS)
+    for run_id in run_ids:
+        try:
+            database.finish_tool_run(
+                run_id,
+                "failed",
+                error_text="Tool run interrupted by server shutdown.",
+            )
+        except ValueError:
+            pass
+        except database.DATABASE_ERRORS as exc:
+            _LOG.error(
+                "Could not persist shutdown for run %s (%s)",
+                run_id,
+                type(exc).__name__,
+            )
 
 
 class WebHandler(BaseHTTPRequestHandler):
@@ -349,6 +374,8 @@ class WebHandler(BaseHTTPRequestHandler):
             run_id = start_tool_run(
                 tool_name, query_text, sensitive_input=tool_name == "holehe"
             )
+            with _ACTIVE_RUNS_LOCK:
+                _ACTIVE_RUNS.add(run_id)
             thread = threading.Thread(
                 target=_run_in_background,
                 args=(run_id, tool_name, query_text, runner),
@@ -357,6 +384,8 @@ class WebHandler(BaseHTTPRequestHandler):
             try:
                 thread.start()
             except RuntimeError:
+                with _ACTIVE_RUNS_LOCK:
+                    _ACTIVE_RUNS.discard(run_id)
                 database.finish_tool_run(
                     run_id,
                     "failed",
@@ -393,6 +422,7 @@ def serve(host="127.0.0.1", port=8000):
     except KeyboardInterrupt:
         pass
     finally:
+        _fail_active_runs()
         server.server_close()
 
 

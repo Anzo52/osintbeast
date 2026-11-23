@@ -48,6 +48,62 @@ def test_failed_runs_are_recorded(initialized_db, tool, error, status):
     assert database.list_tool_results() == []
 
 
+def test_keyboard_interrupt_is_preserved_if_failure_persistence_fails(
+    initialized_db, monkeypatch
+):
+    run_id = database.start_tool_run("maigret", "test")
+    monkeypatch.setattr(
+        database,
+        "finish_tool_run",
+        Mock(side_effect=sqlite3.OperationalError("database is locked")),
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="stop"):
+        tool_runs.execute_tool_run(
+            "maigret",
+            "test",
+            Mock(side_effect=KeyboardInterrupt("stop")),
+            run_id=run_id,
+            sensitive_input=False,
+        )
+
+
+def test_keyboard_interrupt_during_result_redaction_marks_run_failed(
+    initialized_db, monkeypatch
+):
+    monkeypatch.setattr(
+        tool_runs,
+        "redact_sensitive_output",
+        Mock(side_effect=KeyboardInterrupt()),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        tool_runs.execute_tool_run(
+            "holehe", "private", lambda _: "output", sensitive_input=True
+        )
+
+    assert database.query_database("SELECT status, errorText FROM ToolRuns") == [
+        ("failed", "Tool run interrupted.")
+    ]
+
+
+def test_keyboard_interrupt_after_run_creation_marks_run_failed(
+    initialized_db, monkeypatch
+):
+    monkeypatch.setattr(
+        tool_runs, "_execute_tool_run", Mock(side_effect=KeyboardInterrupt())
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        tool_runs.execute_tool_run(
+            "maigret", "test", lambda _: "output", sensitive_input=False
+        )
+
+    assert database.query_database("SELECT status, errorText FROM ToolRuns") == [
+        ("failed", "Tool run interrupted.")
+    ]
+
+
 @pytest.mark.parametrize("tool", ["holehe", "maigret", "helix", "sherlock"])
 def test_success_run_preserves_legacy_results(initialized_db, tool):
     assert tool_runs.execute_tool_run(

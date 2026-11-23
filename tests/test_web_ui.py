@@ -110,6 +110,35 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
         server.server_close()
 
 
+def test_shutdown_marks_active_runs_failed(tmp_path, monkeypatch):
+    runner_started = threading.Event()
+    release_runner = threading.Event()
+
+    def runner(_username):
+        runner_started.set()
+        assert release_runner.wait(2)
+        return "output"
+
+    server, base_url = _server(tmp_path, monkeypatch, runner)
+    try:
+        status, launched = _request(
+            f"{base_url}/api/runs",
+            {"tool": "sherlock", "input": "alice", "authorized": True},
+        )
+        assert status == 202
+        assert runner_started.wait(1)
+
+        web_ui._fail_active_runs()
+
+        run = database.get_tool_run(launched["id"])
+        assert run[3] == "failed"
+        assert run[5] == "Tool run interrupted by server shutdown."
+    finally:
+        release_runner.set()
+        server.shutdown()
+        server.server_close()
+
+
 def test_web_run_views_show_migrated_legacy_records(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "web.db"))
     database.setup_database()
