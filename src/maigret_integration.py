@@ -4,6 +4,8 @@ import logging
 import re
 from importlib.resources import as_file, files
 
+from tool_runs import redact_sensitive_data
+
 MAIGRET_TIMEOUT_SECONDS = 300
 
 
@@ -65,4 +67,6 @@ def run_maigret(username: str) -> str:
             "status": str(status.status),
             "error": str(status.error) if status.error is not None else None,
         })
-    return json.dumps(records, ensure_ascii=False, indent=2)
+    return json.dumps(
+        redact_sensitive_data(records, username), ensure_ascii=False, indent=2
+    )

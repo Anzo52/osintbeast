@@ -39,7 +39,7 @@ def test_search_uses_installed_maigret_and_all_enabled_sites(monkeypatch):
 
     output = json.loads(maigret_integration.run_maigret(" user "))
     assert output == [
-        {"site": "Example", "url": "https://example.test/user", "status": "Claimed", "error": None},
+        {"site": "Example", "url": "https://example.test/[redacted]", "status": "Claimed", "error": None},
         {"site": "Unreachable", "url": "", "status": "Unknown", "error": "request failed"},
     ]
     assert seen["username"] == "user"
@@ -72,7 +72,7 @@ def test_real_maigret_api_with_mocked_site_check(monkeypatch):
     output = json.loads(maigret_integration.run_maigret("user"))
     assert len(output) == 1
     assert output[0]["status"] == "Claimed"
-    assert output[0]["url"] == "https://example.test/user"
+    assert output[0]["url"] == "https://example.test/[redacted]"
 
 
 def test_search_timeout_is_propagated(monkeypatch):
