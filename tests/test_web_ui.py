@@ -16,7 +16,7 @@ import web_ui
 from sherlock_integration import validate_username
 
 
-def mocked_worker(connection, tool_name, query, max_output_bytes):
+def mocked_worker(connection, tool_name, query, max_output_bytes, deadline=None):
     if query == "slow":
         time.sleep(10)
     elif query == "alice":
