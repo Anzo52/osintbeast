@@ -3,7 +3,6 @@ import logging
 import os
 import sqlite3
 import stat
-import warnings
 from unittest.mock import Mock
 
 import pytest
@@ -242,7 +241,7 @@ def test_menu_accepts_leading_hyphen_identifiers(
 
     runner = Mock(return_value=result)
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr(checkers, "getpass", lambda prompt: identifier)
+    monkeypatch.setattr("builtins.input", lambda prompt: identifier)
     monkeypatch.setattr(main, target, runner)
 
     main.main_menu()
@@ -645,13 +644,10 @@ def test_execute_tool_run_with_id_redacts_sensitive_values(initialized_db):
         ),
     ],
 )
-def test_sensitive_inputs_use_non_echoing_prompts(
-    monkeypatch, capsys, menu, prompt, value
-):
+def test_target_inputs_use_echoing_prompts(monkeypatch, menu, prompt, value):
     seen = []
     monkeypatch.setattr(
-        checkers,
-        "getpass",
+        "builtins.input",
         lambda actual_prompt: seen.append(actual_prompt) or value,
     )
     runner = Mock()
@@ -660,38 +656,6 @@ def test_sensitive_inputs_use_non_echoing_prompts(
 
     assert seen == [prompt]
     runner.assert_called_once_with(value)
-    assert value not in capsys.readouterr().out
-
-
-@pytest.mark.parametrize(
-    ("menu", "value"),
-    [
-        (checkers._run_email_check_menu, "person@example.com"),
-        (checkers._run_username_check_menu, "private_user"),
-    ],
-)
-def test_sensitive_prompt_refuses_echoing_fallback(monkeypatch, capsys, menu, value):
-    input_calls = []
-
-    def insecure_getpass(_prompt):
-        warnings.warn("terminal echo is enabled", checkers.GetPassWarning)
-        return input("fallback: ")
-
-    def fallback_input(_prompt):
-        input_calls.append(True)
-        return value
-
-    monkeypatch.setattr(checkers, "getpass", insecure_getpass)
-    monkeypatch.setattr("builtins.input", fallback_input)
-    runner = Mock()
-
-    menu(runner)
-
-    output = capsys.readouterr().out
-    assert "Unable to securely read sensitive input" in output
-    assert value not in output
-    assert input_calls == []
-    runner.assert_not_called()
 
 
 def test_database_failure_after_execution_is_reported(initialized_db, monkeypatch, capsys):
@@ -752,7 +716,7 @@ def test_maigret_menu_action_dispatches_username(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr(checkers, "getpass", lambda prompt: " user ")
+    monkeypatch.setattr("builtins.input", lambda prompt: " user ")
     monkeypatch.setattr(main, "run_maigret_check", runner)
     main.main_menu()
     runner.assert_called_once_with("user")

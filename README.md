@@ -97,8 +97,9 @@ failed operations print a corrective message and return a nonzero status.
 
 ### Running checks
 
-Select a supported check from the menu. Sensitive input is entered through a
-non-echoing prompt; checks send it to third-party sites. See the
+Select a supported check from the menu. Typed target input is visible in the
+terminal, so be aware of people who can see your screen; checks send it to
+third-party sites. See the
 [running checks guide](doc/wiki/Running-Checks.md) for optional installations,
 tool limits, run history, exports, and privacy details.
 
