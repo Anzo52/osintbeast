@@ -1,12 +1,12 @@
 import hmac
 import ipaddress
 import json
+import logging
 import os
 import re
-import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from data.utils import database
+import data.utils.database as database
 from helix_integration import run_helix, validate_username as validate_helix_username
 from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username
@@ -14,11 +14,12 @@ from sherlock_integration import (
     run_sherlock,
     validate_username as validate_sherlock_username,
 )
-from tool_runs import execute_tool_run
+from tool_runs import UnexpectedToolError, execute_tool_run
 
 MAX_REQUEST_BYTES = 16 * 1024
 MAX_TOKEN_LENGTH = 256
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")
+_LOG = logging.getLogger(__name__)
 RUNNERS = {
     "holehe": (validate_email, lambda value: run_holehe(value)["output"]),
     "maigret": (validate_username, run_maigret),
@@ -135,7 +136,7 @@ def _make_handler(tokens):
                 else:
                     self._send_json(404, {"error": "Not found."})
                     return
-            except sqlite3.Error:
+            except database.DATABASE_ERRORS:
                 self._send_json(500, {"error": "Database operation failed."})
                 return
             self._send_json(200, payload)
@@ -182,9 +183,22 @@ def _make_handler(tokens):
                 self._send_json(400, {"error": str(exc)})
                 return
             try:
-                status, result = execute_tool_run(tool_name, query_text, runner)
-            except (sqlite3.Error, RuntimeError):
+                status, result = execute_tool_run(
+                    tool_name,
+                    query_text,
+                    runner,
+                    sensitive_input=tool_name == "holehe",
+                )
+            except UnexpectedToolError:
+                _LOG.exception("Unexpected sensitive tool failure")
+                self._send_json(500, {"error": "Could not complete tool run."})
+                return
+            except (*database.DATABASE_ERRORS, RuntimeError):
                 self._send_json(500, {"error": "Could not record tool run."})
+                return
+            except Exception:
+                _LOG.exception("Unexpected tool failure")
+                self._send_json(500, {"error": "Could not complete tool run."})
                 return
             response = {"status": status}
             response["result" if status == "success" else "error"] = result

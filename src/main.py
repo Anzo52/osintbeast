@@ -1,6 +1,5 @@
 import argparse
 import os
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -9,21 +8,24 @@ import zlib
 
 from simple_term_menu import TerminalMenu
 
-from checkers import _run_email_check_menu, _run_username_check_menu
 from backend_services import get_recent_tool_runs, get_saved_tool_results
+from checkers import _run_email_check_menu, _run_username_check_menu
+from data.utils import database
 from data.utils.database import (
     export_tool_runs_json,
     get_tool_run,
     list_tool_runs,
 )
 from data.utils.init_db import init_db
-from menu_utils import _choose_option, _download_tool_menu, _install_tool_menu
 from downloader import download_tool
-from helix_integration import run_helix, validate_username as validate_helix_username
-from installer import install_tool
+from helix_integration import run_helix
+from helix_integration import validate_username as validate_helix_username
 from holehe_integration import run_holehe, validate_email
+from installer import install_tool
 from maigret_integration import run_maigret, validate_username
-from sherlock_integration import run_sherlock, validate_username as validate_sherlock_username
+from menu_utils import _choose_option, _download_tool_menu, _install_tool_menu
+from sherlock_integration import run_sherlock
+from sherlock_integration import validate_username as validate_sherlock_username
 from tool_registry import get_supported_tools, is_tool_installed
 from tool_runs import execute_tool_run
 
@@ -40,7 +42,7 @@ def main_menu():
 
 def menu_actions():
     actions = {
-        0: init_db,
+        0: initialize_database,
         1: list_supported_tools,
         2: lambda: _download_tool_menu(download),
         3: lambda: _install_tool_menu(install),
@@ -67,6 +69,13 @@ def menu_ops():
         "Exit",
     ]
     return options
+
+
+def initialize_database():
+    try:
+        init_db()
+    except (OSError, UnicodeError, *database.DATABASE_ERRORS) as exc:
+        print(f"Database initialization failed: {exc}")
 
 
 def list_supported_tools():
@@ -109,7 +118,7 @@ def _run_check(tool_name, query_text, validator, runner):
         status, value = execute_tool_run(
             tool_name, query_text, runner, sensitive_input=True
         )
-    except sqlite3.Error as exc:
+    except (OSError, *database.DATABASE_ERRORS) as exc:
         print(f"Could not record {tool_name} run: {exc}. Initialize the database and check its permissions.")
         return 1
     if status == "success":
@@ -141,11 +150,12 @@ def run_sherlock_check(username):
 
 def query_view(view):
     try:
+        database.setup_database()
         if view == "runs":
             result = get_recent_tool_runs()
         else:
             result = get_saved_tool_results()
-    except sqlite3.Error as exc:
+    except (OSError, UnicodeError, *database.DATABASE_ERRORS) as exc:
         print(
             f"Database query failed: {exc}. Initialize the database and check its permissions."
         )
@@ -163,25 +173,29 @@ def query_menu():
         ],
         "Choose database view",
     )
+    if choice in (0, 1):
+        try:
+            database.setup_database()
+        except (OSError, UnicodeError, *database.DATABASE_ERRORS) as exc:
+            print(f"Database initialization failed: {exc}")
+            return
     if choice == 0:
-        return run_history_menu()
+        run_history_menu()
     elif choice == 1:
         return query_view("results")
 
 
-def show_run_history(tool_name=None, status=None, before_run_id=None):
+def show_run_history(tool_name=None, status=None, offset=0, cursor=None):
     try:
         runs = list_tool_runs(
-            limit=20,
-            before_run_id=before_run_id,
-            tool_name=tool_name,
-            status=status,
+            limit=20, offset=offset, tool_name=tool_name, status=status,
+            cursor=cursor,
         )
+    except (OSError, *database.DATABASE_ERRORS) as exc:
+        print(f"Run history query failed: {exc}")
+        return []
     except ValueError as exc:
         print(f"Invalid history filter: {exc}")
-        return []
-    except (OSError, sqlite3.Error) as exc:
-        print(f"Run history query failed: {exc}")
         return []
     if not runs:
         print("No matching runs.")
@@ -198,7 +212,10 @@ def show_run_history(tool_name=None, status=None, before_run_id=None):
 def inspect_tool_run(run_id):
     try:
         run = get_tool_run(run_id)
-    except (OSError, ValueError, sqlite3.Error) as exc:
+    except ValueError as exc:
+        print(f"Could not inspect run: {exc}")
+        return
+    except (OSError, *database.DATABASE_ERRORS) as exc:
         print(f"Could not inspect run: {exc}")
         return
     if run is None:
@@ -267,7 +284,7 @@ def export_selected_runs():
             run_ids, include_sensitive=include_sensitive
         )
         _write_export_file(output_path, content)
-    except (OSError, ValueError, sqlite3.Error) as exc:
+    except (OSError, ValueError, *database.DATABASE_ERRORS) as exc:
         print(f"Could not export runs: {exc}")
         return
     print(f"Exported {len(run_ids)} run(s) to {output_path}.")
@@ -293,7 +310,7 @@ def run_history_menu():
             return
         if choice == 0:
             current_runs = show_run_history(
-                tool_name, status, page_cursors[-1]
+                tool_name, status, cursor=page_cursors[-1]
             )
         elif choice == 1:
             tool_value = input("Tool name (blank for any): ").strip()
@@ -303,6 +320,16 @@ def run_history_menu():
             tool_name = tool_value or None
             status = status_value or None
             page_cursors = [None]
+            try:
+                list_tool_runs(
+                    limit=1, tool_name=tool_name, status=status
+                )
+            except ValueError as exc:
+                print(f"Invalid history filter: {exc}")
+                tool_name = status = None
+            except (OSError, *database.DATABASE_ERRORS) as exc:
+                print(f"Run history query failed: {exc}")
+                continue
             current_runs = show_run_history(tool_name, status)
         elif choice == 2:
             value = input("Run ID to inspect: ").strip()
@@ -314,13 +341,13 @@ def run_history_menu():
             if len(current_runs) == 20:
                 page_cursors.append(current_runs[-1][0])
                 current_runs = show_run_history(
-                    tool_name, status, page_cursors[-1]
+                    tool_name, status, cursor=page_cursors[-1]
                 )
         elif choice == 4:
             if len(page_cursors) > 1:
                 page_cursors.pop()
                 current_runs = show_run_history(
-                    tool_name, status, page_cursors[-1]
+                    tool_name, status, cursor=page_cursors[-1]
                 )
         elif choice == 5:
             export_selected_runs()
@@ -412,8 +439,10 @@ def cli(argv=None):
             main_menu()
     try:
         return args.handler(args)
-    except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError, *database.DATABASE_ERRORS) as exc:
         print(f"Command failed: {exc}", file=sys.stderr)
         return 1
+
+
 if __name__ == "__main__":
     raise SystemExit(cli())
