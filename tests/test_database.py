@@ -7,10 +7,9 @@ from pathlib import Path
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-import data.utils.database as database
 import downloader
 import holehe_integration
-import data.utils.init_db as init_db
+from data.utils import database, init_db
 
 
 def test_setup_database_loads_both_idempotent_schemas(tmp_path, monkeypatch):

@@ -2,11 +2,13 @@ import json
 import os
 import sqlite3
 import sys
+from collections.abc import Mapping
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any
 
 from data.utils.storage import MySQLStorage, SQLiteStorage, Storage, StorageError
+
 
 # Keep source-checkout paths independent of the current working directory.
 def setup_database_paths(module_file):
@@ -113,14 +115,14 @@ def query_database(
 
 
 def save_tool_result(
-    tool_name: str, query_text: str, result_text: Optional[str]
+    tool_name: str, query_text: str, result_text: str | None
 ):
     """Persist a tool run and return its result row ID."""
     return _get_storage().save_tool_result(tool_name, query_text, result_text)
 
 
 def list_tool_results(
-    limit: int = 100, max_result_text_chars: Optional[int] = None
+    limit: int = 100, max_result_text_chars: int | None = None
 ) -> list[tuple[Any, ...]]:
     """Return saved results, optionally truncating result text in storage."""
     _validate_list_limit(limit)
@@ -141,8 +143,8 @@ def _validate_list_limit(limit: int) -> None:
 
 
 def list_tool_runs(
-    limit: int = 20, offset: int = 0, tool_name: Optional[str] = None,
-    status: Optional[str] = None, cursor: Optional[int] = None,
+    limit: int = 20, offset: int = 0, tool_name: str | None = None,
+    status: str | None = None, cursor: int | None = None,
 ) -> list[tuple[Any, ...]]:
     """Return a bounded, newest-first run page using stable run-ID cursors."""
     _validate_list_limit(limit)
@@ -206,7 +208,7 @@ def _validate_run_id(run_id: int) -> int:
     return run_id
 
 
-def get_tool_run(run_id: int) -> Optional[tuple[Any, ...]]:
+def get_tool_run(run_id: int) -> tuple[Any, ...] | None:
     """Return a run and its persisted result or error, if it exists."""
     run_id = _validate_run_id(run_id)
     rows = _get_storage().query(
@@ -218,7 +220,7 @@ def get_tool_run(run_id: int) -> Optional[tuple[Any, ...]]:
     return rows[0] if rows else None
 
 
-def get_tool_result(result_id: int) -> Optional[dict[str, Any]]:
+def get_tool_result(result_id: int) -> dict[str, Any] | None:
     """Return one saved result without exposing its original query text."""
     result_id = _validate_run_id(result_id)
     rows = _get_storage().query(
@@ -291,8 +293,8 @@ def start_tool_run(tool_name: str, query_text: str):
 
 
 def finish_tool_run(
-    run_id: int, status: str, result_text: Optional[str] = None,
-    error_text: Optional[str] = None,
+    run_id: int, status: str, result_text: str | None = None,
+    error_text: str | None = None,
 ) -> None:
     """Finish a run and retain successful results in the legacy results table."""
     run_id = _validate_run_id(run_id)
@@ -305,7 +307,7 @@ def finish_tool_run(
     _get_storage().finish_tool_run(run_id, status, result_text, error_text)
 
 
-def get_tool_run_status(run_id: int) -> Optional[dict[str, Any]]:
+def get_tool_run_status(run_id: int) -> dict[str, Any] | None:
     """Return non-sensitive status fields for one run."""
     run_id = _validate_run_id(run_id)
     rows = _get_storage().query(
@@ -322,38 +324,3 @@ def get_tool_run_status(run_id: int) -> Optional[dict[str, Any]]:
         )
     )
 
-
-def start_tool_run(tool_name: str, query_text: str):
-    """Create a running record before starting an external check."""
-    return _get_storage().start_tool_run(tool_name, query_text)
-
-
-def finish_tool_run(
-    run_id: int, status: str, result_text: Optional[str] = None,
-    error_text: Optional[str] = None,
-) -> None:
-    """Finish a run and retain successful results in the legacy results table."""
-    if status not in {"success", "failed", "timed_out"}:
-        raise ValueError(f"Invalid terminal run status: {status}")
-    if (status == "success" and (result_text is None or error_text is not None)) or (
-        status != "success" and (error_text is None or result_text is not None)
-    ):
-        raise ValueError("Success requires a result; failures require an error.")
-    _get_storage().finish_tool_run(run_id, status, result_text, error_text)
-
-
-def get_tool_run_status(run_id: int) -> Optional[dict[str, Any]]:
-    """Return non-sensitive status fields for one run."""
-    rows = _get_storage().query(
-        """SELECT runID, toolName, status, startedAt, finishedAt
-           FROM ToolRuns WHERE runID = ?""",
-        (run_id,),
-    )
-    if not rows:
-        return None
-    return dict(
-        zip(
-            ("run_id", "tool", "status", "started_at", "finished_at"),
-            rows[0],
-        )
-    )

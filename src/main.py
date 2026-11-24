@@ -9,22 +9,24 @@ from pathlib import Path
 
 from simple_term_menu import TerminalMenu
 
-from checkers import _run_email_check_menu, _run_username_check_menu
-import data.utils.database as database
 from backend_services import get_recent_tool_runs, get_saved_tool_results
-from data.utils.init_db import init_db
-from menu_utils import _choose_option, _download_tool_menu, _install_tool_menu
+from checkers import _run_email_check_menu, _run_username_check_menu
+from data.utils import database
 from data.utils.database import (
     export_tool_runs_json,
     get_tool_run,
     list_tool_runs,
 )
+from data.utils.init_db import init_db
 from downloader import download_tool
-from helix_integration import run_helix, validate_username as validate_helix_username
-from installer import install_tool
+from helix_integration import run_helix
+from helix_integration import validate_username as validate_helix_username
 from holehe_integration import run_holehe, validate_email
+from installer import install_tool
 from maigret_integration import run_maigret, validate_username
-from sherlock_integration import run_sherlock, validate_username as validate_sherlock_username
+from menu_utils import _choose_option, _download_tool_menu, _install_tool_menu
+from sherlock_integration import run_sherlock
+from sherlock_integration import validate_username as validate_sherlock_username
 from tool_registry import get_supported_tools, is_tool_installed
 from tool_runs import execute_tool_run
 
