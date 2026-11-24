@@ -119,10 +119,8 @@ def _make_handler(tokens):
                 return
             try:
                 if self.path == "/api/runs":
-                    rows = database.query_database(
-                        """SELECT runID, toolName, queryText, status, startedAt,
-                                  finishedAt, errorText
-                           FROM ToolRuns ORDER BY runID DESC LIMIT 100"""
+                    rows = database.list_tool_runs(
+                        limit=100, redact_sensitive=True
                     )
                     keys = (
                         "id", "tool", "query", "status", "started_at",
@@ -130,7 +128,9 @@ def _make_handler(tokens):
                     )
                     payload = {"runs": [dict(zip(keys, row)) for row in rows]}
                 elif self.path == "/api/results":
-                    rows = database.list_tool_results(limit=100)
+                    rows = database.list_tool_results(
+                        limit=100, redact_sensitive=True
+                    )
                     keys = ("id", "tool", "query", "result", "created_at")
                     payload = {"results": [dict(zip(keys, row)) for row in rows]}
                 else:

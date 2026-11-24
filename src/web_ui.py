@@ -341,7 +341,12 @@ class WebHandler(BaseHTTPRequestHandler):
                 limit = int(values[0])
                 self._send_json(
                     200,
-                    [self._run_payload(row) for row in database.list_tool_runs(limit)],
+                    [
+                        self._run_payload(row)
+                        for row in database.list_tool_runs(
+                            limit, redact_sensitive=True
+                        )
+                    ],
                 )
             elif path.path.startswith("/api/runs/"):
                 run_id_text = path.path.removeprefix("/api/runs/")
@@ -350,7 +355,9 @@ class WebHandler(BaseHTTPRequestHandler):
                     return
                 RUN_SERVICE.status(int(run_id_text))
                 database.reconcile_stale_tool_runs()
-                row = database.get_tool_run(int(run_id_text))
+                row = database.get_tool_run(
+                    int(run_id_text), redact_sensitive=True
+                )
                 if row is None:
                     self._send_json(404, {"error": "Run not found."})
                 else:

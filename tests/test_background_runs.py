@@ -27,6 +27,15 @@ def mocked_worker(connection, tool_name, query, max_output_bytes, deadline=None)
     connection.close()
 
 
+def mocked_sensitive_worker(connection, _tool_name, query, _max_output_bytes, _deadline=None):
+    status = b"F" if query.startswith("failure@") else b"S"
+    text = background_runs.redact_sensitive_output(
+        f"lookup result for {query}", query
+    )
+    connection.send_bytes(status + text.encode("utf-8"))
+    connection.close()
+
+
 def blocked_runner(query):
     time.sleep(10)
     return query
@@ -90,7 +99,8 @@ def test_background_outcomes_are_persisted(service, query, status, text):
     run_id = service.submit("maigret", query)
     run = wait_for_run(service, run_id)
     assert run["status"] == status
-    assert run["resultText" if status == "success" else "errorText"] == text
+    expected_text = text.replace(query, "[redacted]")
+    assert run["resultText" if status == "success" else "errorText"] == expected_text
     assert run["finishedAt"] is not None
     assert len(database.list_tool_results()) == (1 if status == "success" else 0)
 
@@ -104,6 +114,34 @@ def test_background_runs_redact_sensitive_input_and_output(service):
     assert database.list_tool_results()[0][2:4] == (
         "[redacted]", "output"
     )
+
+
+@pytest.mark.parametrize(
+    ("prefix", "status", "field"),
+    [(b"S", "success", "resultText"), (b"F", "failed", "errorText")],
+)
+def test_background_outcomes_redact_sensitive_query(
+    service, monkeypatch, prefix, status, field
+):
+    sensitive_value = "person@example.com"
+
+    query = sensitive_value if prefix == b"S" else "failure@example.com"
+    monkeypatch.setattr(
+        background_runs, "_worker", mocked_sensitive_worker
+    )
+    run_id = service.submit("holehe", query)
+    run = wait_for_run(service, run_id)
+
+    assert run["status"] == status
+    assert run[field] == "lookup result for [redacted]"
+    assert database.query_database(
+        "SELECT queryText, resultText, errorText FROM ToolRuns WHERE runID = ?",
+        (run_id,),
+    ) == [(
+        "[redacted]",
+        "lookup result for [redacted]" if status == "success" else None,
+        "lookup result for [redacted]" if status == "failed" else None,
+    )]
 
 
 def test_capacity_rejection_and_cancellation(service):

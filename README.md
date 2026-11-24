@@ -151,7 +151,8 @@ working directory. SQLite initialization creates missing tables and indexes in o
 transaction; running it again preserves existing records and recreates missing
 schema objects, including the new run-history table in existing databases. The
 legacy tool-record redaction runs once per database; it does not repair
-incompatible existing tables.
+incompatible existing tables. Saved run and result views also redact query
+values and matching result or error text when read.
 
 To use SQLite at a different location, set `OSINTBEAST_DB_PATH` before starting
 the application. For a source checkout, the default remains the repository-root

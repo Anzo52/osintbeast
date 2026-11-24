@@ -80,7 +80,7 @@ def create_app(config=None):
 
     @app.get("/api/results/<int:result_id>")
     def get_result(result_id):
-        result = database.get_tool_result(result_id)
+        result = database.get_tool_result(result_id, redact_sensitive=True)
         if result is None:
             return jsonify(error="Not found."), 404
         public_fields = ("result_id", "tool", "result", "created_at")

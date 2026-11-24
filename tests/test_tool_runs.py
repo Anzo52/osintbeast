@@ -346,7 +346,7 @@ def test_history_menu_filters_and_inspects_results(
     main.run_history_menu()
 
     output = capsys.readouterr().out
-    assert f"Run {failed_id} | holehe | input='target' | failed" in output
+    assert f"Run {failed_id} | holehe | input='[redacted]' | failed" in output
     assert "Error: 'broken output'" in output
     assert output.count(f"Run {first_id} |") == 1
 

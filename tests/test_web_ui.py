@@ -98,7 +98,7 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
         status, running = _request(f"{base_url}/api/runs/{launched['id']}")
         assert status == 200
         assert running["status"] == "running"
-        assert running["input"] == "alice"
+        assert running["input"] == "[redacted]"
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
             status, detail = _request(f"{base_url}/api/runs/{launched['id']}")
@@ -108,8 +108,8 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
 
         assert status == 200
         assert detail["status"] == "success"
-        assert detail["input"] == "alice"
-        assert detail["result"] == f"alice: {output}"
+        assert detail["input"] == "[redacted]"
+        assert detail["result"] == f"[redacted]: {output}"
         assert database.query_database(
             "SELECT toolName, queryText, resultText FROM ToolResults"
         ) == [("sherlock", "alice", f"alice: {output}")]
@@ -385,7 +385,7 @@ def test_unexpected_background_error_is_redacted(tmp_path, monkeypatch, caplog):
                 break
             time.sleep(0.01)
         assert detail["status"] == "failed"
-        assert detail["input"] == "unexpected"
+        assert detail["input"] == "[redacted]"
         assert detail["error"] == "sherlock failed unexpectedly (Exception)."
     finally:
         server.shutdown()

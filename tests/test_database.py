@@ -368,6 +368,56 @@ def test_list_tool_results_orders_newest_first_and_enforces_limit(
             database.list_tool_results(limit=limit)
 
 
+def test_saved_views_redact_legacy_values_and_truncate_after_redaction(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "legacy-views.db"))
+    database.setup_database()
+    query = "private@example.com"
+    result = f"begin {query} end"
+    run_id = database.start_tool_run("holehe", query)
+    database.finish_tool_run(run_id, "success", result_text=result)
+
+    assert database.get_tool_run(run_id, redact_sensitive=True)[2:6] == (
+        "[redacted]", "success", "begin [redacted] end", None,
+    )
+    assert database.list_tool_runs(redact_sensitive=True)[0][2:] == (
+        "[redacted]", "success",
+        database.list_tool_runs()[0][4],
+        database.list_tool_runs()[0][5],
+        None,
+    )
+    assert database.list_tool_results(
+        max_result_text_chars=19, redact_sensitive=True
+    )[0][2:4] == ("[redacted]", "begin … [truncated]")
+    result_id = database.query_database(
+        "SELECT resultID FROM ToolResults"
+    )[0][0]
+    assert database.get_tool_result(
+        result_id, redact_sensitive=True
+    )["result"] == "begin [redacted] end"
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolRuns WHERE runID = ?", (run_id,)
+    ) == [(query, result)]
+
+
+@pytest.mark.parametrize(
+    ("query", "text", "expected"),
+    [
+        ("ali", "ali in a larger token ali%63e", "[redacted] in a larger token ali%63e"),
+        ("private@example.com", "[private@example.com].", "[[redacted]]."),
+        ("alice", "alice. alice.example", "[redacted]. alice.example"),
+        (
+            "person+tag@example.com",
+            "Found person+tag%40example.com",
+            "Found [redacted]",
+        ),
+    ],
+)
+def test_redact_sensitive_text_handles_boundaries(query, text, expected):
+    assert database.redact_sensitive_text(text, query) == expected
+
+
 def test_list_tool_runs_filters_and_uses_stable_cursor_pagination(
     tmp_path, monkeypatch
 ):
