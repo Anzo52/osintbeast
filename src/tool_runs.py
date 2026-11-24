@@ -123,6 +123,9 @@ def _execute_tool_run(
             output = runner(query_text)
         if not isinstance(output, str):
             raise RuntimeError(f"{tool_name} returned non-text output.")
+    except KeyboardInterrupt:
+        database.finish_tool_run(run_id, "failed", error_text="Tool run interrupted.")
+        raise
     except TimeoutError as exc:
         message = str(exc) or f"{tool_name} exceeded its time limit."
         if sensitive_input:

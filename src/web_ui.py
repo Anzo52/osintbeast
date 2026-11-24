@@ -1,21 +1,48 @@
 """Local browser interface for launching and reviewing authorized tool runs."""
 
-import json
+import hmac
 import ipaddress
-import logging
-import threading
+import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
-import data.utils.database as database
-from helix_integration import run_helix, validate_username as validate_helix_username
+from background_runs import BackgroundRuns, CapacityError
+from data.utils import database
+from helix_integration import run_helix
+from helix_integration import validate_username as validate_helix_username
 from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username
-from sherlock_integration import run_sherlock, validate_username as validate_sherlock_username
+from sherlock_integration import run_sherlock
+from sherlock_integration import validate_username as validate_sherlock_username
 from tool_registry import get_tool_metadata
-from tool_runs import UnexpectedToolError, execute_tool_run, start_tool_run
 
-_LOG = logging.getLogger(__name__)
+
+def _configured_tokens():
+    operator = (
+        os.getenv("OSINTBEAST_OPERATOR_TOKEN")
+        or os.getenv("OSINTBEAST_API_TOKEN")
+        or os.getenv("OSINTBEAST_TOKEN")
+        or os.getenv("OSINTBEAST_WEB_TOKEN")
+    )
+    viewer = os.getenv("OSINTBEAST_VIEWER_TOKEN")
+    if not viewer:
+        viewer = operator
+    return {
+        "operator": operator,
+        "viewer": viewer,
+    }
+
+
+def _is_loopback_host(host):
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+RUN_SERVICE = BackgroundRuns()
 RUNNABLE_TOOLS = {
     "holehe": ("email", validate_email, lambda value: run_holehe(value)["output"]),
     "maigret": ("username", validate_username, run_maigret),
@@ -69,7 +96,19 @@ INDEX_HTML = """<!doctype html>
     const error = document.querySelector("#error");
 
     async function request(url, options) {
-      const response = await fetch(url, options);
+      let token = sessionStorage.getItem("osintbeastToken");
+      if (!token) token = window.prompt("Enter an OSINT Beast access token:");
+      if (!token) throw new Error("Authentication is required.");
+      const requestOptions = { ...options, headers: {
+        ...(options?.headers || {}),
+        "Authorization": ["Bearer", token].join(" ")
+      }};
+      const response = await fetch(url, requestOptions);
+      if (response.status === 401) {
+        sessionStorage.removeItem("osintbeastToken");
+        throw new Error("Authentication failed.");
+      }
+      if (token) sessionStorage.setItem("osintbeastToken", token);
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || "Request failed.");
       return body;
@@ -162,34 +201,39 @@ INDEX_HTML = """<!doctype html>
 """
 
 
-def _run_in_background(run_id, tool_name, query_text, runner):
-    try:
-        execute_tool_run(
-            tool_name,
-            query_text,
-            runner,
-            run_id=run_id,
-            sensitive_input=tool_name == "holehe",
-        )
-    except UnexpectedToolError:
-        _LOG.exception("Unexpected tool failure for run %s", run_id)
-    except Exception:
-        try:
-            database.finish_tool_run(
-                run_id,
-                "failed",
-                error_text="The run outcome could not be persisted.",
-            )
-        except (*database.DATABASE_ERRORS, ValueError) as exc:
-            _LOG.error(
-                "Could not persist completion for run %s (%s)",
-                run_id,
-                type(exc).__name__,
-            )
-
-
 class WebHandler(BaseHTTPRequestHandler):
     server_version = "OSINTBeast"
+
+    def _authenticate(self, required_role):
+        tokens = _configured_tokens()
+        if not tokens["operator"] or not tokens["viewer"]:
+            self._send_json(503, {"error": "Authentication is not configured."})
+            return False
+        authorization = self.headers.get("Authorization", "")
+        scheme, _, credential = authorization.partition(" ")
+        credential = credential.strip()
+        if scheme.lower() != "bearer" or not credential:
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", "Bearer")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(json.dumps(
+                {"error": "Authentication required."},
+                ensure_ascii=False,
+            ).encode("utf-8"))
+            return False
+        if tokens["operator"] and hmac.compare_digest(credential, tokens["operator"]):
+            role = "operator"
+        elif tokens["viewer"] and hmac.compare_digest(credential, tokens["viewer"]):
+            role = "viewer"
+        else:
+            self._send_json(401, {"error": "Invalid credentials."})
+            return False
+        if required_role == "operator" and role != "operator":
+            self._send_json(403, {"error": "Operator role required."})
+            return False
+        return True
 
     def _has_local_host(self):
         host_header = self.headers.get("Host", "")
@@ -273,6 +317,8 @@ class WebHandler(BaseHTTPRequestHandler):
         if not self._has_local_host():
             self._send_json(403, {"error": "Use the local interface host."})
             return
+        if not self._authenticate("viewer"):
+            return
         path = urlsplit(self.path)
         try:
             if path.path == "/":
@@ -303,11 +349,12 @@ class WebHandler(BaseHTTPRequestHandler):
                     ],
                 )
             elif path.path.startswith("/api/runs/"):
-                database.reconcile_stale_tool_runs()
                 run_id_text = path.path.removeprefix("/api/runs/")
                 if not run_id_text.isdecimal():
                     self._send_json(404, {"error": "Run not found."})
                     return
+                RUN_SERVICE.status(int(run_id_text))
+                database.reconcile_stale_tool_runs()
                 row = database.get_tool_run(
                     int(run_id_text), redact_sensitive=True
                 )
@@ -321,10 +368,14 @@ class WebHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": str(exc)})
         except database.DATABASE_ERRORS:
             self._send_json(500, {"error": "Could not access the run database."})
+        except RuntimeError:
+            self._send_json(503, {"error": "Could not persist the run outcome. Try again later."})
 
     def do_POST(self):
         if not self._has_local_host():
             self._send_json(403, {"error": "Use the local interface host."})
+            return
+        if not self._authenticate("operator"):
             return
         if not self._has_same_origin():
             self._send_json(403, {"error": "Run requests must come from this interface."})
@@ -351,26 +402,9 @@ class WebHandler(BaseHTTPRequestHandler):
             if tool is None:
                 self._send_json(400, {"error": "Choose a supported registered tool."})
                 return
-            input_kind, validator, runner = tool
+            input_kind, validator, _ = tool
             query_text = validator(payload.get("input"))
-            run_id = start_tool_run(
-                tool_name, query_text, sensitive_input=tool_name == "holehe"
-            )
-            thread = threading.Thread(
-                target=_run_in_background,
-                args=(run_id, tool_name, query_text, runner),
-                daemon=True,
-            )
-            try:
-                thread.start()
-            except RuntimeError:
-                database.finish_tool_run(
-                    run_id,
-                    "failed",
-                    error_text="The tool run could not be started.",
-                )
-                self._send_json(503, {"error": "The tool run could not be started."})
-                return
+            run_id = RUN_SERVICE.submit(tool_name, query_text)
             self._send_json(202, {
                 "id": run_id,
                 "tool": tool_name,
@@ -382,15 +416,41 @@ class WebHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": "Request body must contain valid JSON."})
         except ValueError as exc:
             self._send_json(400, {"error": str(exc)})
+        except CapacityError:
+            self._send_json(503, {"error": "Background run capacity reached. Try again later."})
+        except (RuntimeError, OSError):
+            self._send_json(503, {"error": "The tool run could not be started. Try again later."})
         except database.DATABASE_ERRORS:
             self._send_json(500, {"error": "Could not access the run database."})
 
     def log_message(self, format, *args):
         pass
 
+    def _reject_method(self):
+        if not self._has_local_host():
+            self._send_json(403, {"error": "Use the local interface host."})
+            return
+        if not self._authenticate("viewer"):
+            return
+        self._send_json(405, {"error": "Method not allowed."})
+
+    do_HEAD = _reject_method
+    do_PUT = _reject_method
+    do_PATCH = _reject_method
+    do_DELETE = _reject_method
+    do_OPTIONS = _reject_method
+
 
 def create_server(host="127.0.0.1", port=8000):
-    """Create the web UI server after initializing its database."""
+    """Create an initialized, authenticated web server."""
+    if not _is_loopback_host(host):
+        raise ValueError("The web UI may only bind to a loopback address.")
+    tokens = _configured_tokens()
+    if not tokens["operator"] or not tokens["viewer"]:
+        raise RuntimeError(
+            "Set authentication tokens: OSINTBEAST_OPERATOR_TOKEN and "
+            "OSINTBEAST_VIEWER_TOKEN are required before starting."
+        )
     database.setup_database()
     server = ThreadingHTTPServer((host, port), WebHandler)
     server.daemon_threads = True
@@ -407,6 +467,7 @@ def serve(host="127.0.0.1", port=8000):
         pass
     finally:
         server.server_close()
+        RUN_SERVICE.close()
 
 
 if __name__ == "__main__":

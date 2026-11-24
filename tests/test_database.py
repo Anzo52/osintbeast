@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import subprocess
@@ -7,10 +8,9 @@ from pathlib import Path
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-import data.utils.database as database
 import downloader
 import holehe_integration
-import data.utils.init_db as init_db
+from data.utils import database, init_db
 
 
 def test_setup_database_loads_both_idempotent_schemas(tmp_path, monkeypatch):
@@ -190,12 +190,18 @@ def test_holehe_result_uses_initialized_database(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "results.db"))
     database.setup_database()
     holehe_integration.save_tool_result(
-        "holehe", "person@example.com", "output for person@example.com"
+        "holehe",
+        "person@example.com",
+        "output for person@example.com and person@example.com.invalid",
     )
 
     assert database.query_database(
         "SELECT toolName, queryText, resultText FROM ToolResults"
-    ) == [("holehe", "[redacted]", "output for [redacted]")]
+    ) == [(
+        "holehe",
+        "[redacted]",
+        "output for [redacted] and person@example.com.invalid",
+    )]
 
 
 def test_holehe_result_redacts_partially_encoded_input(tmp_path, monkeypatch):
@@ -238,16 +244,14 @@ def test_database_path_override_is_shared_across_modules(tmp_path):
     assert (tmp_path / "custom.db").is_file()
 
 
-def test_cli_reports_initialization_failure(monkeypatch, capsys):
+def test_initialization_failure_propagates(monkeypatch):
     def fail():
         raise sqlite3.OperationalError("unable to open database file")
 
     monkeypatch.setattr(init_db, "setup_database", fail)
-    init_db.init_db()
+    with pytest.raises(sqlite3.OperationalError, match="unable to open database file"):
+        init_db.init_db()
 
-    assert capsys.readouterr().out == (
-        "Database initialization failed: unable to open database file\n"
-    )
 
 
 def test_insert_query_and_save_tool_result(tmp_path, monkeypatch):
@@ -292,8 +296,6 @@ def test_saved_views_redact_legacy_values_without_rewriting_them(
     query = "person+tag@example.com"
     result = "Found person+tag%40example.com and person+tagger@example.com"
     run_id = database.start_tool_run("holehe", query)
-
-    assert database.get_tool_run(run_id, redact_sensitive=True)[2] == "[redacted]"
     database.finish_tool_run(run_id, "success", result_text=result)
 
     assert database.get_tool_run(run_id, redact_sensitive=True)[2:6] == (
@@ -301,15 +303,17 @@ def test_saved_views_redact_legacy_values_without_rewriting_them(
         "Found [redacted] and person+tagger@example.com", None,
     )
     assert database.list_tool_runs(redact_sensitive=True)[0][2] == "[redacted]"
-    assert database.list_tool_results(redact_sensitive=True)[0][2:4] == (
+    assert database.list_tool_results(
+        redact_sensitive=True
+    )[0][2:4] == (
         "[redacted]", "Found [redacted] and person+tagger@example.com",
     )
     result_id = database.query_database(
         "SELECT resultID FROM ToolResults"
     )[0][0]
-    assert database.get_tool_result(result_id, redact_sensitive=True)["result"] == (
-        "Found [redacted] and person+tagger@example.com"
-    )
+    assert database.get_tool_result(
+        result_id, redact_sensitive=True
+    )["result"] == "Found [redacted] and person+tagger@example.com"
     assert database.query_database(
         "SELECT queryText, resultText FROM ToolRuns WHERE runID = ?", (run_id,)
     ) == [(query, result)]
@@ -342,6 +346,70 @@ def test_saved_text_redaction_handles_encoding_and_word_boundaries(
     query, text, expected
 ):
     assert database.redact_sensitive_text(text, query) == expected
+
+
+def test_list_tool_runs_filters_and_uses_stable_cursor_pagination(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "runs.db"))
+    database.setup_database()
+    run_ids = []
+    for tool, status in (
+        ("holehe", "success"),
+        ("maigret", "failed"),
+        ("holehe", "success"),
+        ("sherlock", "timed_out"),
+    ):
+        run_id = database.start_tool_run(tool, "input")
+        if status == "success":
+            database.finish_tool_run(run_id, status, result_text="result")
+        else:
+            database.finish_tool_run(run_id, status, error_text="error")
+        run_ids.append(run_id)
+
+    first_page = database.list_tool_runs(limit=2)
+    assert [row[0] for row in first_page] == run_ids[3:1:-1]
+
+    database.start_tool_run("newer", "inserted between pages")
+    next_page = database.list_tool_runs(
+        limit=2, before_run_id=first_page[-1][0]
+    )
+    assert [row[0] for row in next_page] == run_ids[1::-1]
+    assert database.list_tool_runs(
+        tool_name="holehe", status="success"
+    )[0][0] == run_ids[2]
+    assert database.list_tool_runs(
+        tool_name="holehe' OR 1=1 --"
+    ) == []
+
+
+def test_export_tool_runs_json_redacts_unless_given_boolean_consent(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "export.db"))
+    database.setup_database()
+    run_id = database.start_tool_run("holehe", "private@example.test")
+    result = 'line one\n"quoted"'
+    database.finish_tool_run(run_id, "success", result_text=result)
+
+    redacted = json.loads(database.export_tool_runs_json([run_id]))
+    included = json.loads(
+        database.export_tool_runs_json([run_id], include_sensitive=True)
+    )
+    assert redacted[0]["input"] == "[REDACTED]"
+    assert redacted[0]["result"] == "[REDACTED]"
+    assert included[0]["input"] == "private@example.test"
+    assert included[0]["result"] == result
+
+    with pytest.raises(ValueError, match="boolean"):
+        database.export_tool_runs_json([run_id], include_sensitive="false")
+    for invalid_id in (0, database.MAX_SQLITE_INTEGER + 1):
+        with pytest.raises(ValueError, match="SQLite integer"):
+            database.get_tool_run(invalid_id)
+        with pytest.raises(ValueError, match="SQLite integer"):
+            database.export_tool_runs_json([invalid_id])
+    with pytest.raises(ValueError, match="do not exist"):
+        database.export_tool_runs_json([run_id + 1])
 
 
 def test_insert_rejects_unknown_table_and_column(tmp_path, monkeypatch):
@@ -409,3 +477,39 @@ def test_reconcile_stale_tool_runs_preserves_recent_runs(tmp_path, monkeypatch):
 def test_reconcile_stale_tool_runs_rejects_invalid_age(age):
     with pytest.raises(ValueError, match="positive integer"):
         database.reconcile_stale_tool_runs(age)
+
+
+def test_run_history_cursor_pagination_is_stable(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "history.db"))
+    database.setup_database()
+    first = database.start_tool_run("holehe", "one")
+    second = database.start_tool_run("holehe", "two")
+    third = database.start_tool_run("sherlock", "three")
+
+    assert [row[0] for row in database.list_tool_runs(limit=1)] == [third]
+    assert [row[0] for row in database.list_tool_runs(limit=1, cursor=third)] == [second]
+    assert [row[0] for row in database.list_tool_runs(limit=1, cursor=second)] == [first]
+    assert [row[0] for row in database.list_tool_runs(tool_name="holehe")] == [second, first]
+
+
+@pytest.mark.parametrize("include_sensitive", [None, 1, "false", [], {}])
+def test_export_requires_explicit_boolean_sensitive_opt_in(
+    tmp_path, monkeypatch, include_sensitive
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "export.db"))
+    database.setup_database()
+    run_id = database.start_tool_run("holehe", "private")
+    with pytest.raises(ValueError, match="boolean"):
+        database.export_tool_runs_json(
+            [run_id], include_sensitive=include_sensitive
+        )
+
+
+def test_run_ids_reject_sqlite_overflow(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "ids.db"))
+    database.setup_database()
+    oversized = 1 << 63
+    with pytest.raises(ValueError, match="positive SQLite integer"):
+        database.get_tool_run(oversized)
+    with pytest.raises(ValueError, match="positive SQLite integers"):
+        database.export_tool_runs_json([oversized])

@@ -11,6 +11,7 @@ TOKEN = "test-token"
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "web.db"))
+    database.setup_database()
     app = web.create_app({"TESTING": True, "API_TOKEN": TOKEN})
     return app.test_client()
 

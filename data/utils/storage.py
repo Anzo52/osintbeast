@@ -3,7 +3,6 @@ from contextlib import closing
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol
-
 from sqlalchemy import MetaData, Table, create_engine
 from sqlalchemy.engine import URL
 
@@ -27,7 +26,9 @@ class Storage(Protocol):
         self, tool_name: str, query_text: str, result_text: Optional[str]
     ) -> int: ...
 
-    def list_tool_results(self, limit: int) -> list[tuple[Any, ...]]: ...
+    def list_tool_results(
+        self, limit: int, max_result_text_chars: Optional[int] = None
+    ) -> list[tuple[Any, ...]]: ...
 
     def start_tool_run(self, tool_name: str, query_text: str) -> int: ...
 
@@ -130,13 +131,36 @@ class SQLiteStorage:
             )
             return cursor.lastrowid
 
-    def list_tool_results(self, limit: int) -> list[tuple[Any, ...]]:
+    def list_tool_results(
+        self, limit: int, max_result_text_chars: Optional[int] = None
+    ) -> list[tuple[Any, ...]]:
         with closing(self.connect()) as conn:
-            return conn.execute(
-                """SELECT resultID, toolName, queryText, resultText, createdAt
+            if max_result_text_chars is None:
+                return conn.execute(
+                    """SELECT resultID, toolName, queryText, resultText, createdAt
+                       FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
+                    (limit,),
+                ).fetchall()
+            marker = "… [truncated]"[:max_result_text_chars]
+            prefix_length = max(0, max_result_text_chars - len(marker))
+            rows = conn.execute(
+                """SELECT resultID, toolName, queryText,
+                          SUBSTR(resultText, 1, ?),
+                          CASE WHEN SUBSTR(resultText, ?, 1) <> '' THEN 1 ELSE 0 END,
+                          createdAt
                    FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
-                (limit,),
+                (prefix_length, prefix_length + 1, limit),
             ).fetchall()
+        return [
+            (
+                row[0],
+                row[1],
+                row[2],
+                None if row[3] is None else row[3] + (marker if row[4] else ""),
+                row[5],
+            )
+            for row in rows
+        ]
 
     def start_tool_run(self, tool_name: str, query_text: str) -> int:
         with closing(self.connect()) as conn, conn:
@@ -385,16 +409,40 @@ class MySQLStorage:
                 raise StorageError(str(exc)) from exc
             raise
 
-    def list_tool_results(self, limit: int) -> list[tuple[Any, ...]]:
+    def list_tool_results(
+        self, limit: int, max_result_text_chars: Optional[int] = None
+    ) -> list[tuple[Any, ...]]:
         try:
             with self._get_engine().connect() as connection:
-                return self._normalize_rows(
-                    connection.exec_driver_sql(
+                if max_result_text_chars is None:
+                    rows = connection.exec_driver_sql(
                         """SELECT resultID, toolName, queryText, resultText, createdAt
                            FROM ToolResults ORDER BY resultID DESC LIMIT %s""",
                         (limit,),
                     ).fetchall()
-                )
+                else:
+                    marker = "… [truncated]"[:max_result_text_chars]
+                    prefix_length = max(0, max_result_text_chars - len(marker))
+                    rows = connection.exec_driver_sql(
+                        """SELECT resultID, toolName, queryText,
+                                  SUBSTR(resultText, 1, %s),
+                                  CASE WHEN SUBSTR(resultText, %s, 1) <> ''
+                                       THEN 1 ELSE 0 END,
+                                  createdAt
+                           FROM ToolResults ORDER BY resultID DESC LIMIT %s""",
+                        (prefix_length, prefix_length + 1, limit),
+                    ).fetchall()
+                    rows = [
+                        (
+                            row[0],
+                            row[1],
+                            row[2],
+                            None if row[3] is None else row[3] + (marker if row[4] else ""),
+                            row[5],
+                        )
+                        for row in rows
+                    ]
+                return self._normalize_rows(rows)
         except Exception as exc:
             if exc.__class__.__module__.startswith("sqlalchemy"):
                 raise StorageError(str(exc)) from exc

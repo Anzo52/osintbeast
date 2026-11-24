@@ -113,13 +113,17 @@ in the same environment. Preserve the existing `OSINTBEAST_DB_PATH` setting
 and optional integrations. Start OSINT Beast and select **Initialize
 Database** before using the upgraded version with existing data.
 
-Initialization is repeatable and transactional. It creates missing tables
-and indexes without replacing existing records. It is not a general-purpose
+SQLite initialization is repeatable and transactional. It creates missing tables
+and indexes without rewriting existing records. Saved run and result views
+redact queries and matching result or error text at read time; stored values
+remain unchanged. Other sensitive values are not sanitized by this view
+redaction. Existing backups and SQLite journals contain stored values as well.
+It is not a general-purpose
 schema migration: it does not alter or repair existing tables whose columns
 or definitions are incompatible with the current code. In particular, do not
 assume that every database from every prior or future version is compatible.
-The application has no versioned migration framework or automatic downgrade
-support.
+The application has no general-purpose versioned migration framework or
+automatic downgrade support.
 
 Keep the verified backup until you have checked that the upgraded CLI can
 read the data you need. If initialization or normal operations report a schema

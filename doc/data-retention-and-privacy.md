@@ -21,13 +21,19 @@ error in `ToolRuns`, not `ToolResults`. Other structured records saved through
 the database are retained there as well.
 
 Values remaining after any configured redaction are stored as plain text.
-Saved run and result views redact query fields and standalone direct or
-partially URL-encoded matches in result or error text when reading records.
-This is presentation-only: it does not change existing database values, so
-direct database access and exports that include sensitive fields may still
-expose original values. Other sensitive information may remain in results and
-errors. Output is displayed in the terminal and database views. OSINT Beast
-does not provide a built-in backup or cleanup feature.
+Output is displayed in the terminal and database views. The saved-results
+database view displays up to 20 rows and truncates displayed result text at
+16,384 characters; this does not change the stored output. Direct database
+writes can bypass application redaction. Saved run and result views also redact
+queries and matching result or error text at read time, including for legacy
+records; this view redaction does not alter stored database values. Run history
+can be exported to JSON;
+exports redact input, result, and error fields by default and require explicit
+consent to include their stored values. On POSIX, export files are created with
+owner-only permissions. Sensitive exports are disabled on Windows because
+file permissions inherit from the destination directory. Exports do not
+overwrite existing files. OSINT Beast does not provide a built-in backup or
+cleanup feature.
 
 ## Database location and retention
 
@@ -69,25 +75,22 @@ filesystem snapshots, or other backups.
 
 ## Restrict database and backup access
 
-The application does not set restrictive file permissions itself; newly
-created files follow the operating system's account permissions and defaults.
-Store the database in a private directory on an encrypted device, and allow
-access only to the OS account that needs it.
+On POSIX, OSINT Beast restricts SQLite database and sidecar file permissions
+to owner-only when opening the database. Keep the database in a private
+directory on an encrypted device, and protect backup copies separately.
 
-- **Linux and macOS:** Restrict the containing directory and database file
-  (substitute the actual paths):
+- **Linux and macOS:** Restrict the containing directory (substitute the
+  actual path):
 
   ```sh
   chmod 700 /path/to/private-osintbeast-directory
-  chmod 600 /path/to/private-osintbeast-directory/osintbeast.db
   ```
 
-  Also restrict any SQLite sidecar files and backup copies. Check permissions
-  again after moving or copying files.
-- **Windows:** In File Explorer, open the database's and backup directory's
-  **Properties → Security** settings. Remove broad access where appropriate
-  and grant access only to the intended Windows account(s); review inherited
-  permissions on the containing directory as well.
+  Also restrict backup copies. Check permissions again after moving or copying
+  files. **Windows:** In File Explorer, open the database's and backup
+  directory's **Properties → Security** settings. Remove broad access where
+  appropriate and grant access only to the intended Windows account(s); review
+  inherited permissions on the containing directory as well.
 
 OSINT Beast does not create backups. If you make one, treat it as equally
 sensitive, store it in a similarly restricted and encrypted location, and
@@ -102,10 +105,13 @@ and any sidecar files that exist. Protect all resulting copies.
   may capture displayed input and results.
 - Avoid running checks with sensitive inputs on shared accounts, shared
   machines, or environments that retain terminal output.
-- There is no built-in safe export. If you extract data with another SQLite
-  client, export only the fields needed, store the file with the same access
-  controls as the database, and securely transfer or dispose of it under your
-  organization's policy.
+- JSON exports redact sensitive fields unless you explicitly opt in. Opted-in
+  exports may contain sensitive output or error text even when the input was
+  redacted before storage; store them with the same access controls as the
+  database and securely transfer or dispose of them under your organization's
+  policy.
+- If you extract data with another SQLite client, export only the fields needed
+  and apply the same access controls as the database.
 - Before sharing output in an issue, report, screenshot, or message, review it
   and remove personal data, credentials, identifiers, and other information
   that recipients do not need. Do not assume output or errors have been

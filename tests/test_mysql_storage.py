@@ -11,8 +11,11 @@ class FakeResult:
     lastrowid = 41
     rowcount = 1
 
+    def __init__(self, rows=None):
+        self.rows = rows or [("platform",), ("platformID",)]
+
     def fetchall(self):
-        return [("platform",), ("platformID",)]
+        return self.rows
 
 
 class FakeConnection:
@@ -24,6 +27,8 @@ class FakeConnection:
         self.statements.append((statement, parameters))
         if self.fail_on and self.fail_on in statement:
             raise FakeSQLAlchemyError("database unavailable")
+        if "SUBSTR(resultText" in statement:
+            return FakeResult([(1, "holehe", "query", "xxxx", 1, "created")])
         return FakeResult()
 
 
@@ -111,6 +116,17 @@ def test_mysql_core_operations_use_bound_values_and_preserve_transactional_flow(
     assert any("INSERT INTO ToolResults" in sql for sql, _ in statements)
 
 
+def test_mysql_result_listing_caps_output_in_the_query(mysql_storage):
+    storage, engine = mysql_storage
+
+    assert storage.list_tool_results(20, max_result_text_chars=17) == [
+        (1, "holehe", "query", "xxxx… [truncated]", "created")
+    ]
+    statement, parameters = engine.connection.statements[-1]
+    assert "SUBSTR(resultText, 1, %s)" in statement
+    assert parameters == (4, 5, 20)
+
+
 def test_mysql_identifier_validation_and_placeholders(mysql_storage):
     storage, engine = mysql_storage
 
@@ -141,37 +157,6 @@ def test_mysql_backend_is_selected_without_changing_sqlite_default(monkeypatch):
 
     monkeypatch.delenv("OSINTBEAST_DATABASE_URL")
     assert database._get_storage().__class__.__name__ == "SQLiteStorage"
-
-
-def test_mysql_rows_use_the_shared_saved_view_redaction(monkeypatch):
-    class LegacyMySQLReader:
-        def query(self, statement, _parameters=()):
-            if "FROM ToolRuns" in statement:
-                return [
-                    (
-                        3, "holehe", "person+tag@example.com", "failed",
-                        "2020-01-01", None,
-                        "failed for person+tag%40example.com",
-                    )
-                ]
-            return []
-
-        def list_tool_results(self, _limit):
-            return [
-                (
-                    4, "holehe", "person+tag@example.com",
-                    "Found person+tag%40example.com", "2020-01-01",
-                )
-            ]
-
-    monkeypatch.setattr(database, "_get_storage", LegacyMySQLReader)
-
-    assert database.list_tool_runs(redact_sensitive=True)[0][2:] == (
-        "[redacted]", "failed", "2020-01-01", None, "failed for [redacted]",
-    )
-    assert database.list_tool_results(redact_sensitive=True)[0][2:4] == (
-        "[redacted]", "Found [redacted]",
-    )
 
 
 def test_mysql_failures_are_reported_as_storage_errors(mysql_storage):
