@@ -1,6 +1,5 @@
 import json
 import re
-import sqlite3
 
 import data.utils.database as database
 from tool_runs import redact_sensitive_data, redact_sensitive_output
@@ -94,21 +93,4 @@ def run_holehe(email: str):
 
 def save_tool_result(tool_name: str, query_text: str, result_text: str):
     result_text = redact_sensitive_output(result_text, query_text)
-    conn = sqlite3.connect(database.DB_FILE)
-    try:
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS ToolResults (
-                resultID INTEGER PRIMARY KEY AUTOINCREMENT,
-                toolName TEXT NOT NULL,
-                queryText TEXT NOT NULL,
-                resultText TEXT,
-                createdAt TEXT DEFAULT CURRENT_TIMESTAMP
-            )"""
-        )
-        conn.execute(
-            "INSERT INTO ToolResults (toolName, queryText, resultText) VALUES (?, ?, ?)",
-            (tool_name, "[redacted]", result_text),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    return database.save_tool_result(tool_name, "[redacted]", result_text)

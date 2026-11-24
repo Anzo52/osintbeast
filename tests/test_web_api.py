@@ -5,8 +5,8 @@ from unittest.mock import Mock
 
 import pytest
 
-import data.utils.database as database
 import web_api
+import data.utils.database as database
 
 OPERATOR_TOKEN = "o" * 40
 VIEWER_TOKEN = "v" * 40
@@ -148,7 +148,7 @@ def test_viewer_can_read_but_cannot_launch_runs(api_server, monkeypatch):
 
 def test_operator_can_launch_and_read_runs_and_results(api_server, monkeypatch):
     monkeypatch.setitem(
-        web_api.RUNNERS, "holehe", (lambda value: value, lambda value: "checked")
+        web_api.RUNNERS, "holehe", (lambda value: value, lambda value: f"checked {value}")
     )
     status, response = send_request(
         api_server,
@@ -158,15 +158,17 @@ def test_operator_can_launch_and_read_runs_and_results(api_server, monkeypatch):
         payload={"tool": "holehe", "query": "person@example.com"},
     )
     assert status == 201
-    assert response == {"status": "success", "result": "checked"}
+    assert response == {"status": "success", "result": "checked [redacted]"}
 
     status, runs = send_request(api_server, "GET", "/api/runs", token=OPERATOR_TOKEN)
     assert status == 200
     assert runs["runs"][0]["tool"] == "holehe"
     assert runs["runs"][0]["status"] == "success"
+    assert runs["runs"][0]["query"] == "[redacted]"
 
     status, results = send_request(
         api_server, "GET", "/api/results", token=OPERATOR_TOKEN
     )
     assert status == 200
-    assert results["results"][0]["result"] == "checked"
+    assert results["results"][0]["query"] == "[redacted]"
+    assert results["results"][0]["result"] == "checked [redacted]"

@@ -43,6 +43,19 @@ def test_main_menu_ignores_cancelled_or_invalid_choices(monkeypatch, choice):
     action.assert_not_called()
 
 
+def test_menu_reports_initialization_failure(monkeypatch, capsys):
+    def fail():
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(main, "init_db", fail)
+
+    main.menu_actions()[0]()
+
+    assert capsys.readouterr().out == (
+        "Database initialization failed: unable to open database file\n"
+    )
+
+
 @pytest.mark.parametrize(
     ("error", "message"),
     [
@@ -278,13 +291,13 @@ def test_install_menu_selects_pip_tool_and_default_source(monkeypatch):
     install.assert_called_once_with("helix")
 
 
-def test_query_menu_offers_recent_runs_without_custom_sql(monkeypatch):
-    get_recent_tool_runs = Mock(return_value=[])
+def test_query_menu_offers_structured_run_history(monkeypatch):
+    history = Mock()
 
     class FakeMenu:
         def __init__(self, options, title):
             assert options == [
-                "Recent Tool Runs",
+                "Run History",
                 "Saved Tool Results",
                 "Back",
             ]
@@ -294,11 +307,50 @@ def test_query_menu_offers_recent_runs_without_custom_sql(monkeypatch):
 
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
     monkeypatch.setattr(menu_utils, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr(main, "get_recent_tool_runs", get_recent_tool_runs)
+    monkeypatch.setattr(database, "setup_database", Mock())
+    monkeypatch.setattr(main, "run_history_menu", history)
 
     main.query_menu()
 
-    get_recent_tool_runs.assert_called_once_with()
+    history.assert_called_once_with()
+
+
+@pytest.mark.parametrize("choice", [0, 1])
+def test_saved_views_migrate_legacy_records(tmp_path, monkeypatch, capsys, choice):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "legacy.db"))
+    database.setup_database()
+    with database.connect_db() as conn:
+        conn.execute("DELETE FROM OsintBeastMigrations")
+        conn.execute(
+            "INSERT INTO ToolResults (toolName, queryText, resultText) "
+            "VALUES ('holehe', 'private@example.com', 'private@example.com result')"
+        )
+        conn.execute(
+            "INSERT INTO ToolRuns (toolName, queryText, status, errorText) "
+            "VALUES ('holehe', 'private@example.com', 'failed', 'private@example.com error')"
+        )
+    choices = iter((choice, 6))
+    monkeypatch.setattr(main, "_choose_option", lambda *args: next(choices))
+
+    main.query_menu()
+
+    output = capsys.readouterr().out
+    assert "private@example.com" not in output
+    assert "[redacted]" in output
+
+
+def test_saved_view_does_not_query_if_migration_fails(monkeypatch, capsys):
+    monkeypatch.setattr(main, "_choose_option", lambda *args: 0)
+    monkeypatch.setattr(
+        database, "setup_database", Mock(side_effect=sqlite3.OperationalError("failed"))
+    )
+    history = Mock()
+    monkeypatch.setattr(main, "run_history_menu", history)
+
+    main.query_menu()
+
+    history.assert_not_called()
+    assert "Database initialization failed" in capsys.readouterr().out
 
 
 def test_cli_help_lists_commands_and_input_formats(capsys):
@@ -383,6 +435,7 @@ def test_cli_reports_optional_dependency_failure_and_nonzero_status(
 
 
 def test_cli_returns_nonzero_for_database_execution_error(monkeypatch, capsys):
+    monkeypatch.setattr(database, "setup_database", Mock())
     monkeypatch.setattr(
         main,
         "get_recent_tool_runs",
@@ -393,3 +446,24 @@ def test_cli_returns_nonzero_for_database_execution_error(monkeypatch, capsys):
 
     assert result == 1
     assert "Initialize the database and check its permissions." in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("view", ["runs", "results"])
+def test_cli_query_migrates_legacy_records(tmp_path, monkeypatch, capsys, view):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "legacy-cli.db"))
+    database.setup_database()
+    with database.connect_db() as conn:
+        conn.execute("DELETE FROM OsintBeastMigrations")
+        conn.execute(
+            "INSERT INTO ToolResults (toolName, queryText, resultText) "
+            "VALUES ('holehe', 'private@example.com', 'private@example.com result')"
+        )
+        conn.execute(
+            "INSERT INTO ToolRuns (toolName, queryText, status, errorText) "
+            "VALUES ('holehe', 'private@example.com', 'failed', 'private@example.com error')"
+        )
+
+    assert main.cli(["query", view]) == 0
+    output = capsys.readouterr().out
+    assert "private@example.com" not in output
+    assert "[redacted]" in output

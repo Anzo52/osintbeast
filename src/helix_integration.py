@@ -11,7 +11,9 @@ HELIX_REPORT_SCHEMA = "helix.scan.v1"
 def validate_username(username: str) -> str:
     if not isinstance(username, str):
         raise ValueError("A username is required.")
-    username = username.strip().lstrip("@")
+    username = username.strip()
+    if username.startswith("@"):
+        username = username[1:]
     if not username or len(username) > 50 or not re.fullmatch(r"[A-Za-z0-9_.-]+", username):
         raise ValueError(
             "Use a username of up to 50 letters, digits, dots, underscores or hyphens."

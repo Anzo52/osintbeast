@@ -1,25 +1,30 @@
 import argparse
-import sqlite3
+import os
 import subprocess
 import sys
+import tempfile
 import zipfile
 import zlib
+from pathlib import Path
 
 from simple_term_menu import TerminalMenu
 
-from backend_services import get_recent_tool_runs, get_saved_tool_results
 from checkers import _run_email_check_menu, _run_username_check_menu
-from data.utils.database import export_tool_runs_json, get_tool_run
+import data.utils.database as database
+from backend_services import get_recent_tool_runs, get_saved_tool_results
 from data.utils.init_db import init_db
-from downloader import download_tool
-from helix_integration import run_helix
-from helix_integration import validate_username as validate_helix_username
-from holehe_integration import run_holehe, validate_email
-from installer import install_tool
-from maigret_integration import run_maigret, validate_username
 from menu_utils import _choose_option, _download_tool_menu, _install_tool_menu
-from sherlock_integration import run_sherlock
-from sherlock_integration import validate_username as validate_sherlock_username
+from data.utils.database import (
+    export_tool_runs_json,
+    get_tool_run,
+    list_tool_runs,
+)
+from downloader import download_tool
+from helix_integration import run_helix, validate_username as validate_helix_username
+from installer import install_tool
+from holehe_integration import run_holehe, validate_email
+from maigret_integration import run_maigret, validate_username
+from sherlock_integration import run_sherlock, validate_username as validate_sherlock_username
 from tool_registry import get_supported_tools, is_tool_installed
 from tool_runs import execute_tool_run
 
@@ -36,7 +41,7 @@ def main_menu():
 
 def menu_actions():
     actions = {
-        0: init_db,
+        0: initialize_database,
         1: list_supported_tools,
         2: lambda: _download_tool_menu(download),
         3: lambda: _install_tool_menu(install),
@@ -45,8 +50,7 @@ def menu_actions():
         6: lambda: _run_username_check_menu(run_maigret_check),
         7: lambda: _run_username_check_menu(run_helix_check),
         8: lambda: _run_username_check_menu(run_sherlock_check),
-        10: history_menu,
-        11: lambda: (_ for _ in ()).throw(SystemExit(0)),
+        9: lambda: (_ for _ in ()).throw(SystemExit(0)),
     }
     return actions
 
@@ -61,10 +65,16 @@ def menu_ops():
         "Run Maigret Check",
         "Run Helix Check",
         "Run Sherlock Check",
-        "Run History",
         "Exit",
     ]
     return options
+
+
+def initialize_database():
+    try:
+        init_db()
+    except (OSError, UnicodeError, *database.DATABASE_ERRORS) as exc:
+        print(f"Database initialization failed: {exc}")
 
 
 def list_supported_tools():
@@ -107,7 +117,7 @@ def _run_check(tool_name, query_text, validator, runner):
         status, value = execute_tool_run(
             tool_name, query_text, runner, sensitive_input=True
         )
-    except sqlite3.Error as exc:
+    except database.DATABASE_ERRORS as exc:
         print(f"Could not record {tool_name} run: {exc}. Initialize the database and check its permissions.")
         return 1
     if status == "success":
@@ -139,11 +149,12 @@ def run_sherlock_check(username):
 
 def query_view(view):
     try:
+        database.setup_database()
         if view == "runs":
             result = get_recent_tool_runs()
         else:
             result = get_saved_tool_results()
-    except sqlite3.Error as exc:
+    except (OSError, UnicodeError, *database.DATABASE_ERRORS) as exc:
         print(
             f"Database query failed: {exc}. Initialize the database and check its permissions."
         )
@@ -155,65 +166,179 @@ def query_view(view):
 def query_menu():
     choice = _choose_option(
         [
-            "Recent Tool Runs",
+            "Run History",
             "Saved Tool Results",
             "Back",
         ],
         "Choose database view",
     )
+    if choice in (0, 1):
+        try:
+            database.setup_database()
+        except (OSError, UnicodeError, *database.DATABASE_ERRORS) as exc:
+            print(f"Database initialization failed: {exc}")
+            return
     if choice == 0:
-        return query_view("runs")
+        run_history_menu()
     elif choice == 1:
         return query_view("results")
 
 
-def history_menu():
-    """Browse recent runs, inspect one, or export selected runs."""
+def show_run_history(tool_name=None, status=None, offset=0, cursor=None):
     try:
-        choice = _choose_option(
-            [
-                "Next/Recent Runs",
-                "Inspect Run",
-                "Export Run(s)",
-                "Back",
-            ],
-            "Run history",
+        runs = list_tool_runs(
+            limit=20, offset=offset, tool_name=tool_name, status=status,
+            cursor=cursor,
         )
+    except database.DATABASE_ERRORS as exc:
+        print(f"Run history query failed: {exc}")
+        return
+    if not runs:
+        print("No matching runs.")
+        return
+    for run_id, tool, query_text, run_status, started, finished, _error in runs:
+        summary = query_text[:80] + ("…" if len(query_text) > 80 else "")
+        print(
+            f"Run {run_id} | {tool} | input={summary!r} | {run_status} | "
+            f"started={started} | finished={finished or '—'}"
+        )
+
+
+def inspect_tool_run(run_id):
+    try:
+        run = get_tool_run(run_id)
+    except ValueError as exc:
+        print(f"Could not inspect run: {exc}")
+        return
+    except database.DATABASE_ERRORS as exc:
+        print(f"Could not inspect run: {exc}")
+        return
+    if run is None:
+        print(f"Run {run_id} was not found.")
+        return
+    print(
+        f"Run {run[0]} | {run[1]} | input={run[2]!r} | {run[3]} | "
+        f"started={run[6]} | finished={run[7] or '—'}"
+    )
+    print(f"Result: {run[4]!r}" if run[4] else "Result: (empty)")
+    if run[5] is not None:
+        print(f"Error: {run[5]!r}")
+
+
+def _parse_run_ids(value):
+    try:
+        run_ids = [int(item.strip()) for item in value.split(",") if item.strip()]
+    except ValueError:
+        print("Enter run IDs separated by commas.")
+        return None
+    if not run_ids:
+        print("Select at least one run ID.")
+        return None
+    return run_ids
+
+
+def export_selected_runs():
+    run_ids = _parse_run_ids(input("Run IDs to export (comma-separated): "))
+    if run_ids is None:
+        return
+    output_path = input("New JSON file path: ").strip()
+    if not output_path:
+        print("Export cancelled.")
+        return
+    include_sensitive = input(
+        "Include sensitive input, result, and error text? [y/N]: "
+    ).strip().casefold() in {"y", "yes"}
+    try:
+        content = export_tool_runs_json(run_ids, include_sensitive=include_sensitive)
+        destination = Path(output_path).expanduser()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            raise FileExistsError(f"Export destination already exists: {destination}")
+        fd, temporary = tempfile.mkstemp(
+            prefix=f".{destination.name}.", dir=destination.parent
+        )
+        try:
+            os.chmod(temporary, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as export_file:
+                export_file.write(content + "\n")
+                export_file.flush()
+                os.fsync(export_file.fileno())
+            os.link(temporary, destination)
+            os.unlink(temporary)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+            raise
+    except (OSError, ValueError, *database.DATABASE_ERRORS) as exc:
+        print(f"Could not export runs: {exc}")
+        return
+    print(f"Exported {len(run_ids)} run(s) to {output_path}.")
+
+
+def run_history_menu():
+    tool_name = None
+    status = None
+    offset = 0
+    cursor = None
+    show_run_history(tool_name, status, offset, cursor)
+    options = [
+        "Refresh history",
+        "Filter by tool/status",
+        "Inspect a run result",
+        "Next page",
+        "Previous page",
+        "Export selected runs as JSON",
+        "Back",
+    ]
+    while True:
+        choice = _choose_option(options, "Run History")
+        if choice is None or choice == 6:
+            return
         if choice == 0:
-            rows = get_recent_tool_runs()
-            for row in rows:
-                print(f"Run #{row[0]} · {row[1]} · {row[2]} · {row[3]}")
-            return 0
-        if choice == 1:
-            raw_id = input("Run ID: ").strip()
-            run_id = int(raw_id)
-            row = get_tool_run(run_id)
-            if row is None:
-                print("Run not found.")
-            else:
-                print(f"Run #{row[0]} · {row[1]} · {row[2]} · {row[3]}")
-                print(f"Result: {row[4]}")
-                print(f"Error: {row[5]}")
-                print(f"Started: {row[6]}")
-                print(f"Finished: {row[7]}")
-            return 0
-        if choice == 2:
-            raw_ids = input("Run IDs (comma-separated): ").strip()
-            run_ids = [int(value.strip()) for value in raw_ids.split(",") if value.strip()]
-            destination = input("Export destination: ").strip()
-            answer = input("Include sensitive fields? [y/N]: ").strip().lower()
-            include_sensitive = answer in {"y", "yes"}
-            path = export_tool_runs_json(
-                run_ids,
-                destination,
-                include_sensitive=include_sensitive,
+            show_run_history(tool_name, status, offset, cursor)
+        elif choice == 1:
+            tool_value = input("Tool name (blank for any): ").strip()
+            status_value = input(
+                "Status (running, success, failed, timed_out; blank for any): "
+            ).strip()
+            tool_name = tool_value or None
+            status = status_value or None
+            offset = 0
+            cursor = None
+            try:
+                list_tool_runs(tool_name=tool_name, status=status)
+            except ValueError as exc:
+                print(f"Invalid history filter: {exc}")
+                tool_name = status = None
+            except database.DATABASE_ERRORS as exc:
+                print(f"Run history query failed: {exc}")
+                continue
+            show_run_history(tool_name, status, offset, cursor)
+        elif choice == 2:
+            value = input("Run ID to inspect: ").strip()
+            try:
+                inspect_tool_run(int(value))
+            except ValueError:
+                print("Enter a valid run ID.")
+        elif choice == 3:
+            runs = list_tool_runs(
+                limit=20, tool_name=tool_name, status=status, cursor=cursor
             )
-            print(f"Exported run history to {path}")
-            return 0
-        return 0
-    except (sqlite3.Error, OSError, OverflowError, ValueError) as exc:
-        print(f"History operation failed: {exc}")
-        return 1
+            if runs:
+                cursor = runs[-1][0]
+            show_run_history(tool_name, status, offset, cursor)
+        elif choice == 4:
+            offset = max(0, offset - 20)
+            cursor = None
+            show_run_history(tool_name, status, offset, cursor)
+        elif choice == 5:
+            export_selected_runs()
 
 
 def _cli_initialize_database(_args):
@@ -302,8 +427,10 @@ def cli(argv=None):
             main_menu()
     try:
         return args.handler(args)
-    except (OSError, RuntimeError, sqlite3.Error, ValueError) as exc:
+    except (OSError, RuntimeError, ValueError, *database.DATABASE_ERRORS) as exc:
         print(f"Command failed: {exc}", file=sys.stderr)
         return 1
+
+
 if __name__ == "__main__":
     raise SystemExit(cli())
