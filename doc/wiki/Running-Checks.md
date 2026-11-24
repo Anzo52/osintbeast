@@ -70,8 +70,9 @@ output as text. By default, the `input`, `result`, and `error` fields are
 replaced with `[REDACTED]`; explicitly answer yes to include the values stored
 in the database. Sensitive input is redacted before storage, so opted-in
 exports may still contain other sensitive output or error text; store and share
-them accordingly. Exports are created with owner-only permissions and will not
-overwrite an existing file.
+them accordingly. On POSIX, exports are created with owner-only permissions.
+Sensitive exports are disabled on Windows because file permissions inherit
+from the destination directory. Exports will not overwrite an existing file.
 
 Inputs, results, and errors can contain sensitive data. They are stored in
 plain text in the local database; restrict its permissions and delete records

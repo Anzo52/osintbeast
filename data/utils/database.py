@@ -61,6 +61,8 @@ DB_FILE, SCHEMA_DIR, SCHEMA_FILES, INSERTABLE_TABLES = setup_database_paths(__fi
 MYSQL_SCHEMA_FILES = ("mysql-infoschema.sql", "mysql-toolschema.sql")
 _STORAGE_CACHE: dict[tuple[Any, ...], Storage] = {}
 DATABASE_ERRORS = (sqlite3.Error, StorageError)
+SQLITE_MAX_INTEGER = (1 << 63) - 1
+MAX_SQLITE_INTEGER = SQLITE_MAX_INTEGER
 
 
 def _get_storage() -> Storage:
@@ -145,6 +147,7 @@ def _validate_list_limit(limit: int) -> None:
 def list_tool_runs(
     limit: int = 20, offset: int = 0, tool_name: str | None = None,
     status: str | None = None, cursor: int | None = None,
+    before_run_id: int | None = None,
 ) -> list[tuple[Any, ...]]:
     """Return a bounded, newest-first run page using stable run-ID cursors."""
     _validate_list_limit(limit)
@@ -152,10 +155,15 @@ def list_tool_runs(
         raise ValueError("offset must be a non-negative integer")
     if tool_name is not None and (not isinstance(tool_name, str) or not tool_name):
         raise ValueError("tool_name must be a non-empty string")
-    if status is not None and status not in {
-        "running", "success", "failed", "timed_out",
-    }:
+    if status is not None and (
+        not isinstance(status, str)
+        or status not in {"running", "success", "failed", "timed_out"}
+    ):
         raise ValueError("Invalid run status")
+    if before_run_id is not None:
+        if cursor is not None:
+            raise ValueError("Specify only one run-ID cursor")
+        cursor = before_run_id
     if cursor is not None:
         cursor = _validate_run_id(cursor)
 
@@ -183,20 +191,6 @@ def list_tool_runs(
     return _get_storage().query(query, parameters)
 
 
-def reconcile_stale_tool_runs(older_than_seconds: int = 600) -> int:
-    """Mark runs older than the tool timeout as interrupted after lost outcomes."""
-    if (
-        not isinstance(older_than_seconds, int)
-        or isinstance(older_than_seconds, bool)
-        or older_than_seconds < 1
-    ):
-        raise ValueError("older_than_seconds must be a positive integer")
-    return _get_storage().reconcile_stale_tool_runs(older_than_seconds)
-
-
-SQLITE_MAX_INTEGER = (1 << 63) - 1
-
-
 def _validate_run_id(run_id: int) -> int:
     if (
         not isinstance(run_id, int)
@@ -220,6 +214,17 @@ def get_tool_run(run_id: int) -> tuple[Any, ...] | None:
     return rows[0] if rows else None
 
 
+def reconcile_stale_tool_runs(older_than_seconds: int = 600) -> int:
+    """Mark runs older than the tool timeout as interrupted after lost outcomes."""
+    if (
+        not isinstance(older_than_seconds, int)
+        or isinstance(older_than_seconds, bool)
+        or older_than_seconds < 1
+    ):
+        raise ValueError("older_than_seconds must be a positive integer")
+    return _get_storage().reconcile_stale_tool_runs(older_than_seconds)
+
+
 def get_tool_result(result_id: int) -> dict[str, Any] | None:
     """Return one saved result without exposing its original query text."""
     result_id = _validate_run_id(result_id)
@@ -237,18 +242,17 @@ def export_tool_runs_json(
     run_ids: list[int], include_sensitive: bool = False,
 ) -> str:
     """Serialize selected run records as JSON, redacting sensitive text by default."""
-    if type(include_sensitive) is not bool:
+    if not isinstance(include_sensitive, bool):
         raise ValueError("include_sensitive must be a boolean")
-    if not run_ids or len(run_ids) > 500:
+    if not isinstance(run_ids, list) or not run_ids or len(run_ids) > 500:
         raise ValueError("Select between 1 and 500 runs")
-    if any(
-        not isinstance(run_id, int)
-        or isinstance(run_id, bool)
-        or run_id < 1
-        or run_id > SQLITE_MAX_INTEGER
-        for run_id in run_ids
-    ):
-        raise ValueError("run_ids must contain positive SQLite integers")
+    for run_id in run_ids:
+        try:
+            _validate_run_id(run_id)
+        except ValueError as exc:
+            raise ValueError(
+                "run_ids must contain positive SQLite integers"
+            ) from exc
     if len(set(run_ids)) != len(run_ids):
         raise ValueError("run_ids must not contain duplicates")
 
@@ -323,4 +327,3 @@ def get_tool_run_status(run_id: int) -> dict[str, Any] | None:
             rows[0],
         )
     )
-
