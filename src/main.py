@@ -2,27 +2,31 @@ import argparse
 import os
 import subprocess
 import sys
+import tempfile
 import zipfile
 import zlib
+from pathlib import Path
 
 from simple_term_menu import TerminalMenu
 
-from checkers import _run_email_check_menu, _run_username_check_menu
-import data.utils.database as database
 from backend_services import get_recent_tool_runs, get_saved_tool_results
-from data.utils.init_db import init_db
-from menu_utils import _choose_option, _download_tool_menu, _install_tool_menu
+from checkers import _run_email_check_menu, _run_username_check_menu
+from data.utils import database
 from data.utils.database import (
     export_tool_runs_json,
     get_tool_run,
     list_tool_runs,
 )
+from data.utils.init_db import init_db
 from downloader import download_tool
-from helix_integration import run_helix, validate_username as validate_helix_username
-from installer import install_tool
+from helix_integration import run_helix
+from helix_integration import validate_username as validate_helix_username
 from holehe_integration import run_holehe, validate_email
+from installer import install_tool
 from maigret_integration import run_maigret, validate_username
-from sherlock_integration import run_sherlock, validate_username as validate_sherlock_username
+from menu_utils import _choose_option, _download_tool_menu, _install_tool_menu
+from sherlock_integration import run_sherlock
+from sherlock_integration import validate_username as validate_sherlock_username
 from tool_registry import get_supported_tools, is_tool_installed
 from tool_runs import execute_tool_run
 
@@ -182,10 +186,11 @@ def query_menu():
         return query_view("results")
 
 
-def show_run_history(tool_name=None, status=None, offset=0):
+def show_run_history(tool_name=None, status=None, offset=0, cursor=None):
     try:
         runs = list_tool_runs(
-            limit=20, offset=offset, tool_name=tool_name, status=status
+            limit=20, offset=offset, tool_name=tool_name, status=status,
+            cursor=cursor,
         )
     except database.DATABASE_ERRORS as exc:
         print(f"Run history query failed: {exc}")
@@ -247,13 +252,31 @@ def export_selected_runs():
     ).strip().casefold() in {"y", "yes"}
     try:
         content = export_tool_runs_json(run_ids, include_sensitive=include_sensitive)
-        with open(
-            output_path,
-            "x",
-            encoding="utf-8",
-            opener=lambda path, flags: os.open(path, flags, 0o600),
-        ) as export_file:
-            export_file.write(content + "\n")
+        destination = Path(output_path).expanduser()
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists():
+            raise FileExistsError(f"Export destination already exists: {destination}")
+        fd, temporary = tempfile.mkstemp(
+            prefix=f".{destination.name}.", dir=destination.parent
+        )
+        try:
+            os.chmod(temporary, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as export_file:
+                export_file.write(content + "\n")
+                export_file.flush()
+                os.fsync(export_file.fileno())
+            os.link(temporary, destination)
+            os.unlink(temporary)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+            raise
     except (OSError, ValueError, *database.DATABASE_ERRORS) as exc:
         print(f"Could not export runs: {exc}")
         return
@@ -264,7 +287,8 @@ def run_history_menu():
     tool_name = None
     status = None
     offset = 0
-    show_run_history(tool_name, status, offset)
+    cursor = None
+    show_run_history(tool_name, status, offset, cursor)
     options = [
         "Refresh history",
         "Filter by tool/status",
@@ -279,7 +303,7 @@ def run_history_menu():
         if choice is None or choice == 6:
             return
         if choice == 0:
-            show_run_history(tool_name, status, offset)
+            show_run_history(tool_name, status, offset, cursor)
         elif choice == 1:
             tool_value = input("Tool name (blank for any): ").strip()
             status_value = input(
@@ -288,6 +312,7 @@ def run_history_menu():
             tool_name = tool_value or None
             status = status_value or None
             offset = 0
+            cursor = None
             try:
                 list_tool_runs(tool_name=tool_name, status=status)
             except ValueError as exc:
@@ -296,7 +321,7 @@ def run_history_menu():
             except database.DATABASE_ERRORS as exc:
                 print(f"Run history query failed: {exc}")
                 continue
-            show_run_history(tool_name, status, offset)
+            show_run_history(tool_name, status, offset, cursor)
         elif choice == 2:
             value = input("Run ID to inspect: ").strip()
             try:
@@ -304,11 +329,16 @@ def run_history_menu():
             except ValueError:
                 print("Enter a valid run ID.")
         elif choice == 3:
-            offset += 20
-            show_run_history(tool_name, status, offset)
+            runs = list_tool_runs(
+                limit=20, tool_name=tool_name, status=status, cursor=cursor
+            )
+            if runs:
+                cursor = runs[-1][0]
+            show_run_history(tool_name, status, offset, cursor)
         elif choice == 4:
             offset = max(0, offset - 20)
-            show_run_history(tool_name, status, offset)
+            cursor = None
+            show_run_history(tool_name, status, offset, cursor)
         elif choice == 5:
             export_selected_runs()
 

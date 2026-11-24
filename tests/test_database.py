@@ -7,10 +7,9 @@ from pathlib import Path
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-import data.utils.database as database
 import downloader
 import holehe_integration
-import data.utils.init_db as init_db
+from data.utils import database, init_db
 
 
 def test_setup_database_loads_both_idempotent_schemas(tmp_path, monkeypatch):
@@ -433,3 +432,39 @@ def test_reconcile_stale_tool_runs_preserves_recent_runs(tmp_path, monkeypatch):
 def test_reconcile_stale_tool_runs_rejects_invalid_age(age):
     with pytest.raises(ValueError, match="positive integer"):
         database.reconcile_stale_tool_runs(age)
+
+
+def test_run_history_cursor_pagination_is_stable(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "history.db"))
+    database.setup_database()
+    first = database.start_tool_run("holehe", "one")
+    second = database.start_tool_run("holehe", "two")
+    third = database.start_tool_run("sherlock", "three")
+
+    assert [row[0] for row in database.list_tool_runs(limit=1)] == [third]
+    assert [row[0] for row in database.list_tool_runs(limit=1, cursor=third)] == [second]
+    assert [row[0] for row in database.list_tool_runs(limit=1, cursor=second)] == [first]
+    assert [row[0] for row in database.list_tool_runs(tool_name="holehe")] == [second, first]
+
+
+@pytest.mark.parametrize("include_sensitive", [None, 1, "false", [], {}])
+def test_export_requires_explicit_boolean_sensitive_opt_in(
+    tmp_path, monkeypatch, include_sensitive
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "export.db"))
+    database.setup_database()
+    run_id = database.start_tool_run("holehe", "private")
+    with pytest.raises(ValueError, match="boolean"):
+        database.export_tool_runs_json(
+            [run_id], include_sensitive=include_sensitive
+        )
+
+
+def test_run_ids_reject_sqlite_overflow(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "ids.db"))
+    database.setup_database()
+    oversized = 1 << 63
+    with pytest.raises(ValueError, match="positive SQLite integer"):
+        database.get_tool_run(oversized)
+    with pytest.raises(ValueError, match="positive SQLite integers"):
+        database.export_tool_runs_json([oversized])
