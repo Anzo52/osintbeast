@@ -30,27 +30,27 @@ from tool_registry import get_supported_tools, is_tool_installed
 from tool_runs import execute_tool_run
 
 
-def main_menu():
+def main_menu(*, show_target_input=False):
     options = menu_ops()
     terminal_menu = TerminalMenu(options, title="OSINT Beast Main Menu")
     choice = terminal_menu.show()
 
-    actions = menu_actions()
+    actions = menu_actions(show_target_input=show_target_input)
     action = actions.get(choice) if isinstance(choice, int) else None
     if action:
         action()
 
-def menu_actions():
+def menu_actions(*, show_target_input=False):
     actions = {
         0: initialize_database,
         1: list_supported_tools,
         2: lambda: _download_tool_menu(download),
         3: lambda: _install_tool_menu(install),
-        4: lambda: _run_email_check_menu(run_holehe_check),
+        4: lambda: _run_email_check_menu(run_holehe_check, show_input=show_target_input),
         5: query_menu,
-        6: lambda: _run_username_check_menu(run_maigret_check),
-        7: lambda: _run_username_check_menu(run_helix_check),
-        8: lambda: _run_username_check_menu(run_sherlock_check),
+        6: lambda: _run_username_check_menu(run_maigret_check, show_input=show_target_input),
+        7: lambda: _run_username_check_menu(run_helix_check, show_input=show_target_input),
+        8: lambda: _run_username_check_menu(run_sherlock_check, show_input=show_target_input),
         9: lambda: (_ for _ in ()).throw(SystemExit(0)),
     }
     return actions
@@ -368,6 +368,11 @@ def _build_parser():
         prog="osintbeast",
         description="Run authorized OSINT workflows or start the interactive menu.",
     )
+    parser.add_argument(
+        "--show-target-input",
+        action="store_true",
+        help="show email and username input while typing in the interactive menu",
+    )
     commands = parser.add_subparsers(dest="command")
 
     initialize = commands.add_parser("init-db", help="initialize the local database")
@@ -436,7 +441,9 @@ def cli(argv=None):
     args = parser.parse_args(argv)
     if args.command is None:
         while True:
-            main_menu()
+            main_menu(show_target_input=args.show_target_input)
+    if args.show_target_input:
+        parser.error("--show-target-input is only available for the interactive menu")
     try:
         return args.handler(args)
     except (OSError, RuntimeError, ValueError, *database.DATABASE_ERRORS) as exc:

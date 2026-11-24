@@ -97,8 +97,11 @@ failed operations print a corrective message and return a nonzero status.
 
 ### Running checks
 
-Select a supported check from the menu. Sensitive input is entered through a
-non-echoing prompt; checks send it to third-party sites. See the
+Select a supported check from the menu. Email and username entry is hidden by
+default. To display targets while typing, start the menu with
+`osintbeast --show-target-input` (or `python src/main.py --show-target-input`).
+Visible input can be seen by others and retained in terminal recordings or
+scrollback; checks send targets to third-party sites. See the
 [running checks guide](doc/wiki/Running-Checks.md) for optional installations,
 tool limits, run history, exports, and privacy details.
 
