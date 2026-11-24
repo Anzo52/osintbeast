@@ -189,7 +189,7 @@ def query_menu():
 def show_run_history(tool_name=None, status=None, offset=0, cursor=None):
     try:
         runs = list_tool_runs(
-            limit=20, offset=offset, tool_name=tool_name, status=status,
+            limit=21, offset=offset, tool_name=tool_name, status=status,
             cursor=cursor,
         )
     except database.DATABASE_ERRORS as exc:
@@ -197,13 +197,13 @@ def show_run_history(tool_name=None, status=None, offset=0, cursor=None):
         return
     if not runs:
         print("No matching runs.")
-        return
-    for run_id, tool, query_text, run_status, started, finished, _error in runs:
+    for run_id, tool, query_text, run_status, started, finished, _error in runs[:20]:
         summary = query_text[:80] + ("…" if len(query_text) > 80 else "")
         print(
             f"Run {run_id} | {tool} | input={summary!r} | {run_status} | "
             f"started={started} | finished={finished or '—'}"
         )
+    return runs
 
 
 def inspect_tool_run(run_id):
@@ -251,6 +251,8 @@ def export_selected_runs():
         "Include sensitive input, result, and error text? [y/N]: "
     ).strip().casefold() in {"y", "yes"}
     try:
+        if include_sensitive and os.name == "nt":
+            raise ValueError("Sensitive exports are not supported on Windows.")
         content = export_tool_runs_json(run_ids, include_sensitive=include_sensitive)
         destination = Path(output_path).expanduser()
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -262,21 +264,23 @@ def export_selected_runs():
         try:
             os.chmod(temporary, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as export_file:
+                fd = None
                 export_file.write(content + "\n")
                 export_file.flush()
                 os.fsync(export_file.fileno())
             os.link(temporary, destination)
-            os.unlink(temporary)
-        except BaseException:
-            try:
-                os.close(fd)
-            except OSError:
-                pass
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
             try:
                 os.unlink(temporary)
             except FileNotFoundError:
                 pass
-            raise
+            except OSError as exc:
+                print(f"Warning: could not remove temporary export {temporary}: {exc}")
     except (OSError, ValueError, *database.DATABASE_ERRORS) as exc:
         print(f"Could not export runs: {exc}")
         return
@@ -286,9 +290,8 @@ def export_selected_runs():
 def run_history_menu():
     tool_name = None
     status = None
-    offset = 0
-    cursor = None
-    show_run_history(tool_name, status, offset, cursor)
+    cursors = [None]
+    current_runs = show_run_history(tool_name, status)
     options = [
         "Refresh history",
         "Filter by tool/status",
@@ -303,25 +306,23 @@ def run_history_menu():
         if choice is None or choice == 6:
             return
         if choice == 0:
-            show_run_history(tool_name, status, offset, cursor)
+            runs = show_run_history(tool_name, status, cursor=cursors[-1])
+            if runs is not None:
+                current_runs = runs
         elif choice == 1:
             tool_value = input("Tool name (blank for any): ").strip()
             status_value = input(
                 "Status (running, success, failed, timed_out; blank for any): "
             ).strip()
-            tool_name = tool_value or None
-            status = status_value or None
-            offset = 0
-            cursor = None
             try:
-                list_tool_runs(tool_name=tool_name, status=status)
+                runs = show_run_history(tool_value or None, status_value or None)
             except ValueError as exc:
                 print(f"Invalid history filter: {exc}")
-                tool_name = status = None
-            except database.DATABASE_ERRORS as exc:
-                print(f"Run history query failed: {exc}")
                 continue
-            show_run_history(tool_name, status, offset, cursor)
+            if runs is not None:
+                tool_name, status = tool_value or None, status_value or None
+                cursors = [None]
+                current_runs = runs
         elif choice == 2:
             value = input("Run ID to inspect: ").strip()
             try:
@@ -329,16 +330,22 @@ def run_history_menu():
             except ValueError:
                 print("Enter a valid run ID.")
         elif choice == 3:
-            runs = list_tool_runs(
-                limit=20, tool_name=tool_name, status=status, cursor=cursor
-            )
-            if runs:
-                cursor = runs[-1][0]
-            show_run_history(tool_name, status, offset, cursor)
+            if current_runs and len(current_runs) > 20:
+                cursor = current_runs[19][0]
+                runs = show_run_history(tool_name, status, cursor=cursor)
+                if runs:
+                    cursors.append(cursor)
+                    current_runs = runs
+            else:
+                print("No next page.")
         elif choice == 4:
-            offset = max(0, offset - 20)
-            cursor = None
-            show_run_history(tool_name, status, offset, cursor)
+            if len(cursors) > 1:
+                runs = show_run_history(tool_name, status, cursor=cursors[-2])
+                if runs is not None:
+                    cursors.pop()
+                    current_runs = runs
+            else:
+                print("No previous page.")
         elif choice == 5:
             export_selected_runs()
 

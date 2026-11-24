@@ -99,10 +99,12 @@ and any sidecar files that exist. Protect all resulting copies.
   may capture displayed input and results.
 - Avoid running checks with sensitive inputs on shared accounts, shared
   machines, or environments that retain terminal output.
-- There is no built-in safe export. If you extract data with another SQLite
-  client, export only the fields needed, store the file with the same access
-  controls as the database, and securely transfer or dispose of it under your
-  organization's policy.
+- Run-history JSON exports redact input, result, and error text by default.
+  Opting in includes sensitive data and is disabled on Windows, where
+  owner-only file permissions cannot be guaranteed by this export. On POSIX,
+  exports use owner-only permissions; protect and dispose of all copies under
+  your organization's policy. If cleanup fails, the CLI warns about the
+  remaining temporary file, which must also be protected or removed.
 - Before sharing output in an issue, report, screenshot, or message, review it
   and remove personal data, credentials, identifiers, and other information
   that recipients do not need. Do not assume output or errors have been
