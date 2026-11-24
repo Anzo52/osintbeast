@@ -1,42 +1,14 @@
-import re
 import sqlite3
 from contextlib import closing
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol
-from urllib.parse import quote, quote_plus
-
 from sqlalchemy import MetaData, Table, create_engine
 from sqlalchemy.engine import URL
 
 
 class StorageError(Exception):
     """A backend-neutral storage error for application-level handling."""
-
-
-def _redact_legacy_tool_records(conn: sqlite3.Connection) -> None:
-    def redact(text: Optional[str], query: str) -> Optional[str]:
-        if text is None or not query or query == "[redacted]":
-            return text
-        variants = {query, quote(query, safe=""), quote_plus(query)}
-        for variant in sorted(variants, key=len, reverse=True):
-            text = re.sub(re.escape(variant), lambda _: "[redacted]", text, flags=re.IGNORECASE)
-        return text
-
-    for row_id, query, result in conn.execute(
-        "SELECT resultID, queryText, resultText FROM ToolResults"
-    ):
-        conn.execute(
-            "UPDATE ToolResults SET queryText = ?, resultText = ? WHERE resultID = ?",
-            ("[redacted]", redact(result, query), row_id),
-        )
-    for row_id, query, result, error in conn.execute(
-        "SELECT runID, queryText, resultText, errorText FROM ToolRuns"
-    ):
-        conn.execute(
-            "UPDATE ToolRuns SET queryText = ?, resultText = ?, errorText = ? WHERE runID = ?",
-            ("[redacted]", redact(result, query), redact(error, query), row_id),
-        )
 
 
 class Storage(Protocol):
@@ -54,7 +26,9 @@ class Storage(Protocol):
         self, tool_name: str, query_text: str, result_text: Optional[str]
     ) -> int: ...
 
-    def list_tool_results(self, limit: int) -> list[tuple[Any, ...]]: ...
+    def list_tool_results(
+        self, limit: int, max_result_text_chars: Optional[int] = None
+    ) -> list[tuple[Any, ...]]: ...
 
     def start_tool_run(self, tool_name: str, query_text: str) -> int: ...
 
@@ -114,18 +88,6 @@ class SQLiteStorage:
 
         with closing(self.connect()) as conn, conn:
             conn.executescript("BEGIN IMMEDIATE;\n" + "\n".join(schemas))
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS OsintBeastMigrations (name TEXT PRIMARY KEY)"
-            )
-            if not conn.execute(
-                "SELECT 1 FROM OsintBeastMigrations WHERE name = ?",
-                ("redact_legacy_tool_records",),
-            ).fetchone():
-                _redact_legacy_tool_records(conn)
-                conn.execute(
-                    "INSERT INTO OsintBeastMigrations (name) VALUES (?)",
-                    ("redact_legacy_tool_records",),
-                )
 
     def insert(self, table: str, data: Mapping[str, Any]) -> None:
         if not data:
@@ -169,13 +131,36 @@ class SQLiteStorage:
             )
             return cursor.lastrowid
 
-    def list_tool_results(self, limit: int) -> list[tuple[Any, ...]]:
+    def list_tool_results(
+        self, limit: int, max_result_text_chars: Optional[int] = None
+    ) -> list[tuple[Any, ...]]:
         with closing(self.connect()) as conn:
-            return conn.execute(
-                """SELECT resultID, toolName, queryText, resultText, createdAt
+            if max_result_text_chars is None:
+                return conn.execute(
+                    """SELECT resultID, toolName, queryText, resultText, createdAt
+                       FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
+                    (limit,),
+                ).fetchall()
+            marker = "… [truncated]"[:max_result_text_chars]
+            prefix_length = max(0, max_result_text_chars - len(marker))
+            rows = conn.execute(
+                """SELECT resultID, toolName, queryText,
+                          SUBSTR(resultText, 1, ?),
+                          CASE WHEN SUBSTR(resultText, ?, 1) <> '' THEN 1 ELSE 0 END,
+                          createdAt
                    FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
-                (limit,),
+                (prefix_length, prefix_length + 1, limit),
             ).fetchall()
+        return [
+            (
+                row[0],
+                row[1],
+                row[2],
+                None if row[3] is None else row[3] + (marker if row[4] else ""),
+                row[5],
+            )
+            for row in rows
+        ]
 
     def start_tool_run(self, tool_name: str, query_text: str) -> int:
         with closing(self.connect()) as conn, conn:
@@ -424,16 +409,40 @@ class MySQLStorage:
                 raise StorageError(str(exc)) from exc
             raise
 
-    def list_tool_results(self, limit: int) -> list[tuple[Any, ...]]:
+    def list_tool_results(
+        self, limit: int, max_result_text_chars: Optional[int] = None
+    ) -> list[tuple[Any, ...]]:
         try:
             with self._get_engine().connect() as connection:
-                return self._normalize_rows(
-                    connection.exec_driver_sql(
+                if max_result_text_chars is None:
+                    rows = connection.exec_driver_sql(
                         """SELECT resultID, toolName, queryText, resultText, createdAt
                            FROM ToolResults ORDER BY resultID DESC LIMIT %s""",
                         (limit,),
                     ).fetchall()
-                )
+                else:
+                    marker = "… [truncated]"[:max_result_text_chars]
+                    prefix_length = max(0, max_result_text_chars - len(marker))
+                    rows = connection.exec_driver_sql(
+                        """SELECT resultID, toolName, queryText,
+                                  SUBSTR(resultText, 1, %s),
+                                  CASE WHEN SUBSTR(resultText, %s, 1) <> ''
+                                       THEN 1 ELSE 0 END,
+                                  createdAt
+                           FROM ToolResults ORDER BY resultID DESC LIMIT %s""",
+                        (prefix_length, prefix_length + 1, limit),
+                    ).fetchall()
+                    rows = [
+                        (
+                            row[0],
+                            row[1],
+                            row[2],
+                            None if row[3] is None else row[3] + (marker if row[4] else ""),
+                            row[5],
+                        )
+                        for row in rows
+                    ]
+                return self._normalize_rows(rows)
         except Exception as exc:
             if exc.__class__.__module__.startswith("sqlalchemy"):
                 raise StorageError(str(exc)) from exc

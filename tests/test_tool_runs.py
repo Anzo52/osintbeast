@@ -1,7 +1,8 @@
 import json
 import logging
+import os
 import sqlite3
-import warnings
+import stat
 from unittest.mock import Mock
 
 import pytest
@@ -45,6 +46,26 @@ def test_failed_runs_are_recorded(initialized_db, tool, error, status):
         "SELECT toolName, queryText, status, resultText, errorText, "
         "startedAt IS NOT NULL, finishedAt IS NOT NULL FROM ToolRuns"
     ) == [(tool, "test", status, None, message, 1, 1)]
+    assert database.list_tool_results() == []
+
+
+@pytest.mark.parametrize("existing_run", [False, True])
+@pytest.mark.parametrize("sensitive_input", [False, True])
+def test_interrupted_runs_are_recorded(initialized_db, existing_run, sensitive_input):
+    run_id = database.start_tool_run("helix", "[redacted]") if existing_run else None
+
+    def interrupt(_):
+        raise KeyboardInterrupt("private-user")
+
+    with pytest.raises(KeyboardInterrupt):
+        tool_runs.execute_tool_run(
+            "helix", "private-user", interrupt, run_id=run_id,
+            sensitive_input=sensitive_input,
+        )
+
+    assert database.query_database(
+        "SELECT status, resultText, errorText, finishedAt IS NOT NULL FROM ToolRuns"
+    ) == [("failed", None, "Tool run interrupted.", 1)]
     assert database.list_tool_results() == []
 
 
@@ -165,7 +186,7 @@ def test_finish_is_atomic_if_legacy_result_insert_fails(initialized_db):
     ) == [("running", None, None)]
 
 
-def test_reinitializing_legacy_database_redacts_results(tmp_path, monkeypatch):
+def test_reinitializing_legacy_database_preserves_results(tmp_path, monkeypatch):
     path = tmp_path / "legacy.db"
     monkeypatch.setattr(database, "DB_FILE", str(path))
     with sqlite3.connect(path) as conn:
@@ -179,7 +200,7 @@ def test_reinitializing_legacy_database_redacts_results(tmp_path, monkeypatch):
     database.setup_database()
 
     assert database.query_database("SELECT queryText, resultText FROM ToolResults") == [
-        ("[redacted]", "[redacted] result")
+        ("old", "old result")
     ]
     assert database.query_database("SELECT * FROM ToolRuns") == []
 
@@ -189,6 +210,7 @@ def test_reinitializing_legacy_database_redacts_results(tmp_path, monkeypatch):
     [
         (main.run_holehe_check, "bad email"),
         (main.run_maigret_check, "bad username"),
+        (main.run_helix_check, "@@user"),
         (main.run_sherlock_check, "bad username"),
     ],
 )
@@ -196,6 +218,36 @@ def test_invalid_input_is_not_recorded(initialized_db, capsys, function, invalid
     function(invalid)
     assert "Input error:" in capsys.readouterr().out
     assert database.query_database("SELECT * FROM ToolRuns") == []
+
+
+@pytest.mark.parametrize(
+    ("choice", "identifier", "target", "result"),
+    [
+        (4, "-user@example.com", "run_holehe", {"output": "output"}),
+        (6, "-user", "run_maigret", "output"),
+        (7, "-user", "run_helix", "output"),
+        (8, "-user", "run_sherlock", "output"),
+    ],
+)
+def test_menu_accepts_leading_hyphen_identifiers(
+    initialized_db, monkeypatch, choice, identifier, target, result
+):
+    class FakeMenu:
+        def __init__(self, options, title):
+            pass
+
+        def show(self):
+            return choice
+
+    runner = Mock(return_value=result)
+    monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
+    monkeypatch.setattr("builtins.input", lambda prompt: identifier)
+    monkeypatch.setattr(main, target, runner)
+
+    main.main_menu()
+
+    runner.assert_called_once_with(identifier)
+    assert database.query_database("SELECT status FROM ToolRuns") == [("success",)]
 
 
 @pytest.mark.parametrize(
@@ -294,7 +346,7 @@ def test_history_menu_filters_and_inspects_results(
     main.run_history_menu()
 
     output = capsys.readouterr().out
-    assert f"Run {failed_id} | holehe | input='target' | failed" in output
+    assert f"Run {failed_id} | holehe | input='[redacted]' | failed" in output
     assert "Error: 'broken output'" in output
     assert output.count(f"Run {first_id} |") == 1
 
@@ -575,8 +627,7 @@ def test_execute_tool_run_with_id_redacts_sensitive_values(initialized_db):
     )
     assert database.query_database(
         "SELECT queryText, resultText FROM ToolResults"
-    ) == [("[redacted]", "Found [redacted]")]
-
+    ) == [("[redacted]", "Found [redacted]") ]
 
 @pytest.mark.parametrize(
     ("menu", "prompt", "value"),
@@ -593,13 +644,10 @@ def test_execute_tool_run_with_id_redacts_sensitive_values(initialized_db):
         ),
     ],
 )
-def test_sensitive_inputs_use_non_echoing_prompts(
-    monkeypatch, capsys, menu, prompt, value
-):
+def test_target_inputs_use_echoing_prompts(monkeypatch, menu, prompt, value):
     seen = []
     monkeypatch.setattr(
-        checkers,
-        "getpass",
+        "builtins.input",
         lambda actual_prompt: seen.append(actual_prompt) or value,
     )
     runner = Mock()
@@ -608,38 +656,6 @@ def test_sensitive_inputs_use_non_echoing_prompts(
 
     assert seen == [prompt]
     runner.assert_called_once_with(value)
-    assert value not in capsys.readouterr().out
-
-
-@pytest.mark.parametrize(
-    ("menu", "value"),
-    [
-        (checkers._run_email_check_menu, "person@example.com"),
-        (checkers._run_username_check_menu, "private_user"),
-    ],
-)
-def test_sensitive_prompt_refuses_echoing_fallback(monkeypatch, capsys, menu, value):
-    input_calls = []
-
-    def insecure_getpass(_prompt):
-        warnings.warn("terminal echo is enabled", checkers.GetPassWarning)
-        return input("fallback: ")
-
-    def fallback_input(_prompt):
-        input_calls.append(True)
-        return value
-
-    monkeypatch.setattr(checkers, "getpass", insecure_getpass)
-    monkeypatch.setattr("builtins.input", fallback_input)
-    runner = Mock()
-
-    menu(runner)
-
-    output = capsys.readouterr().out
-    assert "Unable to securely read sensitive input" in output
-    assert value not in output
-    assert input_calls == []
-    runner.assert_not_called()
 
 
 def test_database_failure_after_execution_is_reported(initialized_db, monkeypatch, capsys):
@@ -700,7 +716,129 @@ def test_maigret_menu_action_dispatches_username(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr(checkers, "getpass", lambda prompt: " user ")
+    monkeypatch.setattr("builtins.input", lambda prompt: " user ")
     monkeypatch.setattr(main, "run_maigret_check", runner)
     main.main_menu()
     runner.assert_called_once_with("user")
+
+
+def test_history_filter_renders_filtered_page(initialized_db, monkeypatch, capsys):
+    matching_id = database.start_tool_run("holehe", "private@example.test")
+    database.finish_tool_run(matching_id, "success", result_text="match")
+    other_id = database.start_tool_run("maigret", "different")
+    database.finish_tool_run(other_id, "failed", error_text="error")
+    choices = iter((1, 6))
+    inputs = iter(("holehe", "success"))
+    monkeypatch.setattr(main, "_choose_option", lambda options, title: next(choices))
+    monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+    main.run_history_menu()
+
+    output = capsys.readouterr().out
+    assert output.count(f"Run {matching_id} | holehe") == 2
+    assert output.count(f"Run {other_id} | maigret") == 1
+
+
+@pytest.mark.parametrize(
+    ("consent", "expected_input", "expected_result"),
+    [
+        ("", "[REDACTED]", "[REDACTED]"),
+        ("no", "[REDACTED]", "[REDACTED]"),
+        ("yes", "private@example.test", "sensitive result"),
+    ],
+)
+def test_export_selected_runs_obeys_sensitive_consent(
+    initialized_db, monkeypatch, tmp_path, capsys,
+    consent, expected_input, expected_result,
+):
+    run_id = database.start_tool_run("holehe", "private@example.test")
+    database.finish_tool_run(run_id, "success", result_text="sensitive result")
+    output_path = tmp_path / "runs.json"
+    inputs = iter((str(run_id), str(output_path), consent))
+    monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+    main.export_selected_runs()
+
+    if consent == "yes" and os.name == "nt":
+        assert not output_path.exists()
+        assert "Sensitive exports are disabled on Windows" in capsys.readouterr().out
+        return
+    record = json.loads(output_path.read_text(encoding="utf-8"))[0]
+    assert record["input"] == expected_input
+    assert record["result"] == expected_result
+    if os.name == "posix":
+        assert stat.S_IMODE(output_path.stat().st_mode) == 0o600
+    assert "Exported 1 run(s)" in capsys.readouterr().out
+
+
+def test_sensitive_export_is_disabled_on_windows(
+    initialized_db, monkeypatch, tmp_path, capsys
+):
+    run_id = database.start_tool_run("holehe", "private@example.test")
+    database.finish_tool_run(run_id, "success", result_text="sensitive result")
+    output_path = tmp_path / "runs.json"
+    inputs = iter((str(run_id), str(output_path), "yes"))
+    monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+    monkeypatch.setattr(main.os, "name", "nt")
+
+    main.export_selected_runs()
+
+    assert not output_path.exists()
+    assert "Sensitive exports are disabled on Windows" in capsys.readouterr().out
+
+
+def test_export_does_not_overwrite_existing_file(initialized_db, tmp_path):
+    destination = tmp_path / "runs.json"
+    destination.write_text("existing", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        main._write_export_file(str(destination), "replacement")
+
+    assert destination.read_text(encoding="utf-8") == "existing"
+    assert {path.name for path in tmp_path.iterdir()} == {"runs.db", "runs.json"}
+
+
+def test_failed_export_cleans_up_temporary_file(tmp_path, monkeypatch):
+    destination = tmp_path / "runs.json"
+
+    def fail_link(*args, **kwargs):
+        raise OSError("cannot publish")
+
+    monkeypatch.setattr(main.os, "link", fail_link)
+    with pytest.raises(OSError, match="cannot publish"):
+        main._write_export_file(str(destination), "{}")
+
+    assert not destination.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_history_and_inspection_report_database_path_errors(monkeypatch, capsys):
+    monkeypatch.setattr(
+        main, "list_tool_runs", Mock(side_effect=OSError("database path denied"))
+    )
+    monkeypatch.setattr(
+        main, "get_tool_run", Mock(side_effect=OSError("database path denied"))
+    )
+
+    assert main.show_run_history() == []
+    main.inspect_tool_run(1)
+
+    assert capsys.readouterr().out.count("database path denied") == 2
+
+
+def test_history_filter_reports_database_errors(monkeypatch, capsys):
+    monkeypatch.setattr(
+        main,
+        "list_tool_runs",
+        Mock(side_effect=sqlite3.OperationalError("database unavailable")),
+    )
+    choices = iter((1, 6))
+    inputs = iter(("holehe", "success"))
+    monkeypatch.setattr(main, "_choose_option", lambda options, title: next(choices))
+    monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+    main.run_history_menu()
+
+    assert capsys.readouterr().out.count(
+        "Run history query failed: database unavailable"
+    ) == 2

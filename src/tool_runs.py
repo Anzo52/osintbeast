@@ -1,6 +1,5 @@
 import json
 import logging
-import re
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
@@ -16,21 +15,7 @@ class UnexpectedToolError(RuntimeError):
 
 def _redact_sensitive_value(text: str, sensitive_value: str) -> str:
     """Redact whole input values, including partially URL-encoded forms."""
-    if not sensitive_value:
-        return text
-    alternatives = []
-    for char in sensitive_value:
-        encoded = "".join(f"%{byte:02X}" for byte in char.encode("utf-8"))
-        representations = [re.escape(char), re.escape(encoded)]
-        if char == " ":
-            representations.append(r"\+")
-        alternatives.append(f"(?:{'|'.join(representations)})")
-    pattern = re.compile(
-        rf"(?<![A-Za-z0-9_.-])(?<!\[){''.join(alternatives)}"
-        r"(?![A-Za-z0-9_.-])(?!\])",
-        re.IGNORECASE,
-    )
-    return pattern.sub("[redacted]", text)
+    return database.redact_sensitive_text(text, sensitive_value)
 
 
 def redact_sensitive_data(value, sensitive_value: str):
@@ -138,6 +123,9 @@ def _execute_tool_run(
             output = runner(query_text)
         if not isinstance(output, str):
             raise RuntimeError(f"{tool_name} returned non-text output.")
+    except KeyboardInterrupt:
+        database.finish_tool_run(run_id, "failed", error_text="Tool run interrupted.")
+        raise
     except TimeoutError as exc:
         message = str(exc) or f"{tool_name} exceeded its time limit."
         if sensitive_input:

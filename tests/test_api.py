@@ -65,7 +65,7 @@ def test_create_and_get_run_delegates_to_shared_services(
     assert saved["status"] == 200
     assert saved["body"] == {
         "run_id": run_id, "tool": name,
-        "query": "[redacted]" if name == "holehe" else normalized,
+        "query": "[redacted]",
         "status": "success",
         "result": "report", "error": None,
         "started_at": saved["body"]["started_at"], "finished_at": saved["body"]["finished_at"],

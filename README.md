@@ -1,6 +1,6 @@
 # OSINT Beast
 
-OSINT Beast is a Python command-line framework for organizing authorized open-source intelligence (OSINT) workflows. It provides a curated registry of tools and uses SQLite to store structured records and tool results. The project is under active development; see the [development roadmap](#development-roadmap) and [development notes](doc/NOTES.md).
+OSINT Beast is a Python command-line framework for organizing authorized open-source intelligence (OSINT) workflows. It provides a curated registry of tools and uses SQLite to store structured records and tool results. The project is under active development; see the [documentation](doc/wiki/Home.md), [development roadmap](#development-roadmap), and [development notes](doc/NOTES.md).
 
 ## Current capabilities
 
@@ -66,9 +66,11 @@ This indicates presence, not whether the tool or all its dependencies work.
 Use the arrow keys and Enter to choose a tool to download or install; installing
 uses the default `tools/<name>` download folder. A custom installation folder is
 available as an alternate menu choice. Database views include recent runs and
-saved results. Type only the information that cannot be selected in advance,
-such as a username, email address, or custom folder. Errors are reported in the
-menu so you can correct the input or environment and try again.
+saved results; saved-result browsing is limited to 20 rows with result text
+truncated at 16,384 characters. Type only the information that cannot be
+selected in advance, such as a username, email address, or custom folder.
+Errors are reported in the menu so you can correct the input or environment
+and try again.
 
 ### Command-line commands
 
@@ -95,102 +97,11 @@ failed operations print a corrective message and return a nonzero status.
 
 ### Running checks
 
-Holehe is installed with the standard dependencies. To enable Maigret in a
-source checkout, install its optional dependencies:
-
-```bash
-python -m pip install -e ".[maigret]"
-```
-
-To enable Helix OSINT:
-
-```bash
-python -m pip install -e ".[helix]"
-```
-
-To enable Sherlock:
-
-```bash
-python -m pip install -e ".[sherlock]"
-```
-
-Select **Run Holehe Check**, **Run Maigret Check**, **Run Helix Check**, or
-**Run Sherlock Check** in the menu. Email and username entry is hidden and
-requires a terminal that can disable echo; otherwise the check is cancelled.
-Sherlock uses its bundled site list and
-skips sites marked NSFW. It sends a username to many public sites; each request
-has a 15-second timeout, and the full scan has a 300-second overall timeout.
-Use it only for authorized targets. Helix uses its built-in site list through
-the in-process API; the broader optional source collections are not enabled by
-this menu integration. Helix accepts up to
-50 ASCII letters, digits, dots, underscores, and hyphens (with an optional leading `@`).
-The scan has a 300-second overall timeout.
-Maigret accepts
-up to 100 ASCII letters, digits, dots, underscores, and hyphens. It checks all
-enabled username sites in its bundled database, without a proxy or profile
-enrichment. This can contact thousands of services and consume considerable
-network resources; use it only for authorized targets. Each Maigret request
-has a 30-second timeout, and the overall search has a 300-second timeout.
-Partial results are not saved when the overall search times out. Individual
-site failures appear as `Unknown` results; a successful run means the search
-completed, not that every site was reachable or every match is confirmed.
-
-The CLI validates input before recording a run and uses a non-echoing prompt.
-Holehe, Maigret, Helix, and Sherlock receive sensitive input through their
-in-process Python APIs, not process arguments. Their run records use a
-`[redacted]` query; direct and URL-encoded occurrences of the input are also
-redacted from saved and displayed results and errors. A `running` record can
-remain after interruption or a database-write failure. Successful outputs are
-also saved to the existing `ToolResults` table. Existing `ToolResults` rows
-are preserved but do not gain historical run statuses.
-
-Callers of the shared run helpers must explicitly declare whether an input is
-sensitive using a boolean. Set it to `False` only when unredacted storage is
-appropriate. Unexpected runner defects are recorded as failures and propagated
-instead of being returned as ordinary tool errors.
-
-Use **Query Database → Run History** to browse `ToolRuns`. History pages are
-ordered newest first by stable run ID and contain the tool, input summary,
-status, and timestamps. Filter by tool or status, move between 20-run pages,
-and inspect a run's stored result or error; empty results are shown as empty
-rather than parsed as structured data.
-
-The history menu can export selected run IDs as a UTF-8 JSON array. JSON string
-escaping preserves quotes, backslashes, newlines, and malformed/non-JSON tool
-output as text. By default, the `input`, `result`, and `error` fields are
-replaced with `[REDACTED]`; explicitly answer yes to include the values stored
-in the database. Sensitive input is redacted before storage, so opted-in
-exports may still contain other sensitive output or error text; store and share
-them accordingly. Exports are created with owner-only permissions and will not
-overwrite an existing file.
-
-Inputs, results, and errors can contain sensitive data. They are stored in
-plain text in the local database; restrict its permissions and delete records
-when no longer needed. See the [local data retention and privacy guide](doc/data-retention-and-privacy.md)
-for exactly what is retained, how to restrict database and backup access, and
-safe practices for viewing, removing, and sharing sensitive output.
-On the first SQLite initialization after upgrading, existing tool queries are replaced
-with `[redacted]`, and case-insensitive direct and URL-encoded matches of each
-query are removed from its result and error text. Other sensitive information
-may remain in those texts, and explicitly non-sensitive new records are stored in plain text.
-Backups and SQLite journal files may also contain the original values.
-MySQL initialization does not perform this legacy redaction.
-
-Valid attempts are stored in `ToolRuns` with the tool, input, status (`running`,
-`success`, `failed`, or `timed_out`), and a UTC `startedAt` timestamp. A run
-starts as `running`, with `finishedAt`, `resultText`, and `errorText` unset.
-Every terminal run has a UTC `finishedAt`; `success` requires saved output in
-`resultText` and no `errorText`, while `failed` and `timed_out` require an
-`errorText` and no `resultText`. Successful outputs are also saved to the
-existing `ToolResults` table; failures and timeouts are never stored there.
-Use **Query Database** to inspect either table.
-
-Sublist3r and Amass do not yet have run integrations. Any future integration
-that needs an external process must pass sensitive input through standard input
-(for example, `subprocess.run(..., input=value, text=True)`), never an argument,
-environment variable, log, or echoed prompt. If a tool cannot accept a private
-input channel, it must not be integrated until a safe mechanism is available.
-Searches send the supplied input to third-party sites.
+Select a supported check from the menu. Typed target input is visible in the
+terminal, so be aware of people who can see your screen; checks send it to
+third-party sites. See the
+[running checks guide](doc/wiki/Running-Checks.md) for optional installations,
+tool limits, run history, exports, and privacy details.
 
 ### Local HTTP API
 
@@ -239,8 +150,9 @@ database is `osintbeast.db` in the repository root, regardless of the current
 working directory. SQLite initialization creates missing tables and indexes in one
 transaction; running it again preserves existing records and recreates missing
 schema objects, including the new run-history table in existing databases. The
-legacy tool-record redaction runs once per database; it does not repair
-incompatible existing tables.
+initialization does not rewrite legacy records. Saved run and result views
+redact queries and matching result or error text at read time; the database
+values remain unchanged. This does not repair incompatible existing tables.
 
 To use SQLite at a different location, set `OSINTBEAST_DB_PATH` before starting
 the application. For a source checkout, the default remains the repository-root
@@ -395,7 +307,7 @@ status and saved output from `GET /api/runs/<run_id>` and
 ### Background run service
 
 `background_runs.BackgroundRuns` is a shared service for web handlers, not a
-web server. It is not yet connected to the browser interface below. Initialize
+web server. The browser interface below uses one instance. Initialize
 the database first and create one service per application
 process. `submit(tool_name, query)` validates the input, records a run and
 returns its integer ID without waiting for tool execution; `status(run_id)`
@@ -408,8 +320,11 @@ Configure `RunLimits(max_concurrent=2, timeout_seconds=300,
 max_query_chars=254, max_output_bytes=1000000)` when constructing the service.
 There is no waiting queue: `CapacityError` explicitly rejects submissions when
 all slots are occupied. Execution occurs in child processes, which are stopped
-on timeout or cancellation; tool failures and unexpected worker exits are
-recorded as failures. Call `close()` during orderly application shutdown.
+on timeout or cancellation; each worker also monitors its deadline and its
+parent process so it exits if the parent dies. On POSIX, the worker's process
+group is killed as well; on Windows, this watchdog stops only the worker.
+Tool failures and unexpected worker exits are recorded as failures. Call
+`close()` during orderly application shutdown.
 If saving an outcome fails, the service retains it in memory and keeps its
 capacity slot reserved. Calling `status(run_id)` retries the write and raises
 `RuntimeError` if it still cannot be saved; retry after restoring database
@@ -437,10 +352,25 @@ supports authorized runs with Holehe, Maigret, Helix, and Sherlock; tools in the
 registry without a runnable integration are not offered. Confirm authorization
 before each run. Runs execute through the existing validators, integrations,
 and persistence service, and their status and saved output are available in
-the recent-runs view. Holehe input is redacted in stored records and output.
-Keep the interface bound to loopback: it has no login or
-remote-access authentication, and its database and results may contain
-sensitive information.
+the recent-runs view. At most two browser runs can be active at once; additional
+requests receive HTTP 503 until capacity is available. Holehe input is redacted
+in stored records and output.
+
+Configure separate operator and viewer tokens before starting the server:
+
+```bash
+export OSINTBEAST_OPERATOR_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export OSINTBEAST_VIEWER_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+python -m web_ui
+```
+
+Send a configured token using HTTP bearer authentication. Operators may launch
+runs and read results; viewers may only read results. Missing, invalid, or
+unauthorized credentials are rejected. The browser prompts for an access token
+and keeps it only in session storage for the current tab. The server refuses
+to start unless both tokens are configured and refuses any bind address outside
+IPv4 or IPv6 loopback. Do not expose the server through a tunnel or reverse
+proxy; keep its database and results restricted to authorized local users.
 
 ## Responsible use and privacy
 
@@ -457,7 +387,7 @@ arguments, or shared environments.
 .
 ├── data/
 │   └── schemas/  MySQL and SQLite schema files
-├── doc/        Design documentation
+├── doc/        Documentation, including wiki pages
 ├── src/        CLI, database, and tool integrations
 ├── tests/      Automated tests
 ├── README.md
@@ -467,55 +397,7 @@ arguments, or shared environments.
 
 ## Development roadmap
 
-This roadmap is ordered by priority and prerequisite: earlier sections establish
-the safety and shared-service foundations needed by later work. It describes
-planned work, not a promise or release schedule, and priorities may change as
-the project develops.
-
-### UI direction
-
-Keep the CLI as the current local and automation interface, and prioritize a
-browser-based UI as the next graphical interface. Do not build separate native
-desktop or mobile applications. The web UI remains planned work and should use
-shared application services rather than duplicating CLI behavior.
-
-### 1. Stabilize the foundation
-
-- [x] Keep dependency manifests, source modules, schemas, and documentation in their correct files.
-- [x] Declare Python 3.10+ support and bounded dependency ranges in `pyproject.toml`.
-- [x] Make database initialization reliable and repeatable across supported environments.
-- [x] Expand automated coverage for database operations, CLI behavior, validation, timeouts, and failures.
-- [x] Add continuous integration to run tests and basic static checks on changes.
-
-### 2. Harden tool execution and data handling
-
-- [ ] Keep downloads and installation constrained to reviewed registry entries and safe paths.
-- [ ] Prefer supported in-process integrations or private input mechanisms for sensitive values.
-- [ ] Ensure long-running operations time out gracefully and return control to the CLI.
-- [ ] Standardize run status, timestamps, errors, and result persistence.
-- [ ] Parse tool output into normalized findings while preserving raw output and reporting malformed or unsupported formats explicitly.
-- [ ] Document retention, local database permissions, and sensitive-output handling.
-- [ ] Keep arbitrary SQL unavailable to any future web-facing interface.
-
-### 3. Improve the CLI and service boundaries
-
-- [ ] Separate reusable application services from menu/input/output code.
-- [ ] Provide clear help, input validation, and actionable error messages.
-- [x] Add structured result-history views and safe export options.
-
-### 4. Build a web UI
-
-- [ ] Add authentication and authorization before exposing any network-accessible interface.
-- [ ] Run long tasks outside request handlers and enforce resource limits.
-- [ ] Define a small backend API around the shared application services.
-- [ ] Add a simple UI for launching authorized runs and viewing their status and results.
-- [ ] Add web-route tests with mocked tool execution and security checks.
-
-### 5. Expand persistence and integrations
-
-- [x] Complete and test MySQL schema and database support behind a storage interface.
-- [x] Add a first-party run integration for Sherlock; Sublist3r and Amass remain candidates, with documented inputs, outputs, and safety requirements.
-- [x] Document deployment, backup, upgrade, and migration procedures.
+See the [development roadmap](doc/wiki/Roadmap.md) for priorities and planned work.
 
 ## License
 
