@@ -315,11 +315,10 @@ def test_query_menu_offers_structured_run_history(monkeypatch):
 
 
 @pytest.mark.parametrize("choice", [0, 1])
-def test_saved_views_migrate_legacy_records(tmp_path, monkeypatch, capsys, choice):
+def test_saved_views_redact_legacy_records(tmp_path, monkeypatch, capsys, choice):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "legacy.db"))
     database.setup_database()
     with database.connect_db() as conn:
-        conn.execute("DELETE FROM OsintBeastMigrations")
         conn.execute(
             "INSERT INTO ToolResults (toolName, queryText, resultText) "
             "VALUES ('holehe', 'private@example.com', 'private@example.com result')"
@@ -338,7 +337,7 @@ def test_saved_views_migrate_legacy_records(tmp_path, monkeypatch, capsys, choic
     assert "[redacted]" in output
 
 
-def test_saved_view_does_not_query_if_migration_fails(monkeypatch, capsys):
+def test_saved_view_does_not_query_if_initialization_fails(monkeypatch, capsys):
     monkeypatch.setattr(main, "_choose_option", lambda *args: 0)
     monkeypatch.setattr(
         database, "setup_database", Mock(side_effect=sqlite3.OperationalError("failed"))
@@ -448,11 +447,10 @@ def test_cli_returns_nonzero_for_database_execution_error(monkeypatch, capsys):
 
 
 @pytest.mark.parametrize("view", ["runs", "results"])
-def test_cli_query_migrates_legacy_records(tmp_path, monkeypatch, capsys, view):
+def test_cli_query_redacts_legacy_records(tmp_path, monkeypatch, capsys, view):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "legacy-cli.db"))
     database.setup_database()
     with database.connect_db() as conn:
-        conn.execute("DELETE FROM OsintBeastMigrations")
         conn.execute(
             "INSERT INTO ToolResults (toolName, queryText, resultText) "
             "VALUES ('holehe', 'private@example.com', 'private@example.com result')"

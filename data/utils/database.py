@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sqlite3
 import sys
 from collections.abc import Mapping
@@ -65,6 +66,25 @@ SQLITE_MAX_INTEGER = (1 << 63) - 1
 MAX_SQLITE_INTEGER = SQLITE_MAX_INTEGER
 
 
+def redact_sensitive_text(text: str | None, sensitive_value: str) -> str | None:
+    """Redact complete raw or partially URL-encoded input occurrences."""
+    if text is None or not sensitive_value or sensitive_value == "[redacted]":
+        return text
+    alternatives = []
+    for char in sensitive_value:
+        encoded = "".join(f"%{byte:02X}" for byte in char.encode("utf-8"))
+        representations = [re.escape(char), re.escape(encoded)]
+        if char == " ":
+            representations.append(r"\+")
+        alternatives.append(f"(?:{'|'.join(representations)})")
+    pattern = re.compile(
+        rf"(?<![A-Za-z0-9_.+-])(?<!\[){''.join(alternatives)}"
+        r"(?![A-Za-z0-9_.+-])(?!\])",
+        re.IGNORECASE,
+    )
+    return pattern.sub("[redacted]", text)
+
+
 def _get_storage() -> Storage:
     database_url = os.environ.get("OSINTBEAST_DATABASE_URL")
     if database_url:
@@ -96,7 +116,7 @@ def connect_db():
 
 
 def setup_database() -> None:
-    """Create missing schema objects and migrate legacy SQLite records."""
+    """Create missing schema objects without replacing existing data."""
     _get_storage().setup()
 
 
@@ -124,7 +144,8 @@ def save_tool_result(
 
 
 def list_tool_results(
-    limit: int = 100, max_result_text_chars: int | None = None
+    limit: int = 100, max_result_text_chars: int | None = None, *,
+    redact_sensitive: bool = False,
 ) -> list[tuple[Any, ...]]:
     """Return saved results, optionally truncating result text in storage."""
     _validate_list_limit(limit)
@@ -135,8 +156,21 @@ def list_tool_results(
     ):
         raise ValueError("max_result_text_chars must be a positive integer")
     if max_result_text_chars is None:
-        return _get_storage().list_tool_results(limit)
-    return _get_storage().list_tool_results(limit, max_result_text_chars)
+        rows = _get_storage().list_tool_results(limit)
+    else:
+        rows = _get_storage().list_tool_results(limit, max_result_text_chars)
+    if not redact_sensitive:
+        return rows
+    return [
+        (
+            row[0],
+            row[1],
+            "[redacted]",
+            redact_sensitive_text(row[3], row[2]),
+            *row[4:],
+        )
+        for row in rows
+    ]
 
 
 def _validate_list_limit(limit: int) -> None:
@@ -147,7 +181,7 @@ def _validate_list_limit(limit: int) -> None:
 def list_tool_runs(
     limit: int = 20, offset: int = 0, tool_name: str | None = None,
     status: str | None = None, cursor: int | None = None,
-    before_run_id: int | None = None,
+    before_run_id: int | None = None, *, redact_sensitive: bool = False,
 ) -> list[tuple[Any, ...]]:
     """Return a bounded, newest-first run page using stable run-ID cursors."""
     _validate_list_limit(limit)
@@ -188,7 +222,21 @@ def list_tool_runs(
                ORDER BY runID DESC LIMIT ?"""
         )
         parameters = (cursor, tool_name, tool_name, status, status, limit)
-    return _get_storage().query(query, parameters)
+    rows = _get_storage().query(query, parameters)
+    if not redact_sensitive:
+        return rows
+    return [
+        (
+            row[0],
+            row[1],
+            "[redacted]",
+            row[3],
+            row[4],
+            row[5],
+            redact_sensitive_text(row[6], row[2]),
+        )
+        for row in rows
+    ]
 
 
 def _validate_run_id(run_id: int) -> int:
@@ -202,7 +250,9 @@ def _validate_run_id(run_id: int) -> int:
     return run_id
 
 
-def get_tool_run(run_id: int) -> tuple[Any, ...] | None:
+def get_tool_run(
+    run_id: int, *, redact_sensitive: bool = False
+) -> tuple[Any, ...] | None:
     """Return a run and its persisted result or error, if it exists."""
     run_id = _validate_run_id(run_id)
     rows = _get_storage().query(
@@ -211,7 +261,21 @@ def get_tool_run(run_id: int) -> tuple[Any, ...] | None:
            FROM ToolRuns WHERE runID = ?""",
         (run_id,),
     )
-    return rows[0] if rows else None
+    if not rows:
+        return None
+    row = rows[0]
+    if not redact_sensitive:
+        return row
+    return (
+        row[0],
+        row[1],
+        "[redacted]",
+        row[3],
+        redact_sensitive_text(row[4], row[2]),
+        redact_sensitive_text(row[5], row[2]),
+        row[6],
+        row[7],
+    )
 
 
 def reconcile_stale_tool_runs(older_than_seconds: int = 600) -> int:
@@ -225,17 +289,28 @@ def reconcile_stale_tool_runs(older_than_seconds: int = 600) -> int:
     return _get_storage().reconcile_stale_tool_runs(older_than_seconds)
 
 
-def get_tool_result(result_id: int) -> dict[str, Any] | None:
+def get_tool_result(
+    result_id: int, *, redact_sensitive: bool = False
+) -> dict[str, Any] | None:
     """Return one saved result without exposing its original query text."""
     result_id = _validate_run_id(result_id)
     rows = _get_storage().query(
-        """SELECT resultID, toolName, resultText, createdAt
+        """SELECT resultID, toolName, queryText, resultText, createdAt
            FROM ToolResults WHERE resultID = ?""",
         (result_id,),
     )
     if not rows:
         return None
-    return dict(zip(("result_id", "tool", "result", "created_at"), rows[0]))
+    row = rows[0]
+    return {
+        "result_id": row[0],
+        "tool": row[1],
+        "result": (
+            redact_sensitive_text(row[3], row[2])
+            if redact_sensitive else row[3]
+        ),
+        "created_at": row[4],
+    }
 
 
 def export_tool_runs_json(

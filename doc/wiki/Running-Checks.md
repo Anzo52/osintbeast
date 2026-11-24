@@ -79,12 +79,9 @@ plain text in the local database; restrict its permissions and delete records
 when no longer needed. See the [local data retention and privacy guide](../data-retention-and-privacy.md)
 for exactly what is retained, how to restrict database and backup access, and
 safe practices for viewing, removing, and sharing sensitive output.
-On the first SQLite initialization after upgrading, existing tool queries are replaced
-with `[redacted]`, and case-insensitive direct and URL-encoded matches of each
-query are removed from its result and error text. Other sensitive information
-may remain in those texts, and explicitly non-sensitive new records are stored in plain text.
-Backups and SQLite journal files may also contain the original values.
-MySQL initialization does not perform this legacy redaction.
+Saved run and result views redact queries and matching result or error text
+at read time, without changing stored values. Other sensitive information may
+remain in those texts.
 
 Valid attempts are stored in `ToolRuns` with the tool, input, status (`running`,
 `success`, `failed`, or `timed_out`), and a UTC `startedAt` timestamp. A run
