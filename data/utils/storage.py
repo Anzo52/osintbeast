@@ -117,7 +117,7 @@ class SQLiteStorage:
     def query(
         self, query: str, parameters: tuple[Any, ...] = ()
     ) -> list[tuple[Any, ...]]:
-        with closing(self.connect()) as conn:
+        with closing(self.connect()) as conn, conn:
             return conn.execute(query, parameters).fetchall()
 
     def save_tool_result(
@@ -384,7 +384,7 @@ class MySQLStorage:
     ) -> list[tuple[Any, ...]]:
         query = self._mysql_placeholders(query, parameters)
         try:
-            with self._get_engine().connect() as connection:
+            with self._get_engine().begin() as connection:
                 return self._normalize_rows(
                     connection.exec_driver_sql(query, parameters).fetchall()
                 )

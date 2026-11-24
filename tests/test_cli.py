@@ -410,6 +410,24 @@ def test_cli_rejects_invalid_username_with_accepted_format(monkeypatch, capsys):
     runner.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("argv", "runner_name", "identifier"),
+    [
+        (["check-email", "-person@example.com"], "run_holehe_check", "-person@example.com"),
+        (["check-username", "maigret", "-user"], "run_maigret_check", "-user"),
+    ],
+)
+def test_cli_accepts_identifiers_starting_with_hyphen(
+    monkeypatch, argv, runner_name, identifier
+):
+    runner = Mock(return_value=0)
+    monkeypatch.setattr(main, runner_name, runner)
+
+    assert main.cli(argv) == 0
+
+    runner.assert_called_once_with(identifier)
+
+
 def test_cli_reports_optional_dependency_failure_and_nonzero_status(
     tmp_path, monkeypatch, capsys
 ):
