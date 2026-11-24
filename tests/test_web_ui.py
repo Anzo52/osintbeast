@@ -3,10 +3,10 @@ import sqlite3
 import threading
 import time
 from http.server import ThreadingHTTPServer
+from unittest.mock import Mock
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
-from unittest.mock import Mock
 
 import pytest
 
@@ -44,6 +44,7 @@ def run_service(monkeypatch):
 
 def _request(url, payload=None, headers=None):
     headers = headers or {}
+    headers = {"Authorization": "Bearer " + "operator-secret", **headers}
     if payload is None:
         request = Request(url, headers=headers)
     else:
@@ -66,6 +67,8 @@ def _request(url, payload=None, headers=None):
 
 
 def _server(tmp_path, monkeypatch, runner):
+    monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", "operator-secret")
+    monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", "viewer-secret")
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "web.db"))
     database.setup_database()
     monkeypatch.setattr(
@@ -116,7 +119,11 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
         assert recent[0]["id"] == launched["id"]
         assert recent[0]["status"] == "success"
 
-        with urlopen(base_url, timeout=2) as response:
+        page_request = Request(
+            base_url,
+            headers={"Authorization": "Bearer " + "operator-secret"},
+        )
+        with urlopen(page_request, timeout=2) as response:
             page = response.read().decode()
         assert "Authorization required" in page
         assert 'id="authorized" type="checkbox" required' in page
@@ -271,6 +278,69 @@ def test_validation_and_authorization_failures_do_not_launch(
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_browser_authentication_roles(tmp_path, monkeypatch):
+    runner = Mock(return_value="should not run")
+    server, base_url = _server(tmp_path, monkeypatch, runner)
+    try:
+        status, body = _request(
+            base_url,
+            headers={"Authorization": "Bearer " + "invalid-secret"},
+        )
+        assert status == 401
+        assert body["error"] == "Invalid credentials."
+
+        page_request = Request(
+            base_url,
+            headers={"Authorization": "Bearer " + "viewer-secret"},
+        )
+        with urlopen(page_request, timeout=2) as response:
+            page = response.read().decode()
+        assert "Authorized tool runs" in page
+
+        status, body = _request(
+            f"{base_url}/api/runs",
+            {"tool": "sherlock", "input": "alice", "authorized": True},
+            {"Authorization": "Bearer " + "viewer-secret"},
+        )
+        assert status == 403
+        assert body["error"] == "Operator role required."
+
+        status, body = _request(
+            base_url,
+            headers={"Authorization": ""},
+        )
+        assert status == 401
+        assert body["error"] == "Authentication required."
+        runner.assert_not_called()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_missing_auth_configuration_and_non_loopback_bind_fail_closed(monkeypatch):
+    monkeypatch.delenv("OSINTBEAST_OPERATOR_TOKEN", raising=False)
+    monkeypatch.delenv("OSINTBEAST_VIEWER_TOKEN", raising=False)
+    monkeypatch.delenv("OSINTBEAST_API_TOKEN", raising=False)
+    monkeypatch.delenv("OSINTBEAST_TOKEN", raising=False)
+    monkeypatch.delenv("OSINTBEAST_WEB_TOKEN", raising=False)
+
+    try:
+        web_ui.serve("127.0.0.1", 8000)
+    except RuntimeError as exc:
+        assert "tokens" in str(exc)
+    else:
+        raise AssertionError("serve() started without authentication configured")
+
+    monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", "operator-secret")
+    monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", "viewer-secret")
+    try:
+        web_ui.serve("0.0.0.0", 8000)
+    except ValueError as exc:
+        assert "loopback" in str(exc)
+    else:
+        raise AssertionError("serve() accepted a non-loopback bind")
 
 
 def test_terminal_tool_error_is_available_for_review(tmp_path, monkeypatch):
