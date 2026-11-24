@@ -209,12 +209,17 @@ def test_holehe_result_redacts_partially_encoded_input(tmp_path, monkeypatch):
     database.setup_database()
     query = "person+tag@example.com"
     holehe_integration.save_tool_result(
-        "holehe", query, "Found person+tag%40example.com"
+        "holehe",
+        query,
+        "Found person+tag%40example.com and person+tag@example.com.au",
     )
 
     assert database.query_database(
         "SELECT queryText, resultText FROM ToolResults"
-    ) == [("[redacted]", "Found [redacted]")]
+    ) == [(
+        "[redacted]",
+        "Found [redacted] and person+tag@example.com.au",
+    )]
 
 
 def test_database_path_override_is_shared_across_modules(tmp_path):
