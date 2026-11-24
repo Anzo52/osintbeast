@@ -91,6 +91,11 @@ def test_mysql_initialization_executes_both_idempotent_schema_files(mysql_storag
         for statement in statements
     ) == 2
     assert any("CREATE TABLE IF NOT EXISTS ToolRuns" in statement for statement in statements)
+    assert any(
+        "idempotencyKey VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin"
+        in statement
+        for statement in statements
+    )
 
 
 def test_mysql_core_operations_use_bound_values_and_preserve_transactional_flow(

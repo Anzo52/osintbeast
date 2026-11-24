@@ -17,7 +17,12 @@ from helix_integration import run_helix, validate_username as validate_helix
 from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username as validate_maigret
 from sherlock_integration import run_sherlock, validate_username as validate_sherlock
-from tool_runs import redact_sensitive_output, start_tool_run
+from tool_runs import (
+    idempotent_request_hash,
+    redact_sensitive_output,
+    start_idempotent_tool_run,
+    start_tool_run,
+)
 
 _LOG = logging.getLogger(__name__)
 _TOOLS = {
@@ -130,7 +135,9 @@ class BackgroundRuns:
         self._pending = {}
         self._closed = False
 
-    def submit(self, tool_name: str, query: str) -> int:
+    def submit(
+        self, tool_name: str, query: str, idempotency_key: str | None = None
+    ) -> int:
         if not isinstance(tool_name, str) or tool_name not in _TOOLS:
             raise ValueError("Unsupported tool.")
         if not isinstance(query, str) or len(query) > self.limits.max_query_chars:
@@ -139,11 +146,28 @@ class BackgroundRuns:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Background run service is closed.")
+            if idempotency_key is not None:
+                request_hash = idempotent_request_hash(tool_name, query)
+                existing = database.get_idempotent_tool_run(
+                    idempotency_key, request_hash
+                )
+                if existing is not None:
+                    return existing
             if len(self._jobs) + len(self._pending) >= self.limits.max_concurrent:
                 raise CapacityError("Background run capacity reached.")
-            run_id = start_tool_run(
-                tool_name, query, sensitive_input=tool_name == "holehe"
-            )
+            if idempotency_key is None:
+                run_id = start_tool_run(
+                    tool_name, query, sensitive_input=tool_name == "holehe"
+                )
+            else:
+                run_id, created = start_idempotent_tool_run(
+                    tool_name,
+                    query,
+                    idempotency_key,
+                    sensitive_input=tool_name == "holehe",
+                )
+                if not created:
+                    return run_id
             cancel = threading.Event()
             completed = threading.Event()
             try:

@@ -353,9 +353,23 @@ and persistence service, and their status and saved output are available in
 the recent-runs view. At most two browser runs can be active at once; additional
 requests receive HTTP 503 until capacity is available. Holehe input is redacted
 in stored records and output.
-Keep the interface bound to loopback: it has no login or
-remote-access authentication, and its database and results may contain
-sensitive information.
+
+Set separate, cryptographically random operator and viewer tokens before
+starting the server:
+
+```bash
+export OSINTBEAST_OPERATOR_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export OSINTBEAST_VIEWER_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+python -m web_ui
+```
+
+Tokens must each contain 32–256 URL-safe characters and must differ. Operators
+may launch runs and read results; viewers may only read results. The browser
+prompts for a token and keeps it in session storage for the current tab.
+Launch retries use an idempotency key so the same submitted request returns its
+original run instead of starting another. The server binds only to resolved
+IPv4 or IPv6 loopback addresses. Do not expose it through a tunnel or reverse
+proxy; keep its database and results restricted to authorized local users.
 
 ## Responsible use and privacy
 
