@@ -6,7 +6,6 @@ from unittest.mock import Mock
 
 import pytest
 
-import checkers
 import data.utils.database as database
 import main
 import menu_utils
@@ -41,6 +40,19 @@ def test_main_menu_ignores_cancelled_or_invalid_choices(monkeypatch, choice):
     main.main_menu()
 
     action.assert_not_called()
+
+
+def test_menu_reports_initialization_failure(monkeypatch, capsys):
+    def fail():
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(main, "init_db", fail)
+
+    main.menu_actions()[0]()
+
+    assert capsys.readouterr().out == (
+        "Database initialization failed: unable to open database file\n"
+    )
 
 
 @pytest.mark.parametrize(
@@ -170,7 +182,7 @@ def test_helix_menu_action_dispatches_username(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr(checkers, "getpass", lambda prompt: " @user ")
+    monkeypatch.setattr("builtins.input", lambda prompt: " @user ")
     monkeypatch.setattr(main, "run_helix_check", runner)
 
     main.main_menu()
@@ -188,7 +200,7 @@ def test_holehe_menu_action_dispatches_email(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr(checkers, "getpass", lambda prompt: " person@example.com ")
+    monkeypatch.setattr("builtins.input", lambda prompt: " person@example.com ")
     monkeypatch.setattr(main, "run_holehe_check", runner)
 
     main.main_menu()
@@ -206,7 +218,7 @@ def test_sherlock_menu_action_dispatches_username(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr(checkers, "getpass", lambda prompt: " user ")
+    monkeypatch.setattr("builtins.input", lambda prompt: " user ")
     monkeypatch.setattr(main, "run_sherlock_check", runner)
 
     main.main_menu()
@@ -303,11 +315,10 @@ def test_query_menu_offers_structured_run_history(monkeypatch):
 
 
 @pytest.mark.parametrize("choice", [0, 1])
-def test_saved_views_migrate_legacy_records(tmp_path, monkeypatch, capsys, choice):
+def test_saved_views_redact_legacy_records(tmp_path, monkeypatch, capsys, choice):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "legacy.db"))
     database.setup_database()
     with database.connect_db() as conn:
-        conn.execute("DELETE FROM OsintBeastMigrations")
         conn.execute(
             "INSERT INTO ToolResults (toolName, queryText, resultText) "
             "VALUES ('holehe', 'private@example.com', 'private@example.com result')"
@@ -326,7 +337,7 @@ def test_saved_views_migrate_legacy_records(tmp_path, monkeypatch, capsys, choic
     assert "[redacted]" in output
 
 
-def test_saved_view_does_not_query_if_migration_fails(monkeypatch, capsys):
+def test_saved_view_does_not_query_if_initialization_fails(monkeypatch, capsys):
     monkeypatch.setattr(main, "_choose_option", lambda *args: 0)
     monkeypatch.setattr(
         database, "setup_database", Mock(side_effect=sqlite3.OperationalError("failed"))
@@ -454,11 +465,10 @@ def test_cli_returns_nonzero_for_database_execution_error(monkeypatch, capsys):
 
 
 @pytest.mark.parametrize("view", ["runs", "results"])
-def test_cli_query_migrates_legacy_records(tmp_path, monkeypatch, capsys, view):
+def test_cli_query_redacts_legacy_records(tmp_path, monkeypatch, capsys, view):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "legacy-cli.db"))
     database.setup_database()
     with database.connect_db() as conn:
-        conn.execute("DELETE FROM OsintBeastMigrations")
         conn.execute(
             "INSERT INTO ToolResults (toolName, queryText, resultText) "
             "VALUES ('holehe', 'private@example.com', 'private@example.com result')"

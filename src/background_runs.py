@@ -3,6 +3,7 @@
 import logging
 import math
 import multiprocessing
+import multiprocessing.connection
 import os
 import signal
 import threading
@@ -51,10 +52,26 @@ class RunLimits:
             raise ValueError("timeout_seconds must be finite and positive.")
 
 
-def _worker(connection, tool_name, query, max_output_bytes):
+def _watch_parent(parent_sentinel, deadline):
+    remaining = max(0, deadline - time.monotonic())
+    multiprocessing.connection.wait([parent_sentinel], timeout=remaining)
+    if os.name == "posix":
+        os.killpg(os.getpgrp(), signal.SIGKILL)
+    else:
+        os._exit(1)
+
+
+def _worker(connection, tool_name, query, max_output_bytes, deadline=None):
     try:
         if os.name == "posix":
             os.setsid()
+        if deadline is not None:
+            parent = multiprocessing.parent_process()
+            if parent is None:
+                raise RuntimeError("Background worker has no parent process.")
+            threading.Thread(
+                target=_watch_parent, args=(parent.sentinel, deadline), daemon=True
+            ).start()
         if tool_name == "holehe":
             previous_disable = logging.root.manager.disable
             logging.disable(logging.CRITICAL)
@@ -75,7 +92,10 @@ def _worker(connection, tool_name, query, max_output_bytes):
         connection.send_bytes(b"S" + payload)
     except BaseException as exc:
         status = b"T" if isinstance(exc, TimeoutError) else b"F"
-        message = str(exc) or f"Worker failed ({type(exc).__name__})."
+        if isinstance(exc, (TimeoutError, RuntimeError, OSError, ImportError, ValueError)):
+            message = str(exc) or f"Worker failed ({type(exc).__name__})."
+        else:
+            message = f"{tool_name} failed unexpectedly ({type(exc).__name__})."
         if tool_name == "holehe":
             message = redact_sensitive_output(message, query)
         try:
@@ -125,18 +145,23 @@ class BackgroundRuns:
                 tool_name, query, sensitive_input=tool_name == "holehe"
             )
             cancel = threading.Event()
-            thread = threading.Thread(
-                target=self._supervise, args=(run_id, tool_name, query, cancel),
-                name=f"tool-run-{run_id}", daemon=True,
-            )
-            self._jobs[run_id] = (cancel, thread)
+            completed = threading.Event()
             try:
+                thread = threading.Thread(
+                    target=self._supervise, args=(run_id, tool_name, query, cancel, completed),
+                    name=f"tool-run-{run_id}", daemon=True,
+                )
+                self._jobs[run_id] = (cancel, thread, completed)
                 thread.start()
             except BaseException:
-                del self._jobs[run_id]
-                database.finish_tool_run(
-                    run_id, "failed", error_text="Could not start background worker."
-                )
+                self._jobs.pop(run_id, None)
+                self._pending[run_id] = ("failed", "Could not start background worker.")
+                try:
+                    self._persist(run_id, *self._pending[run_id])
+                except Exception:
+                    _LOG.exception("Could not persist background run startup failure")
+                else:
+                    del self._pending[run_id]
                 raise
         return run_id
 
@@ -149,7 +174,7 @@ class BackgroundRuns:
                 except Exception as exc:
                     raise RuntimeError("Could not persist background run outcome.") from exc
                 del self._pending[run_id]
-        row = database.get_tool_run(run_id)
+        row = database.get_tool_run(run_id, redact_sensitive=True)
         if row is None:
             return None
         return dict(zip(
@@ -161,7 +186,7 @@ class BackgroundRuns:
     def cancel(self, run_id: int) -> bool:
         with self._lock:
             job = self._jobs.get(run_id)
-            if job is None:
+            if job is None or job[2].is_set():
                 return False
             job[0].set()
             return True
@@ -170,9 +195,10 @@ class BackgroundRuns:
         with self._lock:
             self._closed = True
             jobs = list(self._jobs.values())
-            for cancel, _ in jobs:
-                cancel.set()
-        for _, thread in jobs:
+            for cancel, _, completed in jobs:
+                if not completed.is_set():
+                    cancel.set()
+        for _, thread, _ in jobs:
             thread.join()
 
     @staticmethod
@@ -182,36 +208,44 @@ class BackgroundRuns:
         else:
             database.finish_tool_run(run_id, status, error_text=value)
 
-    def _supervise(self, run_id, tool_name, query, cancel):
+    def _supervise(self, run_id, tool_name, query, cancel, completed):
         process = None
         receiver = sender = None
         status, value = "failed", "Background worker failed."
         try:
             if not cancel.is_set():
                 receiver, sender = self._context.Pipe(duplex=False)
+                deadline = time.monotonic() + self.limits.timeout_seconds
                 process = self._context.Process(
                     target=_worker,
-                    args=(sender, tool_name, query, self.limits.max_output_bytes),
+                    args=(sender, tool_name, query, self.limits.max_output_bytes,
+                          deadline),
                 )
                 process.start()
                 sender.close()
                 sender = None
-                deadline = time.monotonic() + self.limits.timeout_seconds
                 while not cancel.is_set():
                     remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        status, value = "timed_out", "Background run exceeded its time limit."
-                        break
-                    if receiver.poll(min(remaining, 0.05)):
+                    if receiver.poll(max(0, min(remaining, 0.05))):
                         try:
                             payload = receiver.recv_bytes(self.limits.max_output_bytes + 1)
                         except (EOFError, OSError):
+                            if time.monotonic() >= deadline:
+                                status, value = "timed_out", "Background run exceeded its time limit."
                             break
                         if payload and payload[:1] in (b"S", b"F", b"T"):
                             status = {b"S": "success", b"F": "failed", b"T": "timed_out"}[payload[:1]]
                             value = payload[1:].decode("utf-8", errors="replace")
+                            with self._lock:
+                                if not cancel.is_set():
+                                    completed.set()
+                        break
+                    if remaining <= 0:
+                        status, value = "timed_out", "Background run exceeded its time limit."
                         break
                     if not process.is_alive():
+                        if time.monotonic() >= deadline:
+                            status, value = "timed_out", "Background run exceeded its time limit."
                         break
         except Exception:
             _LOG.exception("Background worker could not be supervised")
@@ -227,7 +261,7 @@ class BackgroundRuns:
             if sender is not None:
                 sender.close()
             with self._lock:
-                if cancel.is_set():
+                if cancel.is_set() and not completed.is_set():
                     status, value = "failed", "Run cancelled."
                 try:
                     self._persist(run_id, status, value)

@@ -1,12 +1,15 @@
 import json
 import os
+import re
 import sqlite3
 import sys
+from collections.abc import Mapping
 from importlib.resources import files
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any
 
 from data.utils.storage import MySQLStorage, SQLiteStorage, Storage, StorageError
+
 
 # Keep source-checkout paths independent of the current working directory.
 def setup_database_paths(module_file):
@@ -59,6 +62,27 @@ DB_FILE, SCHEMA_DIR, SCHEMA_FILES, INSERTABLE_TABLES = setup_database_paths(__fi
 MYSQL_SCHEMA_FILES = ("mysql-infoschema.sql", "mysql-toolschema.sql")
 _STORAGE_CACHE: dict[tuple[Any, ...], Storage] = {}
 DATABASE_ERRORS = (sqlite3.Error, StorageError)
+SQLITE_MAX_INTEGER = (1 << 63) - 1
+MAX_SQLITE_INTEGER = SQLITE_MAX_INTEGER
+
+
+def redact_sensitive_text(text: str | None, sensitive_value: str) -> str | None:
+    """Redact complete raw or partially URL-encoded input occurrences."""
+    if text is None or not sensitive_value or sensitive_value == "[redacted]":
+        return text
+    alternatives = []
+    for char in sensitive_value:
+        encoded = "".join(f"%{byte:02X}" for byte in char.encode("utf-8"))
+        representations = [re.escape(char), re.escape(encoded)]
+        if char == " ":
+            representations.append(r"\+")
+        alternatives.append(f"(?:{'|'.join(representations)})")
+    pattern = re.compile(
+        rf"(?<![A-Za-z0-9_.+-])(?<!\[){''.join(alternatives)}"
+        r"(?![A-Za-z0-9_.+-])(?!\])",
+        re.IGNORECASE,
+    )
+    return pattern.sub("[redacted]", text)
 
 
 def _get_storage() -> Storage:
@@ -92,7 +116,7 @@ def connect_db():
 
 
 def setup_database() -> None:
-    """Create missing schema objects and migrate legacy SQLite records."""
+    """Create missing schema objects without replacing existing data."""
     _get_storage().setup()
 
 
@@ -106,21 +130,22 @@ def query_database(
 ) -> list[tuple[Any, ...]]:
     """Execute a SQL query and return its rows.
 
-    This is retained for the local CLI. Web routes should use specific,
-    parameterized repository functions rather than accepting arbitrary SQL.
+    Web routes should use specific, parameterized repository functions rather
+    than accepting arbitrary SQL.
     """
     return _get_storage().query(query, parameters)
 
 
 def save_tool_result(
-    tool_name: str, query_text: str, result_text: Optional[str]
+    tool_name: str, query_text: str, result_text: str | None
 ):
     """Persist a tool run and return its result row ID."""
     return _get_storage().save_tool_result(tool_name, query_text, result_text)
 
 
 def list_tool_results(
-    limit: int = 100, max_result_text_chars: Optional[int] = None
+    limit: int = 100, max_result_text_chars: int | None = None, *,
+    redact_sensitive: bool = False,
 ) -> list[tuple[Any, ...]]:
     """Return saved results, optionally truncating result text in storage."""
     _validate_list_limit(limit)
@@ -131,8 +156,21 @@ def list_tool_results(
     ):
         raise ValueError("max_result_text_chars must be a positive integer")
     if max_result_text_chars is None:
-        return _get_storage().list_tool_results(limit)
-    return _get_storage().list_tool_results(limit, max_result_text_chars)
+        rows = _get_storage().list_tool_results(limit)
+    else:
+        rows = _get_storage().list_tool_results(limit, max_result_text_chars)
+    if not redact_sensitive:
+        return rows
+    return [
+        (
+            row[0],
+            row[1],
+            "[redacted]",
+            redact_sensitive_text(row[3], row[2]),
+            *row[4:],
+        )
+        for row in rows
+    ]
 
 
 def _validate_list_limit(limit: int) -> None:
@@ -141,28 +179,102 @@ def _validate_list_limit(limit: int) -> None:
 
 
 def list_tool_runs(
-    limit: int = 20, offset: int = 0, tool_name: Optional[str] = None,
-    status: Optional[str] = None,
+    limit: int = 20, offset: int = 0, tool_name: str | None = None,
+    status: str | None = None, cursor: int | None = None,
+    before_run_id: int | None = None, *, redact_sensitive: bool = False,
 ) -> list[tuple[Any, ...]]:
-    """Return a page of structured run history, newest first."""
+    """Return a bounded, newest-first run page using stable run-ID cursors."""
     _validate_list_limit(limit)
     if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
         raise ValueError("offset must be a non-negative integer")
     if tool_name is not None and (not isinstance(tool_name, str) or not tool_name):
         raise ValueError("tool_name must be a non-empty string")
-    if status is not None and status not in {
-        "running", "success", "failed", "timed_out",
-    }:
+    if status is not None and (
+        not isinstance(status, str)
+        or status not in {"running", "success", "failed", "timed_out"}
+    ):
         raise ValueError("Invalid run status")
+    if before_run_id is not None:
+        if cursor is not None:
+            raise ValueError("Specify only one run-ID cursor")
+        cursor = before_run_id
+    if cursor is not None:
+        cursor = _validate_run_id(cursor)
 
-    return _get_storage().query(
-        """SELECT runID, toolName, queryText, status, startedAt, finishedAt,
-                  errorText
-           FROM ToolRuns
-           WHERE (? IS NULL OR toolName = ?)
-             AND (? IS NULL OR status = ?)
-           ORDER BY runID DESC LIMIT ? OFFSET ?""",
-        (tool_name, tool_name, status, status, limit, offset),
+    if cursor is None:
+        query = (
+            """SELECT runID, toolName, queryText, status, startedAt, finishedAt,
+                      errorText
+               FROM ToolRuns
+               WHERE (? IS NULL OR toolName = ?)
+                 AND (? IS NULL OR status = ?)
+               ORDER BY runID DESC LIMIT ? OFFSET ?"""
+        )
+        parameters = (tool_name, tool_name, status, status, limit, offset)
+    else:
+        query = (
+            """SELECT runID, toolName, queryText, status, startedAt, finishedAt,
+                      errorText
+               FROM ToolRuns
+               WHERE runID < ?
+                 AND (? IS NULL OR toolName = ?)
+                 AND (? IS NULL OR status = ?)
+               ORDER BY runID DESC LIMIT ?"""
+        )
+        parameters = (cursor, tool_name, tool_name, status, status, limit)
+    rows = _get_storage().query(query, parameters)
+    if not redact_sensitive:
+        return rows
+    return [
+        (
+            row[0],
+            row[1],
+            "[redacted]",
+            row[3],
+            row[4],
+            row[5],
+            redact_sensitive_text(row[6], row[2]),
+        )
+        for row in rows
+    ]
+
+
+def _validate_run_id(run_id: int) -> int:
+    if (
+        not isinstance(run_id, int)
+        or isinstance(run_id, bool)
+        or run_id < 1
+        or run_id > SQLITE_MAX_INTEGER
+    ):
+        raise ValueError("run ID must be a positive SQLite integer")
+    return run_id
+
+
+def get_tool_run(
+    run_id: int, *, redact_sensitive: bool = False
+) -> tuple[Any, ...] | None:
+    """Return a run and its persisted result or error, if it exists."""
+    run_id = _validate_run_id(run_id)
+    rows = _get_storage().query(
+        """SELECT runID, toolName, queryText, status, resultText, errorText,
+                  startedAt, finishedAt
+           FROM ToolRuns WHERE runID = ?""",
+        (run_id,),
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    if not redact_sensitive:
+        return row
+    return (
+        row[0],
+        row[1],
+        "[redacted]",
+        row[3],
+        redact_sensitive_text(row[4], row[2]),
+        redact_sensitive_text(row[5], row[2]),
+        row[6],
+        row[7],
     )
 
 
@@ -177,40 +289,45 @@ def reconcile_stale_tool_runs(older_than_seconds: int = 600) -> int:
     return _get_storage().reconcile_stale_tool_runs(older_than_seconds)
 
 
-def get_tool_run(run_id: int) -> Optional[tuple[Any, ...]]:
-    """Return a run and its persisted result or error, if it exists."""
-    rows = _get_storage().query(
-        """SELECT runID, toolName, queryText, status, resultText, errorText,
-                  startedAt, finishedAt
-           FROM ToolRuns WHERE runID = ?""",
-        (run_id,),
-    )
-    return rows[0] if rows else None
-
-
-def get_tool_result(result_id: int) -> Optional[dict[str, Any]]:
+def get_tool_result(
+    result_id: int, *, redact_sensitive: bool = False
+) -> dict[str, Any] | None:
     """Return one saved result without exposing its original query text."""
+    result_id = _validate_run_id(result_id)
     rows = _get_storage().query(
-        """SELECT resultID, toolName, resultText, createdAt
+        """SELECT resultID, toolName, queryText, resultText, createdAt
            FROM ToolResults WHERE resultID = ?""",
         (result_id,),
     )
     if not rows:
         return None
-    return dict(zip(("result_id", "tool", "result", "created_at"), rows[0]))
+    row = rows[0]
+    return {
+        "result_id": row[0],
+        "tool": row[1],
+        "result": (
+            redact_sensitive_text(row[3], row[2])
+            if redact_sensitive else row[3]
+        ),
+        "created_at": row[4],
+    }
 
 
 def export_tool_runs_json(
     run_ids: list[int], include_sensitive: bool = False,
 ) -> str:
     """Serialize selected run records as JSON, redacting sensitive text by default."""
-    if not run_ids or len(run_ids) > 500:
+    if not isinstance(include_sensitive, bool):
+        raise ValueError("include_sensitive must be a boolean")
+    if not isinstance(run_ids, list) or not run_ids or len(run_ids) > 500:
         raise ValueError("Select between 1 and 500 runs")
-    if any(
-        not isinstance(run_id, int) or isinstance(run_id, bool) or run_id < 1
-        for run_id in run_ids
-    ):
-        raise ValueError("run_ids must contain positive integers")
+    for run_id in run_ids:
+        try:
+            _validate_run_id(run_id)
+        except ValueError as exc:
+            raise ValueError(
+                "run_ids must contain positive SQLite integers"
+            ) from exc
     if len(set(run_ids)) != len(run_ids):
         raise ValueError("run_ids must not contain duplicates")
 
@@ -255,10 +372,11 @@ def start_tool_run(tool_name: str, query_text: str):
 
 
 def finish_tool_run(
-    run_id: int, status: str, result_text: Optional[str] = None,
-    error_text: Optional[str] = None,
+    run_id: int, status: str, result_text: str | None = None,
+    error_text: str | None = None,
 ) -> None:
     """Finish a run and retain successful results in the legacy results table."""
+    run_id = _validate_run_id(run_id)
     if status not in {"success", "failed", "timed_out"}:
         raise ValueError(f"Invalid terminal run status: {status}")
     if (status == "success" and (result_text is None or error_text is not None)) or (
@@ -268,8 +386,9 @@ def finish_tool_run(
     _get_storage().finish_tool_run(run_id, status, result_text, error_text)
 
 
-def get_tool_run_status(run_id: int) -> Optional[dict[str, Any]]:
+def get_tool_run_status(run_id: int) -> dict[str, Any] | None:
     """Return non-sensitive status fields for one run."""
+    run_id = _validate_run_id(run_id)
     rows = _get_storage().query(
         """SELECT runID, toolName, status, startedAt, finishedAt
            FROM ToolRuns WHERE runID = ?""",

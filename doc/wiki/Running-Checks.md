@@ -47,8 +47,9 @@ The CLI validates input before recording a run and uses a non-echoing prompt.
 Holehe, Maigret, Helix, and Sherlock receive sensitive input through their
 in-process Python APIs, not process arguments. Their run records use a
 `[redacted]` query; direct and URL-encoded occurrences of the input are also
-redacted from saved and displayed results and errors. A `running` record can
-remain after interruption or a database-write failure. Successful outputs are
+redacted from saved and displayed results and errors. Ctrl+C during a check marks
+the run as failed before exiting. A `running` record can remain after abrupt
+termination or a database-write failure. Successful outputs are
 also saved to the existing `ToolResults` table. Existing `ToolResults` rows
 are preserved but do not gain historical run statuses.
 
@@ -69,20 +70,18 @@ output as text. By default, the `input`, `result`, and `error` fields are
 replaced with `[REDACTED]`; explicitly answer yes to include the values stored
 in the database. Sensitive input is redacted before storage, so opted-in
 exports may still contain other sensitive output or error text; store and share
-them accordingly. Exports are created with owner-only permissions and will not
-overwrite an existing file.
+them accordingly. On POSIX, exports are created with owner-only permissions.
+Sensitive exports are disabled on Windows because file permissions inherit
+from the destination directory. Exports will not overwrite an existing file.
 
 Inputs, results, and errors can contain sensitive data. They are stored in
 plain text in the local database; restrict its permissions and delete records
 when no longer needed. See the [local data retention and privacy guide](../data-retention-and-privacy.md)
 for exactly what is retained, how to restrict database and backup access, and
 safe practices for viewing, removing, and sharing sensitive output.
-On the first SQLite initialization after upgrading, existing tool queries are replaced
-with `[redacted]`, and case-insensitive direct and URL-encoded matches of each
-query are removed from its result and error text. Other sensitive information
-may remain in those texts, and explicitly non-sensitive new records are stored in plain text.
-Backups and SQLite journal files may also contain the original values.
-MySQL initialization does not perform this legacy redaction.
+Saved run and result views redact queries and matching result or error text
+at read time, without changing stored values. Other sensitive information may
+remain in those texts.
 
 Valid attempts are stored in `ToolRuns` with the tool, input, status (`running`,
 `success`, `failed`, or `timed_out`), and a UTC `startedAt` timestamp. A run
