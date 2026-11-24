@@ -1,12 +1,10 @@
 import io
-import sqlite3
 import sys
 import zipfile
 from pathlib import Path
 from pathlib import PurePosixPath, PureWindowsPath
 
 import requests
-from sqlalchemy import MetaData, Table, create_engine
 
 import data.utils.database as database
 
@@ -14,16 +12,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from data.utils.downloader_config import INSERTABLE_TABLES  # noqa: E402
 from tool_registry import TOOL_REGISTRY, get_reviewed_repo_url  # noqa: E402
 
 DB_FILE = database.DB_FILE
 
-
 def connect_db():
-    conn = sqlite3.connect(DB_FILE)
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    return database.connect_db()
 
 
 def setup_database():
@@ -31,28 +25,14 @@ def setup_database():
 
 
 def insert_data(table, data):
-    """Insert into an allowlisted table with SQLAlchemy-bound values."""
-    if not isinstance(table, str) or table not in INSERTABLE_TABLES:
-        raise ValueError(f"Unknown database table: {table}")
-    if not isinstance(data, dict) or not data:
+    """Insert into an allowlisted table through the shared storage interface."""
+    if not isinstance(data, dict):
         raise ValueError("data must be a non-empty mapping")
-
-    engine = create_engine(f"sqlite:///{Path(DB_FILE).resolve().as_posix()}")
-    try:
-        metadata = MetaData()
-        reflected = Table(table, metadata, autoload_with=engine)
-        known_columns = {column.name for column in reflected.columns}
-        if any(not isinstance(key, str) or key not in known_columns for key in data):
-            raise ValueError(f"Unknown column for table {table}")
-        with engine.begin() as connection:
-            connection.execute(reflected.insert().values(**data))
-    finally:
-        engine.dispose()
+    database.insert_data(table, data)
 
 
 def query_database(query, parameters=()):
-    with connect_db() as conn:
-        return conn.execute(query, parameters).fetchall()
+    return database.query_database(query, parameters)
 
 
 def _validate_github_repo_url(repo_url):

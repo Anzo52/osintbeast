@@ -1,6 +1,8 @@
 import json
 import logging
+import os
 import sqlite3
+import stat
 from unittest.mock import Mock
 
 import pytest
@@ -23,7 +25,6 @@ def initialized_db(tmp_path, monkeypatch):
     [
         ("holehe", RuntimeError("missing dependency"), "failed"),
         ("maigret", ValueError("invalid site database"), "failed"),
-        ("helix", KeyError("missing field"), "failed"),
         ("sherlock", RuntimeError("missing dependency"), "failed"),
         ("holehe", HoleheTimeoutError("timeout"), "timed_out"),
         ("maigret", TimeoutError(), "timed_out"),
@@ -35,7 +36,9 @@ def test_failed_runs_are_recorded(initialized_db, tool, error, status):
     def fail(_):
         raise error
 
-    outcome, message = tool_runs.execute_tool_run(tool, "test", fail)
+    outcome, message = tool_runs.execute_tool_run(
+        tool, "test", fail, sensitive_input=False
+    )
 
     assert outcome == status
     assert message
@@ -46,9 +49,31 @@ def test_failed_runs_are_recorded(initialized_db, tool, error, status):
     assert database.list_tool_results() == []
 
 
+@pytest.mark.parametrize("existing_run", [False, True])
+@pytest.mark.parametrize("sensitive_input", [False, True])
+def test_interrupted_runs_are_recorded(initialized_db, existing_run, sensitive_input):
+    run_id = database.start_tool_run("helix", "[redacted]") if existing_run else None
+
+    def interrupt(_):
+        raise KeyboardInterrupt("private-user")
+
+    with pytest.raises(KeyboardInterrupt):
+        tool_runs.execute_tool_run(
+            "helix", "private-user", interrupt, run_id=run_id,
+            sensitive_input=sensitive_input,
+        )
+
+    assert database.query_database(
+        "SELECT status, resultText, errorText, finishedAt IS NOT NULL FROM ToolRuns"
+    ) == [("failed", None, "Tool run interrupted.", 1)]
+    assert database.list_tool_results() == []
+
+
 @pytest.mark.parametrize("tool", ["holehe", "maigret", "helix", "sherlock"])
 def test_success_run_preserves_legacy_results(initialized_db, tool):
-    assert tool_runs.execute_tool_run(tool, "test", lambda _: "output") == (
+    assert tool_runs.execute_tool_run(
+        tool, "test", lambda _: "output", sensitive_input=False
+    ) == (
         "success", "output"
     )
     assert database.query_database(
@@ -60,8 +85,85 @@ def test_success_run_preserves_legacy_results(initialized_db, tool):
     ) == [(tool, "test", "output")]
 
 
+@pytest.mark.parametrize("sensitive_input", [None, 0, "false"])
+def test_sensitivity_must_be_boolean(initialized_db, sensitive_input):
+    runner = Mock()
+    with pytest.raises(TypeError):
+        tool_runs.execute_tool_run("holehe", "private", runner, sensitive_input=sensitive_input)
+    with pytest.raises(TypeError):
+        tool_runs.execute_tool_run_with_id(
+            "holehe", "private", runner, sensitive_input=sensitive_input
+        )
+    with pytest.raises(TypeError):
+        tool_runs.start_tool_run("holehe", "private", sensitive_input=sensitive_input)
+    runner.assert_not_called()
+    assert database.list_tool_runs() == []
+
+
+def test_sensitivity_is_required(initialized_db):
+    runner = Mock()
+    with pytest.raises(TypeError):
+        tool_runs.execute_tool_run("holehe", "private", runner)
+    runner.assert_not_called()
+    assert database.list_tool_runs() == []
+
+
+@pytest.mark.parametrize(
+    ("outcome", "error"),
+    [("success", None), ("failed", RuntimeError("private input error")),
+     ("timed_out", TimeoutError("private input timeout"))],
+)
+def test_sensitive_run_redacts_persistence(initialized_db, outcome, error):
+    runner = Mock(return_value="private input result", side_effect=error)
+    status, value = tool_runs.execute_tool_run(
+        "holehe", "private input", runner, sensitive_input=True
+    )
+    runner.assert_called_once_with("private input")
+    assert status == outcome
+    assert value == (
+        "[redacted] result" if error is None else str(error).replace("private input", "[redacted]")
+    )
+    assert database.query_database(
+        "SELECT queryText, status, resultText, errorText FROM ToolRuns"
+    ) == [(
+        tool_runs.REDACTED, outcome,
+        value if error is None else None,
+        value if error is not None else None,
+    )]
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolResults"
+    ) == ([(tool_runs.REDACTED, value)] if error is None else [])
+
+
+def test_sensitive_existing_run_must_already_be_redacted(initialized_db):
+    run_id = database.start_tool_run("holehe", "private input")
+    runner = Mock()
+    with pytest.raises(ValueError, match="redacted running record"):
+        tool_runs.execute_tool_run(
+            "holehe", "private input", runner, run_id=run_id, sensitive_input=True
+        )
+    runner.assert_not_called()
+    assert database.get_tool_run(run_id)[3] == "running"
+
+
+def test_sensitive_existing_redacted_run_is_completed(initialized_db):
+    run_id = database.start_tool_run("holehe", tool_runs.REDACTED)
+    assert tool_runs.execute_tool_run(
+        "holehe", "private input", lambda value: f"result: {value}",
+        run_id=run_id, sensitive_input=True,
+    ) == ("success", "result: [redacted]")
+    assert database.get_tool_run(run_id)[2:6] == (
+        tool_runs.REDACTED, "success", "result: [redacted]", None
+    )
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolResults"
+    ) == [(tool_runs.REDACTED, "result: [redacted]")]
+
+
 def test_non_text_output_is_recorded_as_a_failure(initialized_db):
-    status, message = tool_runs.execute_tool_run("helix", "test", lambda _: None)
+    status, message = tool_runs.execute_tool_run(
+        "helix", "test", lambda _: None, sensitive_input=False
+    )
 
     assert status == "failed"
     assert message == "helix returned non-text output."
@@ -84,7 +186,7 @@ def test_finish_is_atomic_if_legacy_result_insert_fails(initialized_db):
     ) == [("running", None, None)]
 
 
-def test_reinitializing_legacy_database_preserves_results(tmp_path, monkeypatch):
+def test_reinitializing_legacy_database_redacts_results(tmp_path, monkeypatch):
     path = tmp_path / "legacy.db"
     monkeypatch.setattr(database, "DB_FILE", str(path))
     with sqlite3.connect(path) as conn:
@@ -98,7 +200,7 @@ def test_reinitializing_legacy_database_preserves_results(tmp_path, monkeypatch)
     database.setup_database()
 
     assert database.query_database("SELECT queryText, resultText FROM ToolResults") == [
-        ("old", "old result")
+        ("[redacted]", "[redacted] result")
     ]
     assert database.query_database("SELECT * FROM ToolRuns") == []
 
@@ -108,6 +210,7 @@ def test_reinitializing_legacy_database_preserves_results(tmp_path, monkeypatch)
     [
         (main.run_holehe_check, "bad email"),
         (main.run_maigret_check, "bad username"),
+        (main.run_helix_check, "@@user"),
         (main.run_sherlock_check, "bad username"),
     ],
 )
@@ -115,6 +218,36 @@ def test_invalid_input_is_not_recorded(initialized_db, capsys, function, invalid
     function(invalid)
     assert "Input error:" in capsys.readouterr().out
     assert database.query_database("SELECT * FROM ToolRuns") == []
+
+
+@pytest.mark.parametrize(
+    ("choice", "identifier", "target", "result"),
+    [
+        (4, "-user@example.com", "run_holehe", {"output": "output"}),
+        (6, "-user", "run_maigret", "output"),
+        (7, "-user", "run_helix", "output"),
+        (8, "-user", "run_sherlock", "output"),
+    ],
+)
+def test_menu_accepts_leading_hyphen_identifiers(
+    initialized_db, monkeypatch, choice, identifier, target, result
+):
+    class FakeMenu:
+        def __init__(self, options, title):
+            pass
+
+        def show(self):
+            return choice
+
+    runner = Mock(return_value=result)
+    monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
+    monkeypatch.setattr("builtins.input", lambda prompt: identifier)
+    monkeypatch.setattr(main, target, runner)
+
+    main.main_menu()
+
+    runner.assert_called_once_with(identifier)
+    assert database.query_database("SELECT status FROM ToolRuns") == [("success",)]
 
 
 @pytest.mark.parametrize(
@@ -151,6 +284,7 @@ def test_list_tool_runs_filters_orders_and_paginates(initialized_db):
     assert [row[2] for row in database.list_tool_runs(
         tool_name="holehe", status="success"
     )] == ["old"]
+    assert database.list_tool_runs(tool_name="holehe' OR 1=1 --") == []
     assert [row[2] for row in database.list_tool_runs(offset=2)] == ["old"]
     assert database.list_tool_runs(offset=3) == []
     with pytest.raises(ValueError):
@@ -306,9 +440,11 @@ def test_cli_saves_success(
     monkeypatch.setattr(main, target, runner)
     function(value)
     runner.assert_called_once_with(query_text)
-    assert f"{tool.capitalize()} check saved to the database." in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert (result["output"] if isinstance(result, dict) else result) in output
+    assert f"{tool.capitalize()} check saved to the database." in output
     assert database.query_database("SELECT toolName, queryText, status FROM ToolRuns") == [
-        (tool, "[redacted]", "success")
+        (tool, tool_runs.REDACTED, "success")
     ]
 
 
@@ -322,7 +458,7 @@ def test_cli_reports_and_records_failure(initialized_db, monkeypatch, capsys):
 
 
 def test_sensitive_values_are_redacted_from_output_and_run_records(
-    initialized_db, monkeypatch, capsys
+    initialized_db, monkeypatch, capsys, caplog
 ):
     sensitive_value = "person@example.com"
 
@@ -341,6 +477,8 @@ def test_sensitive_values_are_redacted_from_output_and_run_records(
 
     output = capsys.readouterr().out
     assert sensitive_value not in output
+    assert sensitive_value not in caplog.text
+    assert all(sensitive_value not in record.getMessage() for record in caplog.records)
     assert "[redacted]" in output
     assert database.query_database(
         "SELECT queryText, resultText FROM ToolRuns"
@@ -411,15 +549,29 @@ def test_short_username_redaction_preserves_numeric_json_fields(initialized_db):
     }
 
 
-@pytest.mark.parametrize("error_type", [RuntimeError, TypeError])
+@pytest.mark.parametrize("query", ["a", "2"])
+def test_short_username_redaction_does_not_replace_substrings(query):
+    result = json.dumps({
+        "status": "data and 200",
+        "url": f"https://example.test/{query}",
+        "message": f"found {query}, not data or 200",
+    })
+
+    record = json.loads(tool_runs.redact_sensitive_output(result, query))
+
+    assert record["status"] == "data and 200"
+    assert record["url"] == "https://example.test/[redacted]"
+    assert record["message"] == "found [redacted], not data or 200"
+
+
 def test_sensitive_values_are_redacted_from_errors(
-    initialized_db, monkeypatch, capsys, error_type
+    initialized_db, monkeypatch, capsys
 ):
     sensitive_value = "person@example.com"
     monkeypatch.setattr(
         main,
         "run_holehe",
-        Mock(side_effect=error_type(f"request failed for {sensitive_value}")),
+        Mock(side_effect=RuntimeError(f"request failed for {sensitive_value}")),
     )
 
     main.run_holehe_check(sensitive_value)
@@ -430,6 +582,52 @@ def test_sensitive_values_are_redacted_from_errors(
         "SELECT queryText, errorText FROM ToolRuns"
     ) == [("[redacted]", "request failed for [redacted]")]
 
+
+def test_sensitive_unexpected_failure_is_recorded_and_propagated(initialized_db):
+    sensitive_value = "person@example.com"
+
+    def fail(value):
+        raise TypeError(f"unexpected value: {value}")
+
+    with pytest.raises(tool_runs.UnexpectedToolError) as error:
+        tool_runs.execute_tool_run(
+            "holehe", sensitive_value, fail, sensitive_input=True
+        )
+
+    assert "TypeError" in str(error.value)
+    assert sensitive_value not in str(error.value)
+    assert any(frame.name == "fail" for frame in error.traceback)
+    assert database.query_database(
+        "SELECT queryText, status, errorText FROM ToolRuns"
+    ) == [("[redacted]", "failed", "holehe failed unexpectedly (TypeError).")]
+
+
+def test_sensitivity_must_be_explicit():
+    with pytest.raises(TypeError, match="sensitive_input"):
+        tool_runs.execute_tool_run("holehe", "private", lambda _: "output")
+    with pytest.raises(TypeError, match="sensitive_input"):
+        tool_runs.execute_tool_run_with_id("holehe", "private", lambda _: "output")
+    with pytest.raises(TypeError, match="sensitive_input"):
+        tool_runs.start_tool_run("holehe", "private")
+
+
+def test_execute_tool_run_with_id_redacts_sensitive_values(initialized_db):
+    sensitive_value = "person@example.com"
+    run_id, status, output = tool_runs.execute_tool_run_with_id(
+        "holehe",
+        sensitive_value,
+        lambda value: f"Found {value}",
+        sensitive_input=True,
+    )
+
+    assert status == "success"
+    assert output == "Found [redacted]"
+    assert database.get_tool_run(run_id)[2:6] == (
+        "[redacted]", "success", "Found [redacted]", None
+    )
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolResults"
+    ) == [("[redacted]", "Found [redacted]") ]
 
 @pytest.mark.parametrize(
     ("menu", "prompt", "value"),
@@ -455,8 +653,8 @@ def test_target_inputs_use_echoing_prompts(monkeypatch, menu, prompt, value):
     runner = Mock()
 
     menu(runner)
+
     assert seen == [prompt]
-    runner.assert_called_once_with(value)
     runner.assert_called_once_with(value)
 
 
@@ -522,3 +720,125 @@ def test_maigret_menu_action_dispatches_username(monkeypatch):
     monkeypatch.setattr(main, "run_maigret_check", runner)
     main.main_menu()
     runner.assert_called_once_with("user")
+
+
+def test_history_filter_renders_filtered_page(initialized_db, monkeypatch, capsys):
+    matching_id = database.start_tool_run("holehe", "private@example.test")
+    database.finish_tool_run(matching_id, "success", result_text="match")
+    other_id = database.start_tool_run("maigret", "different")
+    database.finish_tool_run(other_id, "failed", error_text="error")
+    choices = iter((1, 6))
+    inputs = iter(("holehe", "success"))
+    monkeypatch.setattr(main, "_choose_option", lambda options, title: next(choices))
+    monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+    main.run_history_menu()
+
+    output = capsys.readouterr().out
+    assert output.count(f"Run {matching_id} | holehe") == 2
+    assert output.count(f"Run {other_id} | maigret") == 1
+
+
+@pytest.mark.parametrize(
+    ("consent", "expected_input", "expected_result"),
+    [
+        ("", "[REDACTED]", "[REDACTED]"),
+        ("no", "[REDACTED]", "[REDACTED]"),
+        ("yes", "private@example.test", "sensitive result"),
+    ],
+)
+def test_export_selected_runs_obeys_sensitive_consent(
+    initialized_db, monkeypatch, tmp_path, capsys,
+    consent, expected_input, expected_result,
+):
+    run_id = database.start_tool_run("holehe", "private@example.test")
+    database.finish_tool_run(run_id, "success", result_text="sensitive result")
+    output_path = tmp_path / "runs.json"
+    inputs = iter((str(run_id), str(output_path), consent))
+    monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+    main.export_selected_runs()
+
+    if consent == "yes" and os.name == "nt":
+        assert not output_path.exists()
+        assert "Sensitive exports are disabled on Windows" in capsys.readouterr().out
+        return
+    record = json.loads(output_path.read_text(encoding="utf-8"))[0]
+    assert record["input"] == expected_input
+    assert record["result"] == expected_result
+    if os.name == "posix":
+        assert stat.S_IMODE(output_path.stat().st_mode) == 0o600
+    assert "Exported 1 run(s)" in capsys.readouterr().out
+
+
+def test_sensitive_export_is_disabled_on_windows(
+    initialized_db, monkeypatch, tmp_path, capsys
+):
+    run_id = database.start_tool_run("holehe", "private@example.test")
+    database.finish_tool_run(run_id, "success", result_text="sensitive result")
+    output_path = tmp_path / "runs.json"
+    inputs = iter((str(run_id), str(output_path), "yes"))
+    monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+    monkeypatch.setattr(main.os, "name", "nt")
+
+    main.export_selected_runs()
+
+    assert not output_path.exists()
+    assert "Sensitive exports are disabled on Windows" in capsys.readouterr().out
+
+
+def test_export_does_not_overwrite_existing_file(initialized_db, tmp_path):
+    destination = tmp_path / "runs.json"
+    destination.write_text("existing", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        main._write_export_file(str(destination), "replacement")
+
+    assert destination.read_text(encoding="utf-8") == "existing"
+    assert {path.name for path in tmp_path.iterdir()} == {"runs.db", "runs.json"}
+
+
+def test_failed_export_cleans_up_temporary_file(tmp_path, monkeypatch):
+    destination = tmp_path / "runs.json"
+
+    def fail_link(*args, **kwargs):
+        raise OSError("cannot publish")
+
+    monkeypatch.setattr(main.os, "link", fail_link)
+    with pytest.raises(OSError, match="cannot publish"):
+        main._write_export_file(str(destination), "{}")
+
+    assert not destination.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_history_and_inspection_report_database_path_errors(monkeypatch, capsys):
+    monkeypatch.setattr(
+        main, "list_tool_runs", Mock(side_effect=OSError("database path denied"))
+    )
+    monkeypatch.setattr(
+        main, "get_tool_run", Mock(side_effect=OSError("database path denied"))
+    )
+
+    assert main.show_run_history() == []
+    main.inspect_tool_run(1)
+
+    assert capsys.readouterr().out.count("database path denied") == 2
+
+
+def test_history_filter_reports_database_errors(monkeypatch, capsys):
+    monkeypatch.setattr(
+        main,
+        "list_tool_runs",
+        Mock(side_effect=sqlite3.OperationalError("database unavailable")),
+    )
+    choices = iter((1, 6))
+    inputs = iter(("holehe", "success"))
+    monkeypatch.setattr(main, "_choose_option", lambda options, title: next(choices))
+    monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+    main.run_history_menu()
+
+    assert capsys.readouterr().out.count(
+        "Run history query failed: database unavailable"
+    ) == 2
