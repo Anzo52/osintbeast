@@ -396,6 +396,36 @@ def test_cli_rejects_invalid_email_without_running_tool(monkeypatch, capsys):
     runner.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("arguments", "runner_name", "identifier", "runner_output"),
+    [
+        (
+            ["check-email", "--", "-person@example.com"],
+            "run_holehe",
+            "-person@example.com",
+            {"output": "output"},
+        ),
+        (
+            ["check-username", "sherlock", "--", "-user"],
+            "run_sherlock",
+            "-user",
+            "output",
+        ),
+    ],
+)
+def test_cli_accepts_hyphen_identifiers_after_separator(
+    tmp_path, monkeypatch, arguments, runner_name, identifier, runner_output
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "cli.db"))
+    database.setup_database()
+    runner = Mock(return_value=runner_output)
+    monkeypatch.setattr(main, runner_name, runner)
+
+    assert main.cli(arguments) == 0
+
+    runner.assert_called_once_with(identifier)
+
+
 def test_cli_rejects_invalid_username_with_accepted_format(monkeypatch, capsys):
     runner = Mock()
     monkeypatch.setattr(main, "run_sherlock", runner)
@@ -456,8 +486,22 @@ def test_cli_explicit_end_of_options_preserves_literal_help(monkeypatch, argv):
     monkeypatch.setattr(main, runner_name, runner)
 
     assert main.cli(argv) == 0
-
     runner.assert_called_once_with("--help")
+
+
+@pytest.mark.parametrize(
+    ("argv", "runner_name", "identifier"),
+    [
+        (["check-username", "maigret", "-user"], "run_maigret_check", "-user"),
+    ],
+)
+def test_cli_accepts_identifiers_starting_with_hyphen(
+    monkeypatch, argv, runner_name, identifier
+):
+    runner = Mock(return_value=0)
+    monkeypatch.setattr(main, runner_name, runner)
+    assert main.cli(argv) == 0
+    runner.assert_called_once_with(identifier)
 
 
 def test_cli_reports_optional_dependency_failure_and_nonzero_status(

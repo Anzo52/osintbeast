@@ -38,7 +38,7 @@ def run_service(monkeypatch):
     service = background_runs.BackgroundRuns()
     monkeypatch.setattr(web_ui, "RUN_SERVICE", service)
     yield service
-    service.close()
+    web_ui.RUN_SERVICE.close()
 
 
 def _request(url, payload=None, headers=None):
@@ -90,7 +90,7 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
         )
         assert status == 202
         assert launched["status"] == "running"
-        assert launched["input"] == "alice"
+        assert launched["input"] == "[redacted]"
 
         status, running = _request(f"{base_url}/api/runs/{launched['id']}")
         assert status == 200
@@ -131,6 +131,24 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
         server.server_close()
 
 
+def test_shutdown_marks_active_runs_failed(tmp_path, monkeypatch, run_service):
+    server, base_url = _server(tmp_path, monkeypatch, Mock())
+    try:
+        status, launched = _request(
+            f"{base_url}/api/runs",
+            {"tool": "sherlock", "input": "slow", "authorized": True},
+        )
+        assert status == 202
+        web_ui.RUN_SERVICE.close()
+
+        run = database.get_tool_run(launched["id"])
+        assert run[3] == "failed"
+        assert run[5] == "Run cancelled."
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_web_run_views_redact_legacy_records_without_rewriting_them(
     tmp_path, monkeypatch
 ):
@@ -159,7 +177,9 @@ def test_web_run_views_redact_legacy_records_without_rewriting_them(
         server.server_close()
 
 
-def test_unpersisted_completion_is_logged_and_reconciled(tmp_path, monkeypatch, caplog):
+def test_pending_completion_recovers_after_persistence_failure(
+    tmp_path, monkeypatch, caplog
+):
     server, base_url = _server(tmp_path, monkeypatch, Mock(return_value="output"))
     finish = database.finish_tool_run
     monkeypatch.setattr(
@@ -394,6 +414,68 @@ def test_unexpected_background_error_is_redacted(tmp_path, monkeypatch, caplog):
     assert "private exception" not in caplog.text
 
 
+def test_submission_idempotency_key_returns_existing_run(tmp_path, monkeypatch):
+    server, base_url = _server(tmp_path, monkeypatch, Mock())
+    payload = {"tool": "sherlock", "input": "alice", "authorized": True}
+    headers = {"Idempotency-Key": "retry-this-submission"}
+    try:
+        status, first = _request(f"{base_url}/api/runs", payload, headers)
+        assert status == 202
+        status, repeated = _request(f"{base_url}/api/runs", payload, headers)
+        assert status == 202
+        assert repeated["id"] == first["id"]
+        assert len(database.list_tool_runs()) == 1
+
+        status, body = _request(
+            f"{base_url}/api/runs",
+            {**payload, "input": "bob"},
+            headers,
+        )
+        assert status == 409
+        assert "different run" in body["error"]
+        assert len(database.list_tool_runs()) == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_serve_creates_a_fresh_run_service_each_time(monkeypatch):
+    services = []
+
+    class Service:
+        def __init__(self):
+            self.closed = False
+            services.append(self)
+
+        def close(self):
+            self.closed = True
+
+    class Server:
+        server_port = 8000
+
+        def __init__(self, _address, _handler):
+            pass
+
+        def serve_forever(self):
+            raise KeyboardInterrupt
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(web_ui, "BackgroundRuns", Service)
+    monkeypatch.setattr(web_ui, "ThreadingHTTPServer", Server)
+    monkeypatch.setattr(database, "setup_database", Mock())
+    monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", "operator")
+    monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", "viewer")
+
+    web_ui.serve()
+    web_ui.serve()
+
+    assert len(services) == 2
+    assert services[0] is not services[1]
+    assert all(service.closed for service in services)
+
+
 def test_browser_capacity_rejection_and_recovery(tmp_path, monkeypatch, run_service):
     server, base_url = _server(tmp_path, monkeypatch, Mock())
     payload = {"tool": "sherlock", "input": "slow", "authorized": True}
@@ -406,15 +488,39 @@ def test_browser_capacity_rejection_and_recovery(tmp_path, monkeypatch, run_serv
         assert status == 503
         assert "capacity" in body["error"]
         assert len(database.list_tool_runs()) == 2
-        assert run_service.cancel(first["id"])
+        service = web_ui.RUN_SERVICE
+        assert service.cancel(first["id"])
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            if run_service.status(first["id"])["status"] != "running":
+            if service.status(first["id"])["status"] != "running":
                 break
             time.sleep(0.01)
         status, third = _request(f"{base_url}/api/runs", payload)
         assert status == 202
         assert third["id"] not in (first["id"], second["id"])
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_browser_exposes_run_id_when_startup_failure_cannot_be_saved(tmp_path, monkeypatch):
+    server, base_url = _server(tmp_path, monkeypatch, Mock())
+    run_service = web_ui.RUN_SERVICE
+    run_id = database.start_tool_run("sherlock", "alice")
+    run_service._pending[run_id] = ("failed", "Could not start background worker.")
+    monkeypatch.setattr(
+        run_service, "submit", Mock(side_effect=background_runs.StartupPersistenceError(run_id))
+    )
+    try:
+        status, body = _request(
+            f"{base_url}/api/runs",
+            {"tool": "sherlock", "input": "alice", "authorized": True},
+        )
+        assert status == 503
+        assert body["id"] == run_id
+        status, detail = _request(f"{base_url}/api/runs/{run_id}")
+        assert status == 200
+        assert detail["error"] == "Could not start background worker."
     finally:
         server.shutdown()
         server.server_close()

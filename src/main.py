@@ -391,7 +391,10 @@ def _build_parser():
     email_command = commands.add_parser("check-email", help="check an email address with Holehe")
     email_command.add_argument(
         "email",
-        help="email address (for example, person@example.com)",
+        help=(
+            "email address (for example, person@example.com); "
+            "use -- before an address beginning with -"
+        ),
     )
     email_command.set_defaults(handler=lambda args: run_holehe_check(args.email))
 
@@ -408,7 +411,8 @@ def _build_parser():
         "username",
         help=(
             "up to 100 ASCII letters, digits, dots, underscores or hyphens; "
-            "Helix accepts up to 50 and an optional leading @"
+            "Helix accepts up to 50 and an optional leading @; "
+            "use -- before a username beginning with -"
         ),
     )
     username_command.set_defaults(

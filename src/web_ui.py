@@ -7,10 +7,11 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
-from background_runs import BackgroundRuns, CapacityError
+from background_runs import (
+    BackgroundRuns, CapacityError, IdempotencyConflict, StartupPersistenceError,
+)
 from data.utils import database
-from helix_integration import run_helix
-from helix_integration import validate_username as validate_helix_username
+from helix_integration import run_helix, validate_username as validate_helix_username
 from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username
 from sherlock_integration import run_sherlock
@@ -41,6 +42,7 @@ def _is_loopback_host(host):
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
 
 RUN_SERVICE = BackgroundRuns()
 RUNNABLE_TOOLS = {
@@ -110,7 +112,10 @@ INDEX_HTML = """<!doctype html>
       }
       if (token) sessionStorage.setItem("osintbeastToken", token);
       const body = await response.json();
-      if (!response.ok) throw new Error(body.error || "Request failed.");
+      if (!response.ok) {
+        const run = Number.isSafeInteger(body.id) ? ` Run #${body.id}.` : "";
+        throw new Error((body.error || "Request failed.") + run);
+      }
       return body;
     }
 
@@ -166,7 +171,14 @@ INDEX_HTML = """<!doctype html>
       error.textContent = reason.message;
     }
 
-    toolSelect.addEventListener("change", updateInputLabel);
+    let idempotencyKey = null;
+    toolSelect.addEventListener("change", () => {
+      idempotencyKey = null;
+      updateInputLabel();
+    });
+    queryInput.addEventListener("input", () => {
+      idempotencyKey = null;
+    });
     document.querySelector("#launch").addEventListener("submit", async event => {
       event.preventDefault();
       error.textContent = "";
@@ -175,9 +187,13 @@ INDEX_HTML = """<!doctype html>
       submit.disabled = true;
       message.textContent = "Submitting run…";
       try {
+        idempotencyKey ||= crypto.randomUUID();
         const run = await request("/api/runs", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": idempotencyKey
+          },
           body: JSON.stringify({
             tool: toolSelect.value,
             input: queryInput.value,
@@ -186,6 +202,7 @@ INDEX_HTML = """<!doctype html>
         });
         message.textContent = `Run #${run.id} is ${run.status}.`;
         await loadRun(run.id);
+        idempotencyKey = null;
       } catch (reason) {
         message.textContent = "";
         showError(reason);
@@ -404,20 +421,29 @@ class WebHandler(BaseHTTPRequestHandler):
                 return
             input_kind, validator, _ = tool
             query_text = validator(payload.get("input"))
-            run_id = RUN_SERVICE.submit(tool_name, query_text)
+            idempotency_key = self.headers.get("Idempotency-Key")
+            run_id = RUN_SERVICE.submit(tool_name, query_text, idempotency_key)
+            row = database.get_tool_run(run_id, redact_sensitive=True)
             self._send_json(202, {
                 "id": run_id,
                 "tool": tool_name,
-                "input": "[redacted]" if tool_name == "holehe" else query_text,
+                "input": row[2],
                 "input_kind": input_kind,
-                "status": "running",
+                "status": row[3],
             })
         except (UnicodeDecodeError, json.JSONDecodeError):
             self._send_json(400, {"error": "Request body must contain valid JSON."})
         except ValueError as exc:
             self._send_json(400, {"error": str(exc)})
+        except IdempotencyConflict as exc:
+            self._send_json(409, {"error": str(exc)})
         except CapacityError:
             self._send_json(503, {"error": "Background run capacity reached. Try again later."})
+        except StartupPersistenceError as exc:
+            self._send_json(503, {
+                "error": "Could not persist the run outcome. Retry status later.",
+                "id": exc.run_id,
+            })
         except (RuntimeError, OSError):
             self._send_json(503, {"error": "The tool run could not be started. Try again later."})
         except database.DATABASE_ERRORS:
@@ -452,7 +478,14 @@ def create_server(host="127.0.0.1", port=8000):
             "OSINTBEAST_VIEWER_TOKEN are required before starting."
         )
     database.setup_database()
-    server = ThreadingHTTPServer((host, port), WebHandler)
+    global RUN_SERVICE
+    service = BackgroundRuns()
+    try:
+        server = ThreadingHTTPServer((host, port), WebHandler)
+    except Exception:
+        service.close()
+        raise
+    RUN_SERVICE = service
     server.daemon_threads = True
     return server
 
@@ -460,6 +493,7 @@ def create_server(host="127.0.0.1", port=8000):
 def serve(host="127.0.0.1", port=8000):
     """Serve the web UI on loopback by default."""
     server = create_server(host, port)
+    service = RUN_SERVICE
     print(f"OSINT Beast web UI: http://{host}:{server.server_port}")
     try:
         server.serve_forever()
@@ -467,7 +501,7 @@ def serve(host="127.0.0.1", port=8000):
         pass
     finally:
         server.server_close()
-        RUN_SERVICE.close()
+        service.close()
 
 
 if __name__ == "__main__":
