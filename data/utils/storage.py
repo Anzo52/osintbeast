@@ -48,6 +48,7 @@ class Storage(Protocol):
         max_result_text_chars: Optional[int] = None,
         *,
         include_truncation_status: bool = False,
+        max_query_text_chars: Optional[int] = None,
     ) -> list[tuple[Any, ...]]: ...
 
     def start_tool_run(self, tool_name: str, query_text: str) -> int: ...
@@ -166,7 +167,16 @@ class SQLiteStorage:
         max_result_text_chars: Optional[int] = None,
         *,
         include_truncation_status: bool = False,
+        max_query_text_chars: Optional[int] = None,
     ) -> list[tuple[Any, ...]]:
+        if max_query_text_chars is not None and (
+            not isinstance(max_query_text_chars, int)
+            or isinstance(max_query_text_chars, bool)
+            or max_query_text_chars < 1
+            or max_result_text_chars is None
+            or not include_truncation_status
+        ):
+            raise ValueError("max_query_text_chars requires a bounded redaction read")
         with closing(self.connect()) as conn:
             if max_result_text_chars is None:
                 rows = conn.execute(
@@ -177,6 +187,45 @@ class SQLiteStorage:
                 if include_truncation_status:
                     return [(*row, False) for row in rows]
                 return rows
+            if max_query_text_chars is not None:
+                rows = conn.execute(
+                    """SELECT resultID, toolName,
+                              CASE
+                                  WHEN SUBSTR(resultText, ?, 1) <> ''
+                                   AND SUBSTR(queryText, ?, 1) <> ''
+                                  THEN NULL ELSE queryText
+                              END,
+                              SUBSTR(resultText, 1, ?),
+                              CASE WHEN SUBSTR(resultText, ?, 1) <> '' THEN 1 ELSE 0 END,
+                              createdAt,
+                              CASE
+                                  WHEN SUBSTR(resultText, ?, 1) <> ''
+                                   AND SUBSTR(queryText, ?, 1) <> ''
+                                  THEN 1 ELSE 0
+                              END
+                       FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
+                    (
+                        max_result_text_chars + 1,
+                        max_query_text_chars + 1,
+                        max_result_text_chars,
+                        max_result_text_chars + 1,
+                        max_result_text_chars + 1,
+                        max_query_text_chars + 1,
+                        limit,
+                    ),
+                ).fetchall()
+                return [
+                    (
+                        row[0],
+                        row[1],
+                        row[2],
+                        row[3],
+                        row[5],
+                        bool(row[4]),
+                        bool(row[6]),
+                    )
+                    for row in rows
+                ]
             if include_truncation_status:
                 rows = conn.execute(
                     """SELECT resultID, toolName, queryText,
@@ -514,7 +563,16 @@ class MySQLStorage:
         max_result_text_chars: Optional[int] = None,
         *,
         include_truncation_status: bool = False,
+        max_query_text_chars: Optional[int] = None,
     ) -> list[tuple[Any, ...]]:
+        if max_query_text_chars is not None and (
+            not isinstance(max_query_text_chars, int)
+            or isinstance(max_query_text_chars, bool)
+            or max_query_text_chars < 1
+            or max_result_text_chars is None
+            or not include_truncation_status
+        ):
+            raise ValueError("max_query_text_chars requires a bounded redaction read")
         try:
             with self._get_engine().connect() as connection:
                 if max_result_text_chars is None:
@@ -526,6 +584,47 @@ class MySQLStorage:
                     if include_truncation_status:
                         rows = [(*row, False) for row in rows]
                 else:
+                    if max_query_text_chars is not None:
+                        rows = connection.exec_driver_sql(
+                            """SELECT resultID, toolName,
+                                      CASE
+                                          WHEN SUBSTR(resultText, %s, 1) <> ''
+                                           AND SUBSTR(queryText, %s, 1) <> ''
+                                          THEN NULL ELSE queryText
+                                      END,
+                                      SUBSTR(resultText, 1, %s),
+                                      CASE WHEN SUBSTR(resultText, %s, 1) <> ''
+                                           THEN 1 ELSE 0 END,
+                                      createdAt,
+                                      CASE
+                                          WHEN SUBSTR(resultText, %s, 1) <> ''
+                                           AND SUBSTR(queryText, %s, 1) <> ''
+                                          THEN 1 ELSE 0
+                                      END
+                               FROM ToolResults ORDER BY resultID DESC LIMIT %s""",
+                            (
+                                max_result_text_chars + 1,
+                                max_query_text_chars + 1,
+                                max_result_text_chars,
+                                max_result_text_chars + 1,
+                                max_result_text_chars + 1,
+                                max_query_text_chars + 1,
+                                limit,
+                            ),
+                        ).fetchall()
+                        rows = [
+                            (
+                                row[0],
+                                row[1],
+                                row[2],
+                                row[3],
+                                row[5],
+                                bool(row[4]),
+                                bool(row[6]),
+                            )
+                            for row in rows
+                        ]
+                        return self._normalize_rows(rows)
                     rows = connection.exec_driver_sql(
                         """SELECT resultID, toolName, queryText,
                                   SUBSTR(resultText, 1, %s),

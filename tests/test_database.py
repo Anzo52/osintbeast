@@ -446,6 +446,7 @@ def test_redacted_saved_results_remain_bounded_after_redaction(tmp_path, monkeyp
     [
         ("private@example.com", "start private@example.com and more"),
         ("alice@example.com", "start alice%40example.com and more"),
+        ("Istanbul", "prefix content İst trailing data"),
     ],
 )
 def test_redacted_bounded_reads_hide_sensitive_values_crossing_the_limit(
@@ -460,26 +461,71 @@ def test_redacted_bounded_reads_hide_sensitive_values_crossing_the_limit(
     calls = []
 
     def bounded_list_results(
-        limit, max_result_text_chars=None, *, include_truncation_status=False
+        limit,
+        max_result_text_chars=None,
+        *,
+        include_truncation_status=False,
+        max_query_text_chars=None,
     ):
-        calls.append((limit, max_result_text_chars, include_truncation_status))
+        calls.append(
+            (
+                limit,
+                max_result_text_chars,
+                include_truncation_status,
+                max_query_text_chars,
+            )
+        )
         return list_results(
             limit,
             max_result_text_chars,
             include_truncation_status=include_truncation_status,
+            max_query_text_chars=max_query_text_chars,
         )
 
     monkeypatch.setattr(storage, "list_tool_results", bounded_list_results)
+    expected_limit = 18 if query == "Istanbul" else 22
+    expected_output = (
+        "prefi… [truncated]"
+        if query == "Istanbul"
+        else "start … [truncated]"
+    )
     row = database.list_tool_results(
-        limit=1, max_result_text_chars=22, redact_sensitive=True
+        limit=1,
+        max_result_text_chars=expected_limit,
+        redact_sensitive=True,
     )[0]
 
-    assert calls == [(1, 22, True)]
-    assert row[3] == "start … [truncated]"
+    assert calls == [(1, expected_limit, True, 4096)]
+    assert row[3] == expected_output
     assert query not in row[3]
-    raw_prefix = list_results(1, 22, include_truncation_status=True)[0]
-    assert len(raw_prefix[3]) <= 22
+    assert "İst" not in row[3]
+    raw_prefix = list_results(
+        1, expected_limit, include_truncation_status=True
+    )[0]
+    assert len(raw_prefix[3]) <= expected_limit
     assert raw_prefix[5] is True
+
+
+def test_redacted_bounded_reads_fail_closed_for_oversized_legacy_queries(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "oversized-query.db"))
+    database.setup_database()
+    database.save_tool_result("holehe", "x" * 4097, "x" * 100)
+
+    row = database.list_tool_results(
+        limit=1, max_result_text_chars=20, redact_sensitive=True
+    )[0]
+    bounded_row = database._get_storage().list_tool_results(
+        1,
+        20,
+        include_truncation_status=True,
+        max_query_text_chars=database.MAX_REDACTION_QUERY_CHARS,
+    )[0]
+
+    assert row[3] == "[redacted]"
+    assert bounded_row[2] is None
+    assert bounded_row[6] is True
 
 
 def test_list_tool_runs_filters_and_uses_stable_cursor_pagination(

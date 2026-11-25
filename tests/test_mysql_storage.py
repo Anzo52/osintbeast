@@ -166,12 +166,23 @@ def test_mysql_result_listing_returns_bounded_raw_prefix_for_redaction(
 ):
     storage, engine = mysql_storage
     execute = engine.connection.exec_driver_sql
+    oversized_query = False
 
     def execute_with_result(statement, parameters=()):
         if "SUBSTR(resultText" in statement:
             engine.connection.statements.append((statement, parameters))
             return FakeResult(
-                [(1, "holehe", "alice@example.com", "alice%40exampl", 1, "created")]
+                [
+                    (
+                        1,
+                        "holehe",
+                        None if oversized_query else "alice@example.com",
+                        "alice%40exampl",
+                        1,
+                        "created",
+                        int(oversized_query),
+                    )
+                ]
             )
         return execute(statement, parameters)
 
@@ -188,6 +199,14 @@ def test_mysql_result_listing_returns_bounded_raw_prefix_for_redaction(
     assert database.list_tool_results(
         20, max_result_text_chars=14, redact_sensitive=True
     )[0][3] == "… [truncated]"
+    statement, parameters = engine.connection.statements[-1]
+    assert "SUBSTR(queryText, %s, 1)" in statement
+    assert parameters == (15, 4097, 14, 15, 15, 4097, 20)
+
+    oversized_query = True
+    assert database.list_tool_results(
+        20, max_result_text_chars=14, redact_sensitive=True
+    )[0][3] == "[redacted]"
 
 
 @pytest.mark.parametrize(

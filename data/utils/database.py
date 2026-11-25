@@ -70,6 +70,7 @@ _STORAGE_CACHE: dict[tuple[Any, ...], Storage] = {}
 DATABASE_ERRORS = (sqlite3.Error, StorageError)
 SQLITE_MAX_INTEGER = (1 << 63) - 1
 MAX_SQLITE_INTEGER = SQLITE_MAX_INTEGER
+MAX_REDACTION_QUERY_CHARS = 4096
 
 
 def redact_sensitive_text(text: str | None, sensitive_value: str) -> str | None:
@@ -103,7 +104,9 @@ def _trailing_sensitive_prefix_length(text: str, sensitive_value: str) -> int:
         options = [char, encoded]
         if char == " ":
             options.append("+")
-        representations.append(options)
+        representations.append(
+            [(option, re.compile(re.escape(option), re.IGNORECASE)) for option in options]
+        )
         max_length += max(map(len, options))
 
     partial_start = len(text)
@@ -117,12 +120,18 @@ def _trailing_sensitive_prefix_length(text: str, sensitive_value: str) -> int:
                         partial_start = min(partial_start, start)
                     continue
                 remaining = len(text) - position
-                for option in options:
+                for option, matcher in options:
                     if len(option) > remaining:
-                        if option[:remaining].casefold() == text[position:].casefold():
+                        prefix_matcher = re.compile(
+                            re.escape(option[:remaining]), re.IGNORECASE
+                        )
+                        match = prefix_matcher.match(text, position)
+                        if match and match.end() == len(text):
                             partial_start = min(partial_start, start)
-                    elif text[position:position + len(option)].casefold() == option.casefold():
-                        next_positions.add(position + len(option))
+                    else:
+                        match = matcher.match(text, position)
+                        if match and match.end() == position + len(option):
+                            next_positions.add(match.end())
             positions = next_positions
             if not positions:
                 break
@@ -204,6 +213,7 @@ def list_tool_results(
             limit,
             max_result_text_chars,
             include_truncation_status=True,
+            max_query_text_chars=MAX_REDACTION_QUERY_CHARS,
         )
     else:
         rows = _get_storage().list_tool_results(limit, max_result_text_chars)
@@ -216,6 +226,8 @@ def list_tool_results(
             and len(row) > 5
             and row[5]
         )
+        if source_truncated and len(row) > 6 and row[6]:
+            return "[redacted]"
         raw_result = row[3]
         if source_truncated and raw_result is not None:
             partial_length = _trailing_sensitive_prefix_length(raw_result, row[2])
