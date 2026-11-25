@@ -169,12 +169,23 @@ def list_tool_results(
         rows = _get_storage().list_tool_results(limit, max_result_text_chars)
     if not redact_sensitive:
         return rows
+    def redact_result(row):
+        result = redact_sensitive_text(row[3], row[2])
+        if (
+            result is not None
+            and max_result_text_chars is not None
+            and len(result) > max_result_text_chars
+        ):
+            marker = "… [truncated]"[:max_result_text_chars]
+            result = result[:max_result_text_chars - len(marker)] + marker
+        return result
+
     return [
         (
             row[0],
             row[1],
             "[redacted]",
-            redact_sensitive_text(row[3], row[2]),
+            redact_result(row),
             *row[4:],
         )
         for row in rows

@@ -413,6 +413,15 @@ def test_redacted_saved_results_are_bounded_without_false_truncation(
     assert row[2:4] == ("[redacted]", expected)
 
 
+def test_redacted_saved_results_remain_bounded_after_redaction(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "capped-redaction.db"))
+    database.setup_database()
+    database.save_tool_result("maigret", "alice", "alice alice alice")
+
+    row = database.list_tool_results(max_result_text_chars=17, redact_sensitive=True)[0]
+    assert row[3] == "[red… [truncated]"
+
+
 def test_list_tool_runs_filters_and_uses_stable_cursor_pagination(
     tmp_path, monkeypatch
 ):
