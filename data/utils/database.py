@@ -155,7 +155,7 @@ def list_tool_results(
     limit: int = 100, max_result_text_chars: int | None = None, *,
     redact_sensitive: bool = False,
 ) -> list[tuple[Any, ...]]:
-    """Return saved results, optionally truncating result text in storage."""
+    """Return saved results, optionally redacting and truncating result text."""
     _validate_list_limit(limit)
     if max_result_text_chars is not None and (
         not isinstance(max_result_text_chars, int)
@@ -163,12 +163,13 @@ def list_tool_results(
         or max_result_text_chars < 1
     ):
         raise ValueError("max_result_text_chars must be a positive integer")
-    if max_result_text_chars is None:
+    if redact_sensitive and max_result_text_chars is not None:
         rows = _get_storage().list_tool_results(limit)
     else:
         rows = _get_storage().list_tool_results(limit, max_result_text_chars)
     if not redact_sensitive:
         return rows
+
     def redact_result(row):
         result = redact_sensitive_text(row[3], row[2])
         if (

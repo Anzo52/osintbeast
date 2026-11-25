@@ -297,7 +297,6 @@ def test_query_database_commits_state_changes(tmp_path, monkeypatch):
     assert database.query_database(
         "INSERT INTO Platforms (platform) VALUES (?)", ("committed",)
     ) == []
-
     assert database.query_database(
         "SELECT platform FROM Platforms WHERE platform = ?", ("committed",)
     ) == [("committed",)]
@@ -335,13 +334,25 @@ def test_saved_views_redact_legacy_values_without_rewriting_them(
         "Found [redacted] and person+tagger@example.com", None,
     )
     assert database.list_tool_runs(redact_sensitive=True)[0][2] == "[redacted]"
+    raw_run = database.list_tool_runs()[0]
+    assert raw_run[2] == query
     assert database.list_tool_results(
         redact_sensitive=True
     )[0][2:4] == (
         "[redacted]", "Found [redacted] and person+tagger@example.com",
     )
+    boundary_query = "private@example.com"
+    boundary_run_id = database.start_tool_run("holehe", boundary_query)
+    boundary_result = f"begin {boundary_query} end"
+    database.finish_tool_run(
+        boundary_run_id, "success", result_text=boundary_result
+    )
+    assert database.list_tool_results(
+        max_result_text_chars=19, redact_sensitive=True
+    )[0][3] == "begin … [truncated]"
+
     result_id = database.query_database(
-        "SELECT resultID FROM ToolResults"
+        "SELECT resultID FROM ToolResults ORDER BY resultID LIMIT 1"
     )[0][0]
     assert database.get_tool_result(
         result_id, redact_sensitive=True
@@ -350,8 +361,8 @@ def test_saved_views_redact_legacy_values_without_rewriting_them(
         "SELECT queryText, resultText FROM ToolRuns WHERE runID = ?", (run_id,)
     ) == [(query, result)]
     assert database.query_database(
-        "SELECT queryText, resultText FROM ToolResults"
-    ) == [(query, result)]
+        "SELECT queryText, resultText FROM ToolResults ORDER BY resultID"
+    ) == [(query, result), (boundary_query, boundary_result)]
 
 
 @pytest.mark.parametrize(
@@ -382,9 +393,12 @@ def test_saved_views_redact_legacy_values_without_rewriting_them(
             "%78alice alice%78 alice.example alice+tag malice",
             "%78alice alice%78 alice.example alice+tag malice",
         ),
+        ("ali", "ali in a larger token ali%63e", "[redacted] in a larger token ali%63e"),
+        ("private@example.com", "[private@example.com].", "[[redacted]]."),
+        ("alice", "alice. alice.example", "[redacted]. alice.example"),
     ],
 )
-def test_saved_text_redaction_handles_encoding_and_word_boundaries(
+def test_redact_sensitive_text_handles_encoding_and_boundaries(
     query, text, expected
 ):
     assert database.redact_sensitive_text(text, query) == expected
