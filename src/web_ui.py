@@ -4,6 +4,7 @@ import hmac
 import ipaddress
 import json
 import os
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
@@ -476,6 +477,11 @@ def create_server(host="127.0.0.1", port=8000):
         raise RuntimeError(
             "Set authentication tokens: OSINTBEAST_OPERATOR_TOKEN and "
             "OSINTBEAST_VIEWER_TOKEN are required before starting."
+        )
+    secret = os.getenv("OSINTBEAST_IDEMPOTENCY_SECRET", "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", secret):
+        raise RuntimeError(
+            "OSINTBEAST_IDEMPOTENCY_SECRET must contain 32-256 URL-safe characters."
         )
     database.setup_database()
     global RUN_SERVICE

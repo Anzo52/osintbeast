@@ -68,6 +68,7 @@ def _request(url, payload=None, headers=None):
 def _server(tmp_path, monkeypatch, runner):
     monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", "operator-secret")
     monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", "viewer-secret")
+    monkeypatch.setenv("OSINTBEAST_IDEMPOTENCY_SECRET", "test-secret-" + "x" * 32)
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "web.db"))
     monkeypatch.setattr(
         web_ui,
@@ -364,6 +365,15 @@ def test_missing_auth_configuration_and_non_loopback_bind_fail_closed(monkeypatc
         raise AssertionError("serve() accepted a non-loopback bind")
 
 
+@pytest.mark.parametrize("secret", ["", "short", "x" * 31 + "!"])
+def test_server_rejects_missing_or_invalid_idempotency_secret(monkeypatch, secret):
+    monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", "operator")
+    monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", "viewer")
+    monkeypatch.setenv("OSINTBEAST_IDEMPOTENCY_SECRET", secret)
+    with pytest.raises(RuntimeError, match="OSINTBEAST_IDEMPOTENCY_SECRET"):
+        web_ui.create_server()
+
+
 def test_terminal_tool_error_is_available_for_review(tmp_path, monkeypatch):
     runner = Mock(side_effect=RuntimeError("dependency missing"))
     server, base_url = _server(tmp_path, monkeypatch, runner)
@@ -421,6 +431,9 @@ def test_submission_idempotency_key_returns_existing_run(tmp_path, monkeypatch):
     try:
         status, first = _request(f"{base_url}/api/runs", payload, headers)
         assert status == 202
+        old_service = web_ui.RUN_SERVICE
+        old_service.close()
+        web_ui.RUN_SERVICE = background_runs.BackgroundRuns()
         status, repeated = _request(f"{base_url}/api/runs", payload, headers)
         assert status == 202
         assert repeated["id"] == first["id"]
@@ -467,6 +480,7 @@ def test_serve_creates_a_fresh_run_service_each_time(monkeypatch):
     monkeypatch.setattr(database, "setup_database", Mock())
     monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", "operator")
     monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", "viewer")
+    monkeypatch.setenv("OSINTBEAST_IDEMPOTENCY_SECRET", "test-secret-" + "x" * 32)
 
     web_ui.serve()
     web_ui.serve()

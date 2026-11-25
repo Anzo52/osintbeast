@@ -371,6 +371,18 @@ def start_tool_run(tool_name: str, query_text: str):
     return _get_storage().start_tool_run(tool_name, query_text)
 
 
+def get_idempotent_tool_run(key: str, request_hash: str) -> int | None:
+    return _get_storage().get_idempotent_tool_run(key, request_hash)
+
+
+def start_idempotent_tool_run(
+    tool_name: str, query_text: str, key: str, request_hash: str
+) -> tuple[int, bool]:
+    return _get_storage().start_idempotent_tool_run(
+        tool_name, query_text, key, request_hash
+    )
+
+
 def finish_tool_run(
     run_id: int, status: str, result_text: str | None = None,
     error_text: str | None = None,

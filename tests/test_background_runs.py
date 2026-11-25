@@ -1,3 +1,5 @@
+import hashlib
+import json
 import multiprocessing
 import os
 import sqlite3
@@ -56,6 +58,7 @@ def parent_that_exits(sender, ready):
 
 @pytest.fixture
 def service(tmp_path, monkeypatch):
+    monkeypatch.setenv("OSINTBEAST_IDEMPOTENCY_SECRET", "test-secret-" + "x" * 32)
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "runs.db"))
     database.setup_database()
     monkeypatch.setattr(background_runs, "_worker", mocked_worker)
@@ -466,6 +469,31 @@ def test_submission_idempotency_is_scoped_to_key_and_input(service):
     with pytest.raises(background_runs.IdempotencyConflict):
         service.submit("sherlock", "user", "submission-1")
     assert len(database.list_tool_runs()) == 1
+
+
+def test_sensitive_idempotency_fingerprint_is_keyed_and_survives_restart(service):
+    query = "person@example.com"
+    run_id = service.submit("holehe", query, "sensitive-key")
+    service.close()
+
+    replacement = background_runs.BackgroundRuns()
+    try:
+        assert replacement.submit("holehe", query, "sensitive-key") == run_id
+        with pytest.raises(background_runs.IdempotencyConflict):
+            replacement.submit("holehe", "other@example.com", "sensitive-key")
+        with sqlite3.connect(database.DB_FILE) as conn:
+            fingerprint = conn.execute(
+                "SELECT requestHash FROM ToolRunRequests WHERE idempotencyKey = ?",
+                ("sensitive-key",),
+            ).fetchone()[0]
+            assert conn.execute(
+                "SELECT queryText FROM ToolRuns WHERE runID = ?", (run_id,)
+            ).fetchone()[0] == "[redacted]"
+        raw = json.dumps(["holehe", query], ensure_ascii=False, separators=(",", ":"))
+        assert fingerprint != hashlib.sha256(raw.encode()).hexdigest()
+        assert query not in fingerprint
+    finally:
+        replacement.close()
 
 
 @pytest.mark.parametrize(

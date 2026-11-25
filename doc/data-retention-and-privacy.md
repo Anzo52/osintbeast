@@ -18,7 +18,8 @@ outcome could not be persisted. Successful
 results are stored a second time in `ToolResults`, including the tool name,
 input, output, and creation timestamp. Failed and timed-out checks store their
 error in `ToolRuns`, not `ToolResults`. Other structured records saved through
-the database are retained there as well.
+the database are retained there as well. Browser idempotency records contain a
+keyed fingerprint of the tool and input and reference the corresponding run.
 
 Values remaining after any configured redaction are stored as plain text.
 Output is displayed in the terminal and database views. The saved-results
@@ -53,6 +54,7 @@ close OSINT Beast and use a SQLite client that commits changes to the database:
 
 ```sql
 BEGIN;
+DELETE FROM ToolRunRequests;
 DELETE FROM ToolRuns;
 DELETE FROM ToolResults;
 COMMIT;
@@ -60,7 +62,8 @@ VACUUM;
 ```
 
 These statements logically clear only run history and tool results, not other
-structured records. `COMMIT;` makes the deletions permanent; it is not secure
+structured records. They also remove browser retry mappings. `COMMIT;` makes
+the deletions permanent; it is not secure
 erasure. With SQLite's `secure_delete` setting off, sensitive values may remain
 recoverable in unused database pages. The following `VACUUM;` rebuilds the live
 database after the commit to remove deleted content, but it does not securely

@@ -112,7 +112,8 @@ machine and do not expose it through a proxy or port forward.
 
 Set `OSINTBEAST_API_TOKENS` to a JSON object whose keys are unique,
 cryptographically random URL-safe tokens of at least 32 characters and whose
-values are roles. Configure the value through a secret manager or another
+values are roles. The server validates token format, not randomness; generating
+unpredictable tokens is the operator's responsibility. Configure the value through a secret manager or another
 private environment mechanism; do not commit it, place it in a URL, or include
 it in logs:
 
@@ -369,14 +370,26 @@ Configure separate operator and viewer tokens before starting the server:
 ```bash
 export OSINTBEAST_OPERATOR_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 export OSINTBEAST_VIEWER_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export OSINTBEAST_IDEMPOTENCY_SECRET="<persistently stored random secret>"
 python -m web_ui
 ```
+
+Generate the idempotency secret separately with
+`python -c 'import secrets; print(secrets.token_urlsafe(32))'`, store it
+outside the database, and reuse it across restarts and all server instances
+sharing the database. It must be 32–256 URL-safe characters. Randomness is
+the operator's responsibility; format validation cannot establish entropy.
+Keep this secret private: changing it makes existing idempotency keys conflict
+until their run-history records are removed. Restore it alongside database
+backups to preserve retry behavior.
 
 Send a configured token using HTTP bearer authentication. Operators may launch
 runs and read results; viewers may only read results. Missing, invalid, or
 unauthorized credentials are rejected. The browser prompts for an access token
-and keeps it only in session storage for the current tab. The server refuses
-to start unless both tokens are configured and refuses any bind address outside
+and keeps it only in session storage for the current tab. Generate both tokens
+randomly and keep them private; the browser server checks their presence, not
+their entropy. The server refuses to start unless the tokens and idempotency
+secret are configured and refuses any bind address outside
 IPv4 or IPv6 loopback. Do not expose the server through a tunnel or reverse
 proxy; keep its database and results restricted to authorized local users.
 

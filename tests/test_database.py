@@ -3,6 +3,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,25 @@ def test_setup_database_loads_both_idempotent_schemas(tmp_path, monkeypatch):
         assert location_types["addressNum"] == "TEXT"
         assert location_types["apt"] == "TEXT"
         assert location_types["zip"] == "TEXT"
+
+
+def test_concurrent_idempotent_creation_and_history_cleanup(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "runs.db"))
+    database.setup_database()
+
+    def create(_):
+        return database.start_idempotent_tool_run("holehe", "[redacted]", "key", "a" * 64)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(create, range(8)))
+    assert len({run_id for run_id, _ in results}) == 1
+    assert sum(created for _, created in results) == 1
+    with database.connect_db() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM ToolRuns").fetchone() == (1,)
+        conn.execute("DELETE FROM ToolRunRequests")
+        conn.execute("DELETE FROM ToolRuns")
+        conn.execute("DELETE FROM ToolResults")
+        assert conn.execute("SELECT COUNT(*) FROM ToolRunRequests").fetchone() == (0,)
 
 
 def test_database_paths_resolve_to_source_checkout(monkeypatch):
