@@ -7,7 +7,6 @@ import math
 import multiprocessing
 import multiprocessing.connection
 import os
-import secrets
 import signal
 import threading
 import time
@@ -20,7 +19,9 @@ from helix_integration import run_helix, validate_username as validate_helix
 from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username as validate_maigret
 from sherlock_integration import run_sherlock, validate_username as validate_sherlock
-from tool_runs import redact_sensitive_output, start_tool_run
+from tool_runs import (
+    REDACTED, idempotent_request_hash, redact_sensitive_output, start_tool_run,
+)
 
 _LOG = logging.getLogger(__name__)
 _SHUTDOWN_TIMEOUT_SECONDS = 5
@@ -144,8 +145,7 @@ class BackgroundRuns:
         self._lock = threading.Lock()
         self._jobs = {}
         self._pending = {}
-        self._idempotency_keys = {}
-        self._idempotency_secret = secrets.token_bytes(32)
+        self._pending_claims = {}
         self._retry_wakeup = threading.Event()
         self._retry_stop = threading.Event()
         self._retry_thread = None
@@ -165,32 +165,47 @@ class BackgroundRuns:
         ):
             raise ValueError("Idempotency-Key must contain 1 to 128 visible ASCII characters.")
         query = _TOOLS[tool_name][0](query)
-        key_record = None
+        storage_key = None
         if idempotency_key is not None:
-            fingerprint = hmac.new(
-                self._idempotency_secret, query.encode("utf-8"), hashlib.sha256
-            ).digest()
-            key_record = (idempotency_key, tool_name, fingerprint)
+            storage_key = hashlib.sha256(idempotency_key.encode("ascii")).hexdigest()
+            request_hash = hmac.new(
+                idempotency_key.encode("ascii"),
+                idempotent_request_hash(tool_name, query).encode("ascii"),
+                hashlib.sha256,
+            ).hexdigest()
+        startup_error = None
         with self._lock:
             if self._closed:
                 raise RuntimeError("Background run service is closed.")
-            if key_record is not None:
-                existing = self._idempotency_keys.get(idempotency_key)
+            if storage_key is not None:
+                try:
+                    existing = database.get_idempotent_tool_run(
+                        storage_key, request_hash
+                    )
+                except database.IdempotencyConflictError as exc:
+                    raise IdempotencyConflict(
+                        "Idempotency-Key was already used for a different run."
+                    ) from exc
                 if existing is not None:
-                    if existing[:2] != key_record[1:]:
-                        raise IdempotencyConflict(
-                            "Idempotency-Key was already used for a different run."
-                        )
-                    return existing[2]
-            if len(self._jobs) + len(self._pending) >= self.limits.max_concurrent:
+                    return existing
+            if len(self._jobs.keys() | self._pending.keys()) >= self.limits.max_concurrent:
                 raise CapacityError("Background run capacity reached.")
-            run_id = start_tool_run(
-                tool_name, query, sensitive_input=tool_name == "holehe"
-            )
-            if key_record is not None:
-                self._idempotency_keys[idempotency_key] = (
-                    key_record[1], key_record[2], run_id
+            if storage_key is None:
+                run_id = start_tool_run(
+                    tool_name, query, sensitive_input=tool_name == "holehe"
                 )
+            else:
+                try:
+                    run_id, created = database.start_idempotent_tool_run(
+                        tool_name, REDACTED if tool_name == "holehe" else query,
+                        storage_key, request_hash,
+                    )
+                except database.IdempotencyConflictError as exc:
+                    raise IdempotencyConflict(
+                        "Idempotency-Key was already used for a different run."
+                    ) from exc
+                if not created:
+                    return run_id
             cancel = threading.Event()
             completed = threading.Event()
             try:
@@ -200,30 +215,39 @@ class BackgroundRuns:
                 )
                 self._jobs[run_id] = (cancel, thread, completed)
                 thread.start()
-            except BaseException:
+            except BaseException as exc:
                 self._jobs.pop(run_id, None)
                 self._pending[run_id] = ("failed", "Could not start background worker.")
-                try:
-                    self._persist(run_id, *self._pending[run_id])
-                except Exception as exc:
-                    self._start_retry()
-                    raise StartupPersistenceError(run_id) from exc
-                del self._pending[run_id]
-                raise
+                startup_error = exc
+        if startup_error is not None:
+            if not self._persist_pending(run_id):
+                self._start_retry()
+                raise StartupPersistenceError(run_id) from startup_error
+            raise startup_error
         return run_id
 
     def status(self, run_id: int):
-        with self._lock:
-            if run_id in self._pending:
-                status, value = self._pending[run_id]
-                try:
-                    self._persist(run_id, status, value)
-                except Exception as exc:
-                    row = database.get_tool_run(run_id) if isinstance(exc, ValueError) else None
-                    if row is None or row[3] == "running":
-                        raise RuntimeError("Could not persist background run outcome.") from exc
-                del self._pending[run_id]
-        row = database.get_tool_run(run_id, redact_sensitive=True)
+        for _ in range(3):
+            if not self._persist_pending(run_id, wait=True):
+                raise RuntimeError("Could not persist background run outcome.")
+            row = database.get_tool_run(run_id, redact_sensitive=True)
+            with self._lock:
+                pending = run_id in self._pending
+                job = self._jobs.get(run_id)
+                active = job is not None and not job[2].is_set()
+            if row is None or row[3] != "running" or (active and not pending):
+                break
+            if not pending and job is not None:
+                job[1].join(timeout=1)
+                continue
+            if not pending and job is None:
+                # The read may have raced a local completion; check once more.
+                row = database.get_tool_run(run_id, redact_sensitive=True)
+                if row is None or row[3] != "running":
+                    break
+                raise RuntimeError("Could not confirm background run outcome.")
+        else:
+            raise RuntimeError("Could not confirm background run outcome.")
         if row is None:
             return None
         return dict(zip(
@@ -341,58 +365,78 @@ class BackgroundRuns:
             with self._lock:
                 if (cancel.is_set() or self._closed) and not completed.is_set():
                     status, value = "failed", "Run cancelled."
-                try:
-                    self._persist(run_id, status, value)
-                except Exception:
-                    _LOG.exception("Could not persist background run outcome")
-                    self._pending[run_id] = (status, value)
-                    self._start_retry()
-                finally:
-                    self._jobs.pop(run_id, None)
+                self._pending[run_id] = (status, value)
+            if not self._persist_pending(run_id):
+                self._start_retry()
+            with self._lock:
+                self._jobs.pop(run_id, None)
 
     def _start_retry(self):
-        self._retry_wakeup.set()
-        if self._retry_thread is None:
-            try:
-                thread = threading.Thread(
-                    target=self._retry_pending,
-                    name="tool-run-persistence-retry",
-                    daemon=True,
-                )
-                thread.start()
-            except Exception:
-                _LOG.exception("Could not start background run persistence retry")
+        with self._lock:
+            self._retry_wakeup.set()
+            if self._retry_thread is None:
+                try:
+                    thread = threading.Thread(
+                        target=self._retry_pending,
+                        name="tool-run-persistence-retry",
+                        daemon=True,
+                    )
+                    thread.start()
+                except Exception:
+                    _LOG.exception("Could not start background run persistence retry")
+                else:
+                    self._retry_thread = thread
+
+    def _persist_pending(self, run_id, *, wait=False):
+        with self._lock:
+            outcome = self._pending.get(run_id)
+            if outcome is None:
+                return True
+            claim = self._pending_claims.get(run_id)
+            if claim is None:
+                claim = threading.Event()
+                self._pending_claims[run_id] = claim
+                owner = True
             else:
-                self._retry_thread = thread
+                owner = False
+        if not owner:
+            if not wait or not claim.wait(1):
+                return False
+            with self._lock:
+                return run_id not in self._pending
+        persisted = False
+        try:
+            self._persist(run_id, *outcome)
+            persisted = True
+        except Exception as exc:
+            if isinstance(exc, ValueError):
+                try:
+                    row = database.get_tool_run(run_id)
+                    persisted = row is not None and row[3] != "running"
+                except Exception:
+                    pass
+            if not persisted:
+                _LOG.warning(
+                    "Could not persist background run outcome for run %s (%s)",
+                    run_id, type(exc).__name__,
+                )
+        finally:
+            with self._lock:
+                del self._pending_claims[run_id]
+                if persisted and self._pending.get(run_id) == outcome:
+                    del self._pending[run_id]
+                claim.set()
+        return persisted
 
     def _retry_pending(self):
+        delay = 0.5
         while not self._retry_stop.is_set():
-            self._retry_wakeup.wait(0.5)
+            self._retry_wakeup.wait(delay)
             self._retry_wakeup.clear()
             if self._retry_stop.is_set():
                 return
             with self._lock:
-                pending = list(self._pending.items())
-            for run_id, outcome in pending:
-                with self._lock:
-                    if self._pending.get(run_id) != outcome:
-                        continue
-                    try:
-                        self._persist(run_id, *outcome)
-                    except Exception as exc:
-                        row = None
-                        if isinstance(exc, ValueError):
-                            try:
-                                row = database.get_tool_run(run_id)
-                            except Exception:
-                                pass
-                        if row is not None and row[3] != "running":
-                            del self._pending[run_id]
-                            continue
-                        _LOG.warning(
-                            "Could not retry persistence for run %s (%s)",
-                            run_id,
-                            type(exc).__name__,
-                        )
-                    else:
-                        del self._pending[run_id]
+                pending = list(self._pending)
+            results = [self._persist_pending(run_id) for run_id in pending]
+            failed = not all(results)
+            delay = min(delay * 2, 30) if failed else 0.5

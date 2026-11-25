@@ -1,7 +1,9 @@
 import http.client
 import json
+import shutil
 import sqlite3
 import socket
+import subprocess
 import threading
 import time
 import uuid
@@ -714,3 +716,70 @@ def test_browser_exposes_run_id_when_startup_failure_cannot_be_saved(tmp_path, m
     finally:
         server.shutdown()
         server.server_close()
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is needed to exercise browser JavaScript")
+def test_browser_pending_key_storage_and_input_race():
+    script = web_ui.INDEX_HTML.split('    const pendingKeyName =', 1)[1]
+    script = 'const pendingKeyName =' + script.split('    loadTools().then', 1)[0]
+    harness = """
+const {webcrypto} = require("node:crypto");
+let hook = null;
+const crypto = {
+  randomUUID: () => webcrypto.randomUUID(),
+  subtle: {digest: (...args) => {
+    if (hook) { const run = hook; hook = null; run(); }
+    return webcrypto.subtle.digest(...args);
+  }}
+};
+const store = new Map();
+const sessionStorage = {
+  getItem: key => store.get(key) || null,
+  setItem: (key, value) => store.set(key, value),
+  removeItem: key => store.delete(key)
+};
+function element(value) {
+  return {value, checked: true, handlers: {}, addEventListener(type, cb) { this.handlers[type] = cb; }};
+}
+const toolSelect = element("holehe"), queryInput = element("person@example.com");
+const launch = element(""), message = element(""), submit = element("");
+const authorized = element(""), error = element("");
+const document = {querySelector: selector => ({
+  "#launch": launch, "#message": message, "#submit": submit, "#authorized": authorized
+})[selector]};
+const updateInputLabel = () => {};
+const showError = () => {};
+let requests = [], fail = true;
+const request = async (url, options) => {
+  requests.push(options);
+  if (fail) throw new Error("lost acknowledgement");
+  return {id: 1, status: "running"};
+};
+const loadRun = async () => { throw new Error("poll failed"); };
+""" + script + """
+(async () => {
+  const fire = () => launch.handlers.submit({preventDefault() {}});
+  await fire();
+  const saved = sessionStorage.getItem(pendingKeyName);
+  const record = JSON.parse(saved);
+  hook = () => { queryInput.value = "edited@example.com"; queryInput.handlers.input(); };
+  await fire();
+  const clearedOnEdit = sessionStorage.getItem(pendingKeyName) === null;
+  const sameKey = requests[0].headers["Idempotency-Key"] === requests[1].headers["Idempotency-Key"];
+  const secondBody = JSON.parse(requests[1].body);
+  fail = false;
+  await fire();
+  console.log(JSON.stringify({record, saved, clearedOnEdit, sameKey, secondBody,
+    clearedOnConfirmation: sessionStorage.getItem(pendingKeyName) === null}));
+})().catch(err => { console.error(err); process.exit(1); });
+"""
+    result = subprocess.run(
+        ["node", "-e", harness], check=True, capture_output=True, text=True, timeout=10,
+    )
+    outcome = json.loads(result.stdout)
+    assert set(outcome["record"]) == {"key", "tool", "fingerprint"}
+    assert "person@example.com" not in outcome["saved"]
+    assert outcome["record"]["tool"] == "holehe"
+    assert outcome["clearedOnEdit"] and outcome["sameKey"]
+    assert outcome["secondBody"]["input"] == "person@example.com"
+    assert outcome["clearedOnConfirmation"]

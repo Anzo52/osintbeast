@@ -203,38 +203,66 @@ INDEX_HTML = """<!doctype html>
       error.textContent = reason.message;
     }
 
-    let idempotencyKey = null;
+    const pendingKeyName = "osintbeastPendingRun";
+    let inputVersion = 0;
+    function clearPendingKey() {
+      sessionStorage.removeItem(pendingKeyName);
+    }
+    async function submissionFingerprint(key, tool, input) {
+      const bytes = new TextEncoder().encode(JSON.stringify([key, tool, input]));
+      const digest = await crypto.subtle.digest("SHA-256", bytes);
+      return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+    }
+    function inputChanged() {
+      inputVersion++;
+      clearPendingKey();
+    }
     toolSelect.addEventListener("change", () => {
-      idempotencyKey = null;
+      inputChanged();
       updateInputLabel();
     });
-    queryInput.addEventListener("input", () => {
-      idempotencyKey = null;
-    });
+    queryInput.addEventListener("input", inputChanged);
     document.querySelector("#launch").addEventListener("submit", async event => {
       event.preventDefault();
       error.textContent = "";
       const message = document.querySelector("#message");
       const submit = document.querySelector("#submit");
+      const tool = toolSelect.value;
+      const input = queryInput.value;
+      const authorized = document.querySelector("#authorized").checked;
+      const version = inputVersion;
       submit.disabled = true;
       message.textContent = "Submitting run…";
       try {
-        idempotencyKey ||= crypto.randomUUID();
+        let pending;
+        try {
+          pending = JSON.parse(sessionStorage.getItem(pendingKeyName));
+        } catch (_) {
+          pending = null;
+        }
+        if (!pending || typeof pending.key !== "string" || pending.tool !== tool ||
+            pending.fingerprint !== await submissionFingerprint(pending.key, tool, input)) {
+          const key = crypto.randomUUID();
+          pending = {key, tool, fingerprint: await submissionFingerprint(key, tool, input)};
+          if (inputVersion === version) {
+            sessionStorage.setItem(pendingKeyName, JSON.stringify(pending));
+          }
+        }
         const run = await request("/api/runs", {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "Idempotency-Key": idempotencyKey
+            "Idempotency-Key": pending.key
           },
           body: JSON.stringify({
-            tool: toolSelect.value,
-            input: queryInput.value,
-            authorized: document.querySelector("#authorized").checked
+            tool,
+            input,
+            authorized
           })
         });
+        if (inputVersion === version) clearPendingKey();
         message.textContent = `Run #${run.id} is ${run.status}.`;
         await loadRun(run.id);
-        idempotencyKey = null;
       } catch (reason) {
         message.textContent = "";
         showError(reason);
@@ -448,15 +476,12 @@ class WebHandler(BaseHTTPRequestHandler):
                 if not run_id_text.isdecimal():
                     self._send_json(404, {"error": "Run not found."})
                     return
-                RUN_SERVICE.status(int(run_id_text))
                 database.reconcile_stale_tool_runs()
-                row = database.get_tool_run(
-                    int(run_id_text), redact_sensitive=True
-                )
-                if row is None:
+                run = self.server.run_service.status(int(run_id_text))
+                if run is None:
                     self._send_json(404, {"error": "Run not found."})
                 else:
-                    self._send_json(200, self._run_payload(row, detail=True))
+                    self._send_json(200, self._run_payload(tuple(run.values()), detail=True))
             else:
                 self._send_json(404, {"error": "Not found."})
         except ValueError as exc:
@@ -503,7 +528,7 @@ class WebHandler(BaseHTTPRequestHandler):
             if not IDEMPOTENCY_KEY_PATTERN.fullmatch(idempotency_key):
                 self._send_json(400, {"error": "A valid Idempotency-Key is required."})
                 return
-            run_id = RUN_SERVICE.submit(
+            run_id = self.server.run_service.submit(
                 tool_name, query_text, idempotency_key=idempotency_key
             )
             row = database.get_tool_run(run_id, redact_sensitive=True)
@@ -563,6 +588,7 @@ def create_server(host="127.0.0.1", port=8000):
         service.close()
         raise
     RUN_SERVICE = service
+    server.run_service = service
     server.daemon_threads = True
     return server
 

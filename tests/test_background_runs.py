@@ -535,6 +535,136 @@ def test_submission_idempotency_is_scoped_to_key_and_input(service):
     assert len(database.list_tool_runs()) == 1
 
 
+def test_idempotency_survives_restart_and_concurrent_services(service):
+    other = background_runs.BackgroundRuns(service.limits)
+    key = "a-random-submission-key"
+    barrier = threading.Barrier(2)
+    results, errors = [], []
+
+    def submit(instance):
+        try:
+            barrier.wait(timeout=5)
+            results.append(instance.submit("maigret", "slow", key))
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=submit, args=(instance,))
+               for instance in (service, other)]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(5)
+        assert not errors
+        assert len(results) == 2 and results[0] == results[1]
+        assert len(database.list_tool_runs()) == 1
+        with pytest.raises(background_runs.IdempotencyConflict):
+            other.submit("maigret", "another", key)
+        service.close()
+        other.close()
+        restarted = background_runs.BackgroundRuns(service.limits)
+        try:
+            assert restarted.submit("maigret", "slow", key) == results[0]
+            assert len(database.list_tool_runs()) == 1
+        finally:
+            restarted.close()
+    finally:
+        other.close()
+
+
+def test_unknown_owner_does_not_report_running_when_outcome_is_pending(service):
+    other = background_runs.BackgroundRuns(service.limits)
+    run_id = database.start_tool_run("maigret", "user")
+    service._pending[run_id] = ("success", "output")
+    try:
+        with pytest.raises(RuntimeError, match="confirm"):
+            other.status(run_id)
+        assert service.status(run_id)["status"] == "success"
+        assert other.status(run_id)["status"] == "success"
+    finally:
+        other.close()
+
+
+def test_status_waits_for_inflight_outcome_persistence(service, monkeypatch):
+    run_id = database.start_tool_run("maigret", "user")
+    service._pending[run_id] = ("success", "output")
+    entered, release = threading.Event(), threading.Event()
+    finish = database.finish_tool_run
+
+    def stalled_finish(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        finish(*args, **kwargs)
+
+    monkeypatch.setattr(database, "finish_tool_run", stalled_finish)
+    worker = threading.Thread(target=service._persist_pending, args=(run_id,))
+    worker.start()
+    try:
+        assert entered.wait(5)
+        assert service.status(123) is None
+        with pytest.raises(RuntimeError, match="persist"):
+            service.status(run_id)
+    finally:
+        release.set()
+        worker.join(5)
+    assert service.status(run_id)["status"] == "success"
+
+
+def test_startup_failure_persistence_does_not_hold_service_lock(service, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+    finish = database.finish_tool_run
+    thread_class = threading.Thread
+
+    def create_thread(*args, **kwargs):
+        if kwargs.get("name", "").startswith("tool-run-"):
+            raise RuntimeError("unavailable")
+        return thread_class(*args, **kwargs)
+
+    def stalled_finish(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        finish(*args, **kwargs)
+
+    errors = []
+
+    def submit():
+        try:
+            service.submit("maigret", "user")
+        except RuntimeError as exc:
+            errors.append(str(exc))
+
+    worker = thread_class(target=submit)
+    monkeypatch.setattr(background_runs.threading, "Thread", create_thread)
+    monkeypatch.setattr(database, "finish_tool_run", stalled_finish)
+    worker.start()
+    try:
+        assert entered.wait(5)
+        assert service.status(123) is None
+        assert not service.cancel(123)
+    finally:
+        release.set()
+        worker.join(5)
+    assert errors == ["unavailable"]
+
+
+def test_retry_backoff_is_bounded_and_attempts_all_pending(service, monkeypatch):
+    service._pending.update({1: ("failed", "error"), 2: ("failed", "error")})
+    wakeup = Mock()
+    stop = Mock()
+    stop.is_set.side_effect = [False, False] * 8 + [True]
+    persist = Mock(return_value=False)
+    with monkeypatch.context() as patch:
+        patch.setattr(service, "_retry_wakeup", wakeup)
+        patch.setattr(service, "_retry_stop", stop)
+        patch.setattr(service, "_persist_pending", persist)
+        service._retry_pending()
+    assert [call.args[0] for call in wakeup.wait.call_args_list] == [
+        0.5, 1, 2, 4, 8, 16, 30, 30,
+    ]
+    assert persist.call_count == 16
+    service._pending.clear()
+
+
 @pytest.mark.parametrize(
     ("result", "limit", "prefix"),
     [

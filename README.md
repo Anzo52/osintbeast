@@ -335,10 +335,13 @@ group is killed as well; on Windows, this watchdog stops only the worker.
 Tool failures and unexpected worker exits are recorded as failures. Call
 `close()` during orderly application shutdown.
 If saving an outcome fails, the service retains it in memory and keeps its
-capacity slot reserved while retrying the write independently of status
-requests. Calling `status(run_id)` also retries immediately and raises
-`RuntimeError` if the outcome still cannot be saved. Pending outcomes are lost
-if the application process exits.
+capacity slot reserved while retrying the write with bounded exponential backoff
+independently of status requests. Calling `status(run_id)` also retries immediately
+and raises `RuntimeError` if the outcome cannot be saved or confirmed. A different
+service instance cannot distinguish an active run from another instance's pending
+outcome, so it reports an error for unowned running records rather than a stale
+status. Route polling to the owning instance while a run is active. Pending
+outcomes are lost if the application process exits.
 If starting the supervisor fails and recording that failure also fails,
 `submit` raises `StartupPersistenceError` with a `run_id` attribute; retry
 `status(run_id)` after database access is restored. The browser API includes
@@ -370,8 +373,9 @@ the recent-runs view. At most two browser runs can be active at once; additional
 requests receive HTTP 503 until capacity is available. Holehe input is redacted
 in stored records and output. Submissions accept an `Idempotency-Key`; retries
 with the same key and input return the existing run, while reusing a key for a
-different run returns HTTP 409. Keys are retained for the lifetime of the
-service.
+different run returns HTTP 409. Keys and request fingerprints are retained in the
+shared database with the run record, including across service restarts. A retry
+after a crash returns the original run but does not restart an interrupted worker.
 
 Set separate, cryptographically random operator and viewer tokens before
 starting the server:
@@ -385,8 +389,10 @@ python -m web_ui
 Tokens must each contain 32–256 URL-safe characters and must differ. Operators
 may launch runs and read results; viewers may only read results. The browser
 prompts for a token and keeps it in session storage for the current tab.
-Launch retries use an idempotency key so the same submitted request returns its
-original run instead of starting another. The server binds only to resolved
+The browser retains a pending idempotency key and a fingerprint of the input in
+session storage across reloads, without storing the raw input there. It clears
+the key on confirmation or input change. Launch retries use the key so the same
+submitted request returns its original run instead of starting another. The server binds only to resolved
 IPv4 or IPv6 loopback addresses. Do not expose it through a tunnel or reverse
 proxy; keep its database and results restricted to authorized local users.
 
