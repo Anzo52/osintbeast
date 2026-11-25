@@ -197,14 +197,14 @@ class SQLiteStorage:
                 rows = conn.execute(
                     """SELECT resultID, toolName,
                               CASE
-                                  WHEN SUBSTR(queryText, ?, 1) <> ''
+                                  WHEN LENGTH(SUBSTR(queryText, ?, 1)) > 0
                                   THEN NULL ELSE queryText
                               END,
                               SUBSTR(resultText, 1, ?),
-                              CASE WHEN SUBSTR(resultText, ?, 1) <> '' THEN 1 ELSE 0 END,
+                              CASE WHEN LENGTH(SUBSTR(resultText, ?, 1)) > 0 THEN 1 ELSE 0 END,
                               createdAt,
                               CASE
-                                  WHEN SUBSTR(queryText, ?, 1) <> ''
+                                  WHEN LENGTH(SUBSTR(queryText, ?, 1)) > 0
                                   THEN 1 ELSE 0
                               END
                        FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
@@ -232,7 +232,7 @@ class SQLiteStorage:
                 rows = conn.execute(
                     """SELECT resultID, toolName, queryText,
                               SUBSTR(resultText, 1, ?),
-                              CASE WHEN SUBSTR(resultText, ?, 1) <> '' THEN 1 ELSE 0 END,
+                              CASE WHEN LENGTH(SUBSTR(resultText, ?, 1)) > 0 THEN 1 ELSE 0 END,
                               createdAt
                        FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
                     (max_result_text_chars, max_result_text_chars + 1, limit),
@@ -246,7 +246,7 @@ class SQLiteStorage:
             rows = conn.execute(
                 """SELECT resultID, toolName, queryText,
                           SUBSTR(resultText, 1, ?),
-                          CASE WHEN SUBSTR(resultText, ?, 1) <> '' THEN 1 ELSE 0 END,
+                          CASE WHEN LENGTH(SUBSTR(resultText, ?, 1)) > 0 THEN 1 ELSE 0 END,
                           createdAt
                    FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
                 (max_result_text_chars, max_result_text_chars + 1, limit),
@@ -605,15 +605,15 @@ class MySQLStorage:
                         rows = connection.exec_driver_sql(
                             """SELECT resultID, toolName,
                                       CASE
-                                          WHEN SUBSTR(queryText, %s, 1) <> ''
+                                          WHEN LENGTH(SUBSTR(queryText, %s, 1)) > 0
                                           THEN NULL ELSE queryText
                                       END,
                                       SUBSTR(resultText, 1, %s),
-                                      CASE WHEN SUBSTR(resultText, %s, 1) <> ''
+                                      CASE WHEN LENGTH(SUBSTR(resultText, %s, 1)) > 0
                                            THEN 1 ELSE 0 END,
                                       createdAt,
                                       CASE
-                                          WHEN SUBSTR(queryText, %s, 1) <> ''
+                                          WHEN LENGTH(SUBSTR(queryText, %s, 1)) > 0
                                           THEN 1 ELSE 0
                                       END
                                FROM ToolResults ORDER BY resultID DESC LIMIT %s""",
@@ -641,7 +641,7 @@ class MySQLStorage:
                     rows = connection.exec_driver_sql(
                         """SELECT resultID, toolName, queryText,
                                   SUBSTR(resultText, 1, %s),
-                                  CASE WHEN SUBSTR(resultText, %s, 1) <> ''
+                                  CASE WHEN LENGTH(SUBSTR(resultText, %s, 1)) > 0
                                        THEN 1 ELSE 0 END,
                                   createdAt
                            FROM ToolResults ORDER BY resultID DESC LIMIT %s""",

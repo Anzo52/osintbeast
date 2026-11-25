@@ -264,19 +264,22 @@ def test_mysql_result_listing_returns_bounded_raw_prefix_for_redaction(
 
 
 @pytest.mark.parametrize(
-    ("query_length", "result", "expected"),
+    ("query_length", "trailing_space", "result", "expected"),
     [
-        (4097, "x" * 100, "[redacted]"),
-        (4097, "report", "[redacted]"),
-        (4096, "report", "report"),
-        (12, "report", "report"),
+        (4097, False, "x" * 100, "[redacted]"),
+        (4097, False, "report", "[redacted]"),
+        (4096, False, "report", "report"),
+        (12, False, "report", "report"),
+        (4097, True, "report", "[redacted]"),
+        (4097, True, "x" * 100, "[redacted]"),
+        (12, False, "z" * 20 + " ", "zzzzzzz… [truncated]"),
     ],
 )
 def test_mysql_bounded_redaction_enforces_query_limit_independently(
-    mysql_storage, monkeypatch, query_length, result, expected
+    mysql_storage, monkeypatch, query_length, trailing_space, result, expected
 ):
     storage, engine = mysql_storage
-    query = "x" * query_length
+    query = "x" * (query_length - 1) + (" " if trailing_space else "x")
     sql_rows = []
     with sqlite3.connect(":memory:") as conn:
         conn.execute(
@@ -312,9 +315,48 @@ def test_mysql_bounded_redaction_enforces_query_limit_independently(
     statement, parameters = engine.connection.statements[-1]
     assert parameters == (4097, 20, 21, 4097, 1)
     assert (
-        "CASE WHEN SUBSTR(queryText, %s, 1) <> '' THEN NULL ELSE queryText END"
+        "CASE WHEN LENGTH(SUBSTR(queryText, %s, 1)) > 0 THEN NULL ELSE queryText END"
         in " ".join(statement.split())
     )
+
+
+@pytest.mark.parametrize(
+    ("query", "result", "expected"),
+    [
+        ("alice", "report", "report"),
+        ("x" * 4097, "report", "[redacted]"),
+        ("alice", "z" * 20000, "z" * (16384 - 13) + "… [truncated]"),
+    ],
+)
+def test_mysql_redacted_listing_without_cap_is_bounded(
+    mysql_storage, monkeypatch, query, result, expected
+):
+    storage, engine = mysql_storage
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute(
+            """CREATE TABLE ToolResults (
+                   resultID INTEGER, toolName TEXT, queryText TEXT,
+                   resultText TEXT, createdAt TEXT
+               )"""
+        )
+        conn.execute(
+            "INSERT INTO ToolResults VALUES (?, ?, ?, ?, ?)",
+            (1, "holehe", query, result, "created"),
+        )
+
+        def execute_listing(statement, parameters=()):
+            engine.connection.statements.append((statement, parameters))
+            return FakeResult(
+                conn.execute(statement.replace("%s", "?"), parameters).fetchall()
+            )
+
+        monkeypatch.setattr(engine.connection, "exec_driver_sql", execute_listing)
+        monkeypatch.setattr(database, "_get_storage", lambda: storage)
+        assert database.list_tool_results(1, redact_sensitive=True)[0][3] == expected
+    statement, parameters = engine.connection.statements[-1]
+    assert parameters == (4097, 16384, 16385, 4097, 1)
+    assert "LENGTH(SUBSTR(queryText" in statement
+    assert "SUBSTR(resultText, 1, %s)" in statement
 
 
 @pytest.mark.parametrize(

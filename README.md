@@ -156,6 +156,17 @@ initialization does not rewrite legacy records. Saved run and result views
 redact queries and matching result or error text at read time; the database
 values remain unchanged. This does not repair incompatible existing tables.
 
+Redacted saved-result listings (including `/api/results`) use a default
+16,384-character result preview when no maximum is specified. SQLite and MySQL
+return bounded result prefixes and omit query text longer than 4,096 characters;
+those oversized-query results fail closed as `[redacted]`. Smaller explicit
+preview limits are supported. Truncated previews with ambiguous sensitive
+suffixes may be shorter than the limit: suffix matching has a linear work
+budget and conservatively omits the undecided window if that budget is exhausted.
+Listings with redaction disabled retain their existing uncapped behavior when
+no maximum is specified. SQL bounds data returned to the application, not the
+database engine's internal work inspecting large stored values.
+
 To use SQLite at a different location, set `OSINTBEAST_DB_PATH` before starting
 the application. For a source checkout, the default remains the repository-root
 `osintbeast.db`. For an installed package, the default is a per-user data

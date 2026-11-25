@@ -171,3 +171,17 @@ def test_operator_can_launch_and_read_runs_and_results(api_server, monkeypatch):
     assert status == 200
     assert results["results"][0]["query"] == "[redacted]"
     assert results["results"][0]["result"] == "checked [redacted]"
+
+
+def test_result_api_uses_bounded_redaction_defaults(api_server):
+    database.save_tool_result("holehe", "alice", "z" * 20000)
+    database.save_tool_result("holehe", "x" * 4097, "report")
+
+    status, payload = send_request(
+        api_server, "GET", "/api/results", token=VIEWER_TOKEN
+    )
+
+    assert status == 200
+    assert payload["results"][0]["result"] == "[redacted]"
+    assert payload["results"][1]["result"] == "z" * (16384 - 13) + "… [truncated]"
+    assert all(row["query"] == "[redacted]" for row in payload["results"])
