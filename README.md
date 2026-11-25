@@ -336,6 +336,10 @@ oldest completed keys are evicted. Retrying an evicted key creates a new run.
 The browser retains an unacknowledged submission key and a salted input
 fingerprint in session storage across reloads, without storing the raw input;
 it clears the key when the server confirms the submission.
+If starting the supervisor fails and recording that failure also fails,
+`submit` raises `StartupPersistenceError` with a `run_id` attribute; retry
+`status(run_id)` after database access is restored. The browser API includes
+that ID in its 503 response.
 
 These limits apply per service instance, not across web server processes or
 hosts. Use a single application process or an external coordinator to enforce
