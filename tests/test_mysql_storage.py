@@ -2,7 +2,6 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine
 
 import data.utils.database as database
 from data.utils.storage import MySQLStorage, StorageError
@@ -18,16 +17,30 @@ class FakeResult:
     def fetchall(self):
         return self.rows
 
+    def scalar_one(self):
+        return self.rows[0][0]
+
 
 class FakeConnection:
     def __init__(self):
         self.statements = []
         self.fail_on = None
+        self.read_only = False
+        self.platforms = ["original"]
+        self.sql_mode = ""
 
     def exec_driver_sql(self, statement, parameters=()):
         self.statements.append((statement, parameters))
         if self.fail_on and self.fail_on in statement:
             raise FakeSQLAlchemyError("database unavailable")
+        if statement == "SELECT @@SESSION.sql_mode":
+            return FakeResult([(self.sql_mode,)])
+        if statement == "START TRANSACTION READ ONLY":
+            self.read_only = True
+        elif statement == "WITH target AS (SELECT 1) DELETE FROM Platforms":
+            if self.read_only:
+                raise FakeSQLAlchemyError("read-only transaction")
+            self.platforms.clear()
         if "SUBSTR(resultText" in statement:
             return FakeResult([(1, "holehe", "query", "xxxx", 1, "created")])
         return FakeResult()
@@ -64,6 +77,7 @@ class FakeEngine:
                     engine.transaction_errors.append(exc_value)
                 elif commit:
                     engine.commits += 1
+                engine.connection.read_only = False
                 return False
 
         return Context()
@@ -125,14 +139,19 @@ def test_mysql_core_operations_use_bound_values_and_preserve_transactional_flow(
     assert any("INSERT INTO ToolResults" in sql for sql, _ in statements)
 
 
-def test_mysql_query_commits_state_changes(mysql_storage):
+def test_mysql_query_uses_a_read_only_transaction(mysql_storage):
     storage, engine = mysql_storage
 
-    assert storage.query("INSERT INTO Platforms (platform) VALUES (?)", ("x",)) == [
+    assert storage.query("SELECT platform FROM Platforms WHERE platform = ?", ("x",)) == [
         ("platform",), ("platformID",)
     ]
 
-    assert engine.commits == 1
+    assert engine.commits == 0
+    assert engine.connection.statements == [
+        ("SELECT @@SESSION.sql_mode", ()),
+        ("START TRANSACTION READ ONLY", ()),
+        ("SELECT platform FROM Platforms WHERE platform = %s", ("x",)),
+    ]
 
 
 def test_mysql_result_listing_caps_output_in_the_query(mysql_storage):
@@ -147,32 +166,124 @@ def test_mysql_result_listing_caps_output_in_the_query(mysql_storage):
 
 
 @pytest.mark.parametrize(
-    ("statement", "expected"),
+    "statement",
     [
-        ("INSERT INTO items VALUES ('added')", [("original",), ("added",)]),
-        ("UPDATE items SET value = 'updated'", [("updated",)]),
-        ("DELETE FROM items", []),
+        "INSERT INTO Platforms VALUES ('added')",
+        "UPDATE Platforms SET platform = 'updated'",
+        "DELETE FROM Platforms",
+        "DROP TABLE Platforms",
+        "SET TRANSACTION READ WRITE",
+        "SELECT 1; DELETE FROM Platforms",
     ],
 )
-def test_mysql_query_commits_statements_without_rows(
-    mysql_storage, tmp_path, monkeypatch, statement, expected
-):
-    storage, _ = mysql_storage
-    engine = create_engine(f"sqlite:///{tmp_path / 'transactions.db'}")
-    monkeypatch.setattr(storage, "_get_engine", lambda: engine)
-    try:
-        with engine.begin() as connection:
-            connection.exec_driver_sql("CREATE TABLE items (value TEXT)")
-            connection.exec_driver_sql("INSERT INTO items VALUES ('original')")
+def test_mysql_query_rejects_non_read_queries_before_execution(mysql_storage, statement):
+    storage, engine = mysql_storage
+    with pytest.raises(ValueError):
+        storage.query(statement)
+    assert engine.connection.statements == [("SELECT @@SESSION.sql_mode", ())]
 
-        assert storage.query(statement) == []
-        assert storage.query("SELECT value FROM items ORDER BY rowid") == expected
-        with engine.connect() as connection:
-            assert connection.exec_driver_sql(
-                "SELECT value FROM items ORDER BY rowid"
-            ).fetchall() == expected
-    finally:
-        engine.dispose()
+
+def test_mysql_cte_mutation_is_rejected_in_a_read_only_transaction(mysql_storage):
+    storage, engine = mysql_storage
+    statement = "WITH target AS (SELECT 1) DELETE FROM Platforms"
+
+    with engine.begin() as connection:
+        connection.exec_driver_sql(statement)
+    assert engine.connection.platforms == []
+    engine.connection.platforms = ["original"]
+
+    with pytest.raises(StorageError, match="read-only"):
+        storage.query(statement)
+    assert engine.connection.platforms == ["original"]
+    assert engine.connection.statements[-2:] == [
+        ("START TRANSACTION READ ONLY", ()),
+        (statement, ()),
+    ]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "SELECT 1 INTO OUTFILE '/server/file'",
+        "select 1 into dumpfile '/server/file'",
+        "SELECT 1 INTO/**/OUTFILE '/server/file'",
+        "SELECT 1 INTO -- comment\n DUMPFILE '/server/file'",
+        "SELECT 1 INTO --\x7fcomment\r OUTFILE '/server/file'",
+        "WITH t AS (SELECT 1) SELECT * FROM t INTO\nOUTFILE '/server/file'",
+        "SELECT 'x' FROM t INTO OUTFILE '/server/file'",
+    ],
+)
+def test_mysql_rejects_file_output_before_opening_transaction(mysql_storage, statement):
+    storage, engine = mysql_storage
+    with pytest.raises(ValueError, match="OUTFILE or DUMPFILE"):
+        storage.query(statement)
+    assert engine.connection.statements == [("SELECT @@SESSION.sql_mode", ())]
+
+
+def test_mysql_parses_strings_using_session_sql_mode(mysql_storage):
+    storage, engine = mysql_storage
+    statement = r"SELECT 'x\' INTO OUTFILE text', ?"
+    storage.query(statement, (1,))
+    assert engine.connection.statements[-1] == (
+        r"SELECT 'x\' INTO OUTFILE text', %s", (1,)
+    )
+
+    engine.connection.sql_mode = "NO_BACKSLASH_ESCAPES"
+    with pytest.raises(ValueError, match="OUTFILE or DUMPFILE"):
+        storage.query(r"SELECT 'x\' INTO OUTFILE '/server/file'")
+    assert engine.connection.statements[-1] == ("SELECT @@SESSION.sql_mode", ())
+
+    storage.query(r"SELECT 'x\', ?", (1,))
+    assert engine.connection.statements[-1] == (r"SELECT 'x\', %s", (1,))
+
+
+@pytest.mark.parametrize(
+    ("mode", "statement"),
+    [
+        ("", "SELECT `x\\` INTO OUTFILE '/server/file'"),
+        ("ANSI_QUOTES", 'SELECT "x\\" INTO OUTFILE \'/server/file\''),
+    ],
+)
+def test_mysql_quoted_identifiers_do_not_use_string_escapes(mysql_storage, mode, statement):
+    storage, engine = mysql_storage
+    engine.connection.sql_mode = mode
+    with pytest.raises(ValueError, match="OUTFILE or DUMPFILE"):
+        storage.query(statement)
+    assert engine.connection.statements == [("SELECT @@SESSION.sql_mode", ())]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "/* tracing */ SELECT 1",
+        " -- tracing\n# another comment\nSELECT 'INTO OUTFILE'",
+        "/*+ hint */ WITH t AS (SELECT 1) SELECT * FROM t;",
+        "SELECT `into`, 'OUTFILE', \"DUMPFILE\"",
+        "SELECT 1 /* INTO OUTFILE */",
+    ],
+)
+def test_mysql_accepts_leading_comments_and_non_executable_text(mysql_storage, statement):
+    storage, engine = mysql_storage
+    storage.query(statement)
+    assert engine.connection.statements[-1] == (statement, ())
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "/*!50000 SELECT 1 */ SELECT 1",
+        "/*M!100100 SELECT 1 */ SELECT 1",
+        "SELECT 1 /*!50000 INTO OUTFILE '/server/file' */",
+        "SELECT 1 /*m!100100 INTO DUMPFILE '/server/file' */",
+        "/* unfinished SELECT 1",
+        "/* comment only */",
+    ],
+)
+def test_mysql_rejects_executable_or_incomplete_comments(mysql_storage, statement):
+    storage, engine = mysql_storage
+    with pytest.raises(ValueError):
+        storage.query(statement)
+    assert engine.connection.statements == [("SELECT @@SESSION.sql_mode", ())]
 
 
 def test_mysql_identifier_validation_and_placeholders(mysql_storage):
@@ -192,6 +303,9 @@ def test_mysql_identifier_validation_and_placeholders(mysql_storage):
     assert MySQLStorage._mysql_placeholders(
         "SELECT ? -- ? ignored\n/* ? ignored */", (1,)
     ) == "SELECT %s -- ? ignored\n/* ? ignored */"
+    assert MySQLStorage._mysql_placeholders(
+        "--\x7f? ignored\rSELECT ?", (1,)
+    ) == "--\x7f? ignored\rSELECT %s"
     assert MySQLStorage._normalize_rows(
         [(datetime(2025, 1, 2, 3, 4, 5),)]
     ) == [("2025-01-02 03:04:05",)]

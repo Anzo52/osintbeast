@@ -165,6 +165,12 @@ directory: `%APPDATA%\osintbeast` on Windows,
 `~/.local/share/osintbeast`). The database directory is created as needed.
 Custom relative paths are resolved against the working directory at startup.
 
+The `data.utils.database.query_database` helper is read-only on both backends.
+Use `insert_data` for supported inserts or an explicit database transaction for
+other writes. MySQL reads use a read-only transaction, reject executable
+comments and `SELECT ... INTO OUTFILE` / `DUMPFILE`, and interpret quoted
+strings using the current connection's SQL mode.
+
 For deployment, backups, upgrades, and schema-migration expectations, see the
 [operations guide](doc/OPERATIONS.md).
 

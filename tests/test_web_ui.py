@@ -544,16 +544,9 @@ def test_submission_idempotency_key_returns_existing_run(tmp_path, monkeypatch):
         server.server_close()
 
 
-def test_serve_creates_a_fresh_run_service_each_time(monkeypatch):
+def test_serve_creates_a_fresh_run_service_each_time(tmp_path, monkeypatch):
     services = []
-
-    class Service:
-        def __init__(self):
-            self.closed = False
-            services.append(self)
-
-        def close(self):
-            self.closed = True
+    servers = []
 
     class Server:
         server_port = 8000
@@ -561,26 +554,34 @@ def test_serve_creates_a_fresh_run_service_each_time(monkeypatch):
         address_family = web_ui.socket.AF_INET
 
         def __init__(self, _address, _handler):
-            pass
+            self.closed = False
+            servers.append(self)
 
         def serve_forever(self):
+            service = web_ui.RUN_SERVICE
+            assert isinstance(service, background_runs.BackgroundRuns)
+            assert not service._closed
+            services.append(service)
             raise KeyboardInterrupt
 
         def server_close(self):
-            pass
+            self.closed = True
 
-    monkeypatch.setattr(web_ui, "BackgroundRuns", Service)
     monkeypatch.setattr(web_ui, "ThreadingHTTPServer", Server)
-    monkeypatch.setattr(database, "setup_database", Mock())
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "web.db"))
     monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", OPERATOR_TOKEN)
     monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", VIEWER_TOKEN)
 
     web_ui.serve()
+    assert services[0]._closed
+    assert servers[0].closed
     web_ui.serve()
 
     assert len(services) == 2
     assert services[0] is not services[1]
-    assert all(service.closed for service in services)
+    assert services[1]._closed
+    assert len(servers) == 2
+    assert servers[1].closed
 
 
 def test_browser_capacity_rejection_and_recovery(tmp_path, monkeypatch, run_service):

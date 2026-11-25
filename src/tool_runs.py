@@ -8,6 +8,7 @@ from io import StringIO
 import data.utils.database as database
 
 REDACTED = "[redacted]"
+_LOG = logging.getLogger(__name__)
 
 
 class UnexpectedToolError(RuntimeError):
@@ -95,9 +96,10 @@ def execute_tool_run(
     sensitive_input: bool,
 ) -> tuple[str, str]:
     """Persist the run outcome; propagate persistence errors to the caller."""
-    if not isinstance(sensitive_input, bool):
-        raise TypeError("sensitive_input must be a boolean.")
+    validated_run_id = None
     try:
+        if not isinstance(sensitive_input, bool):
+            raise TypeError("sensitive_input must be a boolean.")
         if run_id is None:
             run_id = start_tool_run(
                 tool_name, query_text, sensitive_input=sensitive_input
@@ -108,12 +110,13 @@ def execute_tool_run(
                 raise ValueError("Sensitive runs require a redacted running record.")
         if run_id is None:
             raise RuntimeError("Failed to start tool run.")
+        validated_run_id = run_id
         return _execute_tool_run(
             tool_name, query_text, runner, run_id, sensitive_input=sensitive_input
         )
     except KeyboardInterrupt:
-        if run_id is not None:
-            _mark_run_interrupted(run_id)
+        if validated_run_id is not None:
+            _mark_run_interrupted(validated_run_id)
         raise
 
 
@@ -145,7 +148,10 @@ def _mark_run_interrupted(run_id: int) -> None:
             run_id, "failed", error_text="Tool run interrupted."
         )
     except BaseException:
-        pass
+        try:
+            _LOG.error("Could not persist interrupted tool run %s", run_id)
+        except BaseException:
+            pass
 
 
 def _execute_tool_run(
