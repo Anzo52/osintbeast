@@ -70,12 +70,50 @@ _STORAGE_CACHE: dict[tuple[Any, ...], Storage] = {}
 DATABASE_ERRORS = (sqlite3.Error, StorageError)
 SQLITE_MAX_INTEGER = (1 << 63) - 1
 MAX_SQLITE_INTEGER = SQLITE_MAX_INTEGER
+MAX_REDACTION_QUERY_CHARS = 4096
+DEFAULT_REDACTED_RESULT_TEXT_CHARS = 16384
+_PERCENT_BYTE = re.compile(r"%[0-9a-f]{2}", re.IGNORECASE)
 
 
-def redact_sensitive_text(text: str | None, sensitive_value: str) -> str | None:
-    """Redact complete raw or partially URL-encoded input occurrences."""
-    if text is None or not sensitive_value or sensitive_value == "[redacted]":
-        return text
+def _decoded_text_boundaries(text: str) -> tuple[str, dict[int, int]]:
+    decoded = []
+    boundaries = {0: 0}
+    position = 0
+    while position < len(text):
+        character = text[position]
+        end = position + 1
+        if _PERCENT_BYTE.match(text, position):
+            first = int(text[position + 1:position + 3], 16)
+            size = (
+                1 if first < 0x80 else
+                2 if 0xC2 <= first <= 0xDF else
+                3 if 0xE0 <= first <= 0xEF else
+                4 if 0xF0 <= first <= 0xF4 else 0
+            )
+            if size and all(
+                _PERCENT_BYTE.match(text, position + 3 * offset)
+                for offset in range(size)
+            ):
+                encoded = bytes(
+                    int(text[position + 3 * offset + 1:position + 3 * offset + 3], 16)
+                    for offset in range(size)
+                )
+                try:
+                    character = encoded.decode("utf-8")
+                    end = position + 3 * size
+                except UnicodeDecodeError:
+                    pass
+        decoded.append(character)
+        boundaries[end] = len(decoded)
+        position = end
+    return "".join(decoded), boundaries
+
+
+def _is_token_character(character: str) -> bool:
+    return character.isalnum() or character in "_+-"
+
+
+def _sensitive_text_pattern(sensitive_value: str) -> re.Pattern:
     alternatives = []
     for char in sensitive_value:
         encoded = "".join(f"%{byte:02X}" for byte in char.encode("utf-8"))
@@ -83,12 +121,90 @@ def redact_sensitive_text(text: str | None, sensitive_value: str) -> str | None:
         if char == " ":
             representations.append(r"\+")
         alternatives.append(f"(?:{'|'.join(representations)})")
-    pattern = re.compile(
-        rf"(?<![A-Za-z0-9_.+-])(?<!%[0-9A-Fa-f]{{2}}){''.join(alternatives)}"
-        r"(?![A-Za-z0-9_+-]|%[0-9A-Fa-f]{2}|\.(?=[A-Za-z0-9_.+-]))",
-        re.IGNORECASE,
-    )
-    return pattern.sub("[redacted]", text)
+    return re.compile("".join(alternatives), re.IGNORECASE)
+
+
+def redact_sensitive_text(text: str | None, sensitive_value: str) -> str | None:
+    """Redact complete raw or partially URL-encoded input occurrences."""
+    if text is None or not sensitive_value or sensitive_value == "[redacted]":
+        return text
+    pattern = _sensitive_text_pattern(sensitive_value)
+    decoded, boundaries = _decoded_text_boundaries(text)
+
+    def is_standalone(match):
+        start = boundaries.get(match.start())
+        end = boundaries.get(match.end())
+        if start is None or end is None:
+            return False
+        left = start - 1
+        while left >= 0 and decoded[left] == ".":
+            left -= 1
+        right = end
+        while right < len(decoded) and decoded[right] == ".":
+            right += 1
+        if (
+            left >= 0 and _is_token_character(decoded[left])
+            or right < len(decoded) and _is_token_character(decoded[right])
+        ):
+            return False
+        return True
+
+    fragments = []
+    cursor = position = 0
+    while match := pattern.search(text, position):
+        if is_standalone(match):
+            fragments.extend((text[cursor:match.start()], "[redacted]"))
+            cursor = position = match.end()
+        else:
+            position = match.start() + 1
+    fragments.append(text[cursor:])
+    return "".join(fragments)
+
+
+def _trailing_sensitive_prefix_length(text: str, sensitive_value: str) -> int:
+    if not sensitive_value or sensitive_value == "[redacted]":
+        return 0
+    representations = []
+    max_length = 0
+    for char in sensitive_value:
+        encoded = "".join(f"%{byte:02X}" for byte in char.encode("utf-8"))
+        options = [char, encoded]
+        if char == " ":
+            options.append("+")
+        representations.append([
+            [re.compile(re.escape(character), re.IGNORECASE) for character in option]
+            for option in options
+        ])
+        max_length += max(map(len, options))
+
+    window = text[-max_length:]
+    # Bound state-machine work linearly; ambiguous repetitive input fails closed.
+    budget = 16 * (len(window) + max_length)
+    active = {}
+    for position, character in enumerate(window):
+        for option in range(len(representations[0])):
+            active.setdefault((0, option, 0), position)
+        following = {}
+        for (index, option, offset), start in active.items():
+            budget -= 1
+            if budget < 0:
+                return len(window)
+            matchers = representations[index][option]
+            if not matchers[offset].fullmatch(character):
+                continue
+            if offset + 1 < len(matchers):
+                states = [(index, option, offset + 1)]
+            elif index + 1 < len(representations):
+                states = [
+                    (index + 1, next_option, 0)
+                    for next_option in range(len(representations[index + 1]))
+                ]
+            else:
+                states = []
+            for state in states:
+                following[state] = min(start, following.get(state, start))
+        active = following
+    return len(window) - min(active.values()) if active else 0
 
 
 def _get_storage() -> Storage:
@@ -155,6 +271,8 @@ def list_tool_results(
 ) -> list[tuple[Any, ...]]:
     """Return saved results, optionally redacting and truncating result text."""
     _validate_list_limit(limit)
+    if redact_sensitive and max_result_text_chars is None:
+        max_result_text_chars = DEFAULT_REDACTED_RESULT_TEXT_CHARS
     if max_result_text_chars is not None and (
         not isinstance(max_result_text_chars, int)
         or isinstance(max_result_text_chars, bool)
@@ -162,36 +280,68 @@ def list_tool_results(
     ):
         raise ValueError("max_result_text_chars must be a positive integer")
     if redact_sensitive and max_result_text_chars is not None:
-        rows = _get_storage().list_tool_results(limit)
+        rows = _get_storage().list_tool_results(
+            limit,
+            max_result_text_chars,
+            include_truncation_status=True,
+            max_query_text_chars=MAX_REDACTION_QUERY_CHARS,
+        )
     else:
         rows = _get_storage().list_tool_results(limit, max_result_text_chars)
-    if redact_sensitive:
-        rows = [
-            (
-                row[0],
-                row[1],
-                "[redacted]",
-                redact_sensitive_text(row[3], row[2]),
-                *row[4:],
-            )
-            for row in rows
-        ]
     if not redact_sensitive:
         return rows
-    if max_result_text_chars is not None and redact_sensitive:
-        marker = "… [truncated]"[:max_result_text_chars]
-        prefix_length = max(0, max_result_text_chars - len(marker))
-        rows = [
-            (
-                *row[:3],
-                None if row[3] is None else row[3][:prefix_length] + (
-                    marker if len(row[3]) > prefix_length else ""
-                ),
-                *row[4:],
-            )
-            for row in rows
-        ]
-    return rows
+
+    def redact_result(row):
+        source_truncated = (
+            max_result_text_chars is not None
+            and len(row) > 5
+            and row[5]
+        )
+        if len(row) > 6 and row[6]:
+            return "[redacted]"[:max_result_text_chars]
+        raw_result = row[3]
+        if source_truncated and raw_result is not None:
+            partial_length = _trailing_sensitive_prefix_length(raw_result, row[2])
+            if partial_length:
+                retained = len(raw_result) - partial_length
+                # Do not cut a complete occurrence overlapped by a partial suffix.
+                pattern = _sensitive_text_pattern(row[2])
+                position = 0
+                component_start = component_end = 0
+                while match := pattern.search(raw_result, position):
+                    if match.start() >= retained:
+                        break
+                    if match.start() < component_end:
+                        component_end = max(component_end, match.end())
+                    else:
+                        component_start, component_end = match.span()
+                    position = match.start() + 1
+                if component_start < retained < component_end:
+                    retained = component_start
+                raw_result = raw_result[:retained]
+        result = redact_sensitive_text(raw_result, row[2])
+        if source_truncated and result is not None:
+            marker = "… [truncated]"[:max_result_text_chars]
+            return result[:max_result_text_chars - len(marker)] + marker
+        if (
+            result is not None
+            and max_result_text_chars is not None
+            and len(result) > max_result_text_chars
+        ):
+            marker = "… [truncated]"[:max_result_text_chars]
+            result = result[:max_result_text_chars - len(marker)] + marker
+        return result
+
+    return [
+        (
+            row[0],
+            row[1],
+            "[redacted]",
+            redact_result(row),
+            *row[4:5],
+        )
+        for row in rows
+    ]
 
 
 def _validate_list_limit(limit: int) -> None:

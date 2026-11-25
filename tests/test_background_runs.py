@@ -28,13 +28,16 @@ def mocked_worker(connection, tool_name, query, max_output_bytes, deadline=None)
     connection.close()
 
 
-def mocked_sensitive_worker(connection, _tool_name, query, _max_output_bytes, _deadline=None):
-    status = b"F" if query.startswith("failure@") else b"S"
-    text = background_runs.redact_sensitive_output(
-        f"lookup result for {query}", query
-    )
-    connection.send_bytes(status + text.encode("utf-8"))
-    connection.close()
+def unredacted_sensitive_runner(query):
+    text = f"lookup result for {query}"
+    if query.startswith("failure@"):
+        raise ValueError(text)
+    return {"output": text}
+
+
+def sensitive_worker(connection, tool_name, query, max_output_bytes, deadline=None):
+    background_runs._TOOLS["holehe"] = (lambda value: value, unredacted_sensitive_runner)
+    background_runs._worker(connection, tool_name, query, max_output_bytes, deadline)
 
 
 def blocked_runner(query):
@@ -128,7 +131,7 @@ def test_background_outcomes_redact_sensitive_query(
 
     query = sensitive_value if prefix == b"S" else "failure@example.com"
     monkeypatch.setattr(
-        background_runs, "_worker", mocked_sensitive_worker
+        background_runs, "_worker", sensitive_worker
     )
     run_id = service.submit("holehe", query)
     run = wait_for_run(service, run_id)
@@ -714,6 +717,25 @@ def test_worker_redacts_sensitive_output_and_suppresses_console_output(
     assert payload == b"SFound [redacted]"
     assert sensitive_value not in captured.out
     assert sensitive_value not in captured.err
+    connection.close.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("error", "prefix"),
+    [(ValueError, b"F"), (TimeoutError, b"T")],
+)
+def test_worker_redacts_sensitive_failure(monkeypatch, error, prefix):
+    sensitive_value = "person@example.com"
+    if os.name == "posix":
+        monkeypatch.setattr(os, "setsid", lambda: None)
+    runner = Mock(side_effect=error(f"Lookup for {sensitive_value} failed"))
+    monkeypatch.setitem(background_runs._TOOLS, "holehe", (lambda value: value, runner))
+    connection = Mock()
+
+    background_runs._worker(connection, "holehe", sensitive_value, 1024)
+
+    runner.assert_called_once_with(sensitive_value)
+    connection.send_bytes.assert_called_once_with(prefix + b"Lookup for [redacted] failed")
     connection.close.assert_called_once()
 
 
