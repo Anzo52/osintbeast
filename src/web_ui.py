@@ -1,17 +1,46 @@
 """Local browser interface for launching and reviewing authorized tool runs."""
 
-import json
+import hmac
 import ipaddress
+import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
-import data.utils.database as database
 from background_runs import BackgroundRuns, CapacityError, StartupPersistenceError
-from helix_integration import run_helix, validate_username as validate_helix_username
+from data.utils import database
+from helix_integration import run_helix
+from helix_integration import validate_username as validate_helix_username
 from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username
-from sherlock_integration import run_sherlock, validate_username as validate_sherlock_username
+from sherlock_integration import run_sherlock
+from sherlock_integration import validate_username as validate_sherlock_username
 from tool_registry import get_tool_metadata
+
+
+def _configured_tokens():
+    operator = (
+        os.getenv("OSINTBEAST_OPERATOR_TOKEN")
+        or os.getenv("OSINTBEAST_API_TOKEN")
+        or os.getenv("OSINTBEAST_TOKEN")
+        or os.getenv("OSINTBEAST_WEB_TOKEN")
+    )
+    viewer = os.getenv("OSINTBEAST_VIEWER_TOKEN")
+    if not viewer:
+        viewer = operator
+    return {
+        "operator": operator,
+        "viewer": viewer,
+    }
+
+
+def _is_loopback_host(host):
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 RUN_SERVICE = BackgroundRuns()
 RUNNABLE_TOOLS = {
@@ -67,7 +96,19 @@ INDEX_HTML = """<!doctype html>
     const error = document.querySelector("#error");
 
     async function request(url, options) {
-      const response = await fetch(url, options);
+      let token = sessionStorage.getItem("osintbeastToken");
+      if (!token) token = window.prompt("Enter an OSINT Beast access token:");
+      if (!token) throw new Error("Authentication is required.");
+      const requestOptions = { ...options, headers: {
+        ...(options?.headers || {}),
+        "Authorization": ["Bearer", token].join(" ")
+      }};
+      const response = await fetch(url, requestOptions);
+      if (response.status === 401) {
+        sessionStorage.removeItem("osintbeastToken");
+        throw new Error("Authentication failed.");
+      }
+      if (token) sessionStorage.setItem("osintbeastToken", token);
       const body = await response.json();
       if (!response.ok) {
         const run = Number.isSafeInteger(body.id) ? ` Run #${body.id}.` : "";
@@ -166,6 +207,37 @@ INDEX_HTML = """<!doctype html>
 class WebHandler(BaseHTTPRequestHandler):
     server_version = "OSINTBeast"
 
+    def _authenticate(self, required_role):
+        tokens = _configured_tokens()
+        if not tokens["operator"] or not tokens["viewer"]:
+            self._send_json(503, {"error": "Authentication is not configured."})
+            return False
+        authorization = self.headers.get("Authorization", "")
+        scheme, _, credential = authorization.partition(" ")
+        credential = credential.strip()
+        if scheme.lower() != "bearer" or not credential:
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", "Bearer")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(json.dumps(
+                {"error": "Authentication required."},
+                ensure_ascii=False,
+            ).encode("utf-8"))
+            return False
+        if tokens["operator"] and hmac.compare_digest(credential, tokens["operator"]):
+            role = "operator"
+        elif tokens["viewer"] and hmac.compare_digest(credential, tokens["viewer"]):
+            role = "viewer"
+        else:
+            self._send_json(401, {"error": "Invalid credentials."})
+            return False
+        if required_role == "operator" and role != "operator":
+            self._send_json(403, {"error": "Operator role required."})
+            return False
+        return True
+
     def _has_local_host(self):
         host_header = self.headers.get("Host", "")
         try:
@@ -248,6 +320,8 @@ class WebHandler(BaseHTTPRequestHandler):
         if not self._has_local_host():
             self._send_json(403, {"error": "Use the local interface host."})
             return
+        if not self._authenticate("viewer"):
+            return
         path = urlsplit(self.path)
         try:
             if path.path == "/":
@@ -270,7 +344,12 @@ class WebHandler(BaseHTTPRequestHandler):
                 limit = int(values[0])
                 self._send_json(
                     200,
-                    [self._run_payload(row) for row in database.list_tool_runs(limit)],
+                    [
+                        self._run_payload(row)
+                        for row in database.list_tool_runs(
+                            limit, redact_sensitive=True
+                        )
+                    ],
                 )
             elif path.path.startswith("/api/runs/"):
                 run_id_text = path.path.removeprefix("/api/runs/")
@@ -279,7 +358,9 @@ class WebHandler(BaseHTTPRequestHandler):
                     return
                 RUN_SERVICE.status(int(run_id_text))
                 database.reconcile_stale_tool_runs()
-                row = database.get_tool_run(int(run_id_text))
+                row = database.get_tool_run(
+                    int(run_id_text), redact_sensitive=True
+                )
                 if row is None:
                     self._send_json(404, {"error": "Run not found."})
                 else:
@@ -296,6 +377,8 @@ class WebHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._has_local_host():
             self._send_json(403, {"error": "Use the local interface host."})
+            return
+        if not self._authenticate("operator"):
             return
         if not self._has_same_origin():
             self._send_json(403, {"error": "Run requests must come from this interface."})
@@ -351,12 +434,40 @@ class WebHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
 
+    def _reject_method(self):
+        if not self._has_local_host():
+            self._send_json(403, {"error": "Use the local interface host."})
+            return
+        if not self._authenticate("viewer"):
+            return
+        self._send_json(405, {"error": "Method not allowed."})
 
-def serve(host="127.0.0.1", port=8000):
-    """Serve the web UI on loopback by default."""
+    do_HEAD = _reject_method
+    do_PUT = _reject_method
+    do_PATCH = _reject_method
+    do_DELETE = _reject_method
+    do_OPTIONS = _reject_method
+
+
+def create_server(host="127.0.0.1", port=8000):
+    """Create an initialized, authenticated web server."""
+    if not _is_loopback_host(host):
+        raise ValueError("The web UI may only bind to a loopback address.")
+    tokens = _configured_tokens()
+    if not tokens["operator"] or not tokens["viewer"]:
+        raise RuntimeError(
+            "Set authentication tokens: OSINTBEAST_OPERATOR_TOKEN and "
+            "OSINTBEAST_VIEWER_TOKEN are required before starting."
+        )
     database.setup_database()
     server = ThreadingHTTPServer((host, port), WebHandler)
     server.daemon_threads = True
+    return server
+
+
+def serve(host="127.0.0.1", port=8000):
+    """Serve the web UI on loopback by default."""
+    server = create_server(host, port)
     print(f"OSINT Beast web UI: http://{host}:{server.server_port}")
     try:
         server.serve_forever()

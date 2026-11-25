@@ -97,8 +97,9 @@ failed operations print a corrective message and return a nonzero status.
 
 ### Running checks
 
-Select a supported check from the menu. Sensitive input is entered through a
-non-echoing prompt; checks send it to third-party sites. See the
+Select a supported check from the menu. Typed target input is visible in the
+terminal, so be aware of people who can see your screen; checks send it to
+third-party sites. See the
 [running checks guide](doc/wiki/Running-Checks.md) for optional installations,
 tool limits, run history, exports, and privacy details.
 
@@ -149,8 +150,9 @@ database is `osintbeast.db` in the repository root, regardless of the current
 working directory. SQLite initialization creates missing tables and indexes in one
 transaction; running it again preserves existing records and recreates missing
 schema objects, including the new run-history table in existing databases. The
-legacy tool-record redaction runs once per database; it does not repair
-incompatible existing tables.
+initialization does not rewrite legacy records. Saved run and result views
+redact queries and matching result or error text at read time; the database
+values remain unchanged. This does not repair incompatible existing tables.
 
 To use SQLite at a different location, set `OSINTBEAST_DB_PATH` before starting
 the application. For a source checkout, the default remains the repository-root
@@ -318,8 +320,11 @@ Configure `RunLimits(max_concurrent=2, timeout_seconds=300,
 max_query_chars=254, max_output_bytes=1000000)` when constructing the service.
 There is no waiting queue: `CapacityError` explicitly rejects submissions when
 all slots are occupied. Execution occurs in child processes, which are stopped
-on timeout or cancellation; tool failures and unexpected worker exits are
-recorded as failures. Call `close()` during orderly application shutdown.
+on timeout or cancellation; each worker also monitors its deadline and its
+parent process so it exits if the parent dies. On POSIX, the worker's process
+group is killed as well; on Windows, this watchdog stops only the worker.
+Tool failures and unexpected worker exits are recorded as failures. Call
+`close()` during orderly application shutdown.
 If saving an outcome fails, the service retains it in memory and keeps its
 capacity slot reserved. Calling `status(run_id)` retries the write and raises
 `RuntimeError` if it still cannot be saved; retry after restoring database
@@ -354,9 +359,22 @@ and persistence service, and their status and saved output are available in
 the recent-runs view. At most two browser runs can be active at once; additional
 requests receive HTTP 503 until capacity is available. Holehe input is redacted
 in stored records and output.
-Keep the interface bound to loopback: it has no login or
-remote-access authentication, and its database and results may contain
-sensitive information.
+
+Configure separate operator and viewer tokens before starting the server:
+
+```bash
+export OSINTBEAST_OPERATOR_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export OSINTBEAST_VIEWER_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+python -m web_ui
+```
+
+Send a configured token using HTTP bearer authentication. Operators may launch
+runs and read results; viewers may only read results. Missing, invalid, or
+unauthorized credentials are rejected. The browser prompts for an access token
+and keeps it only in session storage for the current tab. The server refuses
+to start unless both tokens are configured and refuses any bind address outside
+IPv4 or IPv6 loopback. Do not expose the server through a tunnel or reverse
+proxy; keep its database and results restricted to authorized local users.
 
 ## Responsible use and privacy
 

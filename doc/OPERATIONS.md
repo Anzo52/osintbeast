@@ -114,11 +114,10 @@ and optional integrations. Start OSINT Beast and select **Initialize
 Database** before using the upgraded version with existing data.
 
 SQLite initialization is repeatable and transactional. It creates missing tables
-and indexes and, once per database, redacts legacy tool queries and their
-direct and URL-encoded occurrences in results and errors. It preserves other
-record fields and does not sanitize unrelated sensitive values or new records.
-Existing backups and SQLite journals may still contain the original data.
-MySQL initialization does not perform this legacy redaction.
+and indexes without rewriting existing records. Saved run and result views
+redact queries and matching result or error text at read time; stored values
+remain unchanged. Other sensitive values are not sanitized by this view
+redaction. Existing backups and SQLite journals contain stored values as well.
 It is not a general-purpose
 schema migration: it does not alter or repair existing tables whose columns
 or definitions are incompatible with the current code. In particular, do not

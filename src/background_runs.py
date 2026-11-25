@@ -3,6 +3,7 @@
 import logging
 import math
 import multiprocessing
+import multiprocessing.connection
 import os
 import signal
 import threading
@@ -59,10 +60,26 @@ class RunLimits:
             raise ValueError("timeout_seconds must be finite and positive.")
 
 
-def _worker(connection, tool_name, query, max_output_bytes):
+def _watch_parent(parent_sentinel, deadline):
+    remaining = max(0, deadline - time.monotonic())
+    multiprocessing.connection.wait([parent_sentinel], timeout=remaining)
+    if os.name == "posix":
+        os.killpg(os.getpgrp(), signal.SIGKILL)
+    else:
+        os._exit(1)
+
+
+def _worker(connection, tool_name, query, max_output_bytes, deadline=None):
     try:
         if os.name == "posix":
             os.setsid()
+        if deadline is not None:
+            parent = multiprocessing.parent_process()
+            if parent is None:
+                raise RuntimeError("Background worker has no parent process.")
+            threading.Thread(
+                target=_watch_parent, args=(parent.sentinel, deadline), daemon=True
+            ).start()
         if tool_name == "holehe":
             previous_disable = logging.root.manager.disable
             logging.disable(logging.CRITICAL)
@@ -166,7 +183,7 @@ class BackgroundRuns:
                     if row is None or row[3] == "running":
                         raise RuntimeError("Could not persist background run outcome.") from exc
                 del self._pending[run_id]
-        row = database.get_tool_run(run_id)
+        row = database.get_tool_run(run_id, redact_sensitive=True)
         if row is None:
             return None
         return dict(zip(
@@ -207,14 +224,15 @@ class BackgroundRuns:
         try:
             if not cancel.is_set():
                 receiver, sender = self._context.Pipe(duplex=False)
+                deadline = time.monotonic() + self.limits.timeout_seconds
                 process = self._context.Process(
                     target=_worker,
-                    args=(sender, tool_name, query, self.limits.max_output_bytes),
+                    args=(sender, tool_name, query, self.limits.max_output_bytes,
+                          deadline),
                 )
                 process.start()
                 sender.close()
                 sender = None
-                deadline = time.monotonic() + self.limits.timeout_seconds
                 while not cancel.is_set():
                     remaining = deadline - time.monotonic()
                     ready = receiver.poll(max(0, min(remaining, 0.05)))
