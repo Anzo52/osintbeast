@@ -34,6 +34,10 @@ class Storage(Protocol):
 
     def start_tool_run(self, tool_name: str, query_text: str) -> int: ...
 
+    def start_idempotent_tool_run(
+        self, tool_name: str, query_text: str, key_hash: str, input_fingerprint: str
+    ) -> tuple[int, bool]: ...
+
     def finish_tool_run(
         self,
         run_id: int,
@@ -172,6 +176,34 @@ class SQLiteStorage:
                 (tool_name, query_text),
             )
             return cursor.lastrowid
+
+    def start_idempotent_tool_run(
+        self, tool_name: str, query_text: str, key_hash: str, input_fingerprint: str
+    ) -> tuple[int, bool]:
+        with closing(self.connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT runID, toolName, inputFingerprint
+                   FROM ToolRunIdempotency WHERE keyHash = ?""",
+                (key_hash,),
+            ).fetchone()
+            if row is not None:
+                if row[1:] != (tool_name, input_fingerprint):
+                    raise ValueError("Idempotency-Key was already used for a different run.")
+                return row[0], False
+            cursor = conn.execute(
+                """INSERT INTO ToolRuns (toolName, queryText, status)
+                   VALUES (?, ?, 'running')""",
+                (tool_name, query_text),
+            )
+            run_id = cursor.lastrowid
+            conn.execute(
+                """INSERT INTO ToolRunIdempotency
+                   (keyHash, toolName, inputFingerprint, runID)
+                   VALUES (?, ?, ?, ?)""",
+                (key_hash, tool_name, input_fingerprint, run_id),
+            )
+            return run_id, True
 
     def finish_tool_run(
         self,
@@ -470,6 +502,55 @@ class MySQLStorage:
                 )
                 return result.lastrowid
         except Exception as exc:
+            if exc.__class__.__module__.startswith("sqlalchemy"):
+                raise StorageError(str(exc)) from exc
+            raise
+
+    def start_idempotent_tool_run(
+        self, tool_name: str, query_text: str, key_hash: str, input_fingerprint: str
+    ) -> tuple[int, bool]:
+        try:
+            with self._get_engine().begin() as connection:
+                existing = connection.exec_driver_sql(
+                    """SELECT runID, toolName, inputFingerprint
+                       FROM ToolRunIdempotency WHERE keyHash = %s""",
+                    (key_hash,),
+                ).fetchone()
+                if existing is not None:
+                    if tuple(existing[1:]) != (tool_name, input_fingerprint):
+                        raise ValueError(
+                            "Idempotency-Key was already used for a different run."
+                        )
+                    return existing[0], False
+                result = connection.exec_driver_sql(
+                    """INSERT INTO ToolRuns (toolName, queryText, status)
+                       VALUES (%s, %s, 'running')""",
+                    (tool_name, query_text),
+                )
+                run_id = result.lastrowid
+                connection.exec_driver_sql(
+                    """INSERT INTO ToolRunIdempotency
+                       (keyHash, toolName, inputFingerprint, runID)
+                       VALUES (%s, %s, %s, %s)""",
+                    (key_hash, tool_name, input_fingerprint, run_id),
+                )
+                return run_id, True
+        except Exception as exc:
+            try:
+                with self._get_engine().connect() as connection:
+                    existing = connection.exec_driver_sql(
+                        """SELECT runID, toolName, inputFingerprint
+                           FROM ToolRunIdempotency WHERE keyHash = %s""",
+                        (key_hash,),
+                    ).fetchone()
+            except Exception:
+                existing = None
+            if existing is not None:
+                if tuple(existing[1:]) != (tool_name, input_fingerprint):
+                    raise ValueError(
+                        "Idempotency-Key was already used for a different run."
+                    ) from exc
+                return existing[0], False
             if exc.__class__.__module__.startswith("sqlalchemy"):
                 raise StorageError(str(exc)) from exc
             raise

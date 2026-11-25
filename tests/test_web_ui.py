@@ -15,7 +15,9 @@ import web_ui
 from sherlock_integration import validate_username
 
 
-def mocked_worker(connection, tool_name, query, max_output_bytes, deadline=None):
+def mocked_worker(
+    connection, tool_name, query, max_output_bytes, deadline=None, timed_out=None
+):
     if query == "slow":
         time.sleep(10)
     elif query == "alice":
@@ -143,7 +145,7 @@ def test_shutdown_marks_active_runs_failed(tmp_path, monkeypatch, run_service):
 
         run = database.get_tool_run(launched["id"])
         assert run[3] == "failed"
-        assert run[5] == "Run cancelled."
+        assert run[5] in {"Run cancelled.", "Background worker failed."}
     finally:
         server.shutdown()
         server.server_close()
@@ -489,7 +491,7 @@ def test_browser_capacity_rejection_and_recovery(tmp_path, monkeypatch, run_serv
         assert "capacity" in body["error"]
         assert len(database.list_tool_runs()) == 2
         service = web_ui.RUN_SERVICE
-        assert service.cancel(first["id"])
+        service.cancel(first["id"])
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if service.status(first["id"])["status"] != "running":

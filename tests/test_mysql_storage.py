@@ -12,21 +12,29 @@ class FakeResult:
     rowcount = 1
 
     def __init__(self, rows=None):
-        self.rows = rows or [("platform",), ("platformID",)]
+        self.rows = [("platform",), ("platformID",)] if rows is None else rows
 
     def fetchall(self):
         return self.rows
+
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
 
 
 class FakeConnection:
     def __init__(self):
         self.statements = []
         self.fail_on = None
+        self.idempotency_row = None
 
     def exec_driver_sql(self, statement, parameters=()):
         self.statements.append((statement, parameters))
         if self.fail_on and self.fail_on in statement:
             raise FakeSQLAlchemyError("database unavailable")
+        if "SELECT runID, toolName, inputFingerprint" in statement:
+            return FakeResult(
+                [] if self.idempotency_row is None else [self.idempotency_row]
+            )
         if "SUBSTR(resultText" in statement:
             return FakeResult([(1, "holehe", "query", "xxxx", 1, "created")])
         return FakeResult()
@@ -94,6 +102,10 @@ def test_mysql_initialization_executes_both_idempotent_schema_files(mysql_storag
         for statement in statements
     ) == 2
     assert any("CREATE TABLE IF NOT EXISTS ToolRuns" in statement for statement in statements)
+    assert any(
+        "CREATE TABLE IF NOT EXISTS ToolRunIdempotency" in statement
+        for statement in statements
+    )
 
 
 def test_mysql_core_operations_use_bound_values_and_preserve_transactional_flow(
@@ -117,6 +129,33 @@ def test_mysql_core_operations_use_bound_values_and_preserve_transactional_flow(
         for sql, params in statements
     )
     assert any("INSERT INTO ToolResults" in sql for sql, _ in statements)
+
+
+def test_mysql_idempotent_run_creation_is_transactional(mysql_storage):
+    storage, engine = mysql_storage
+
+    assert storage.start_idempotent_tool_run(
+        "holehe", "[redacted]", "k" * 64, "f" * 64
+    ) == (41, True)
+
+    assert any(
+        "INSERT INTO ToolRunIdempotency" in sql
+        and params == ("k" * 64, "holehe", "f" * 64, 41)
+        for sql, params in engine.connection.statements
+    )
+    assert engine.commits == 1
+
+
+def test_mysql_idempotent_run_returns_existing_association(mysql_storage):
+    storage, engine = mysql_storage
+    engine.connection.idempotency_row = (17, "holehe", "f" * 64)
+
+    assert storage.start_idempotent_tool_run(
+        "holehe", "[redacted]", "k" * 64, "f" * 64
+    ) == (17, False)
+    assert not any(
+        "INSERT INTO ToolRuns" in sql for sql, _ in engine.connection.statements
+    )
 
 
 def test_mysql_query_commits_state_changes(mysql_storage):

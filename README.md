@@ -357,8 +357,8 @@ the recent-runs view. At most two browser runs can be active at once; additional
 requests receive HTTP 503 until capacity is available. Holehe input is redacted
 in stored records and output. Submissions accept an `Idempotency-Key`; retries
 with the same key and input return the existing run, while reusing a key for a
-different run returns HTTP 409. Keys are retained for the lifetime of the
-service.
+different run returns HTTP 409. The database retains non-reversible key and
+input fingerprints so retries remain idempotent across service restarts.
 
 Configure separate operator and viewer tokens before starting the server:
 

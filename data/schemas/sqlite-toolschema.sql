@@ -45,3 +45,11 @@ CREATE TABLE IF NOT EXISTS ToolRuns (
 
 CREATE INDEX IF NOT EXISTS idx_toolruns_tool_started
     ON ToolRuns (toolName, startedAt);
+
+CREATE TABLE IF NOT EXISTS ToolRunIdempotency (
+    keyHash TEXT PRIMARY KEY,
+    toolName TEXT NOT NULL,
+    inputFingerprint TEXT NOT NULL,
+    runID INTEGER NOT NULL UNIQUE,
+    FOREIGN KEY (runID) REFERENCES ToolRuns (runID)
+);

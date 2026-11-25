@@ -7,7 +7,6 @@ import math
 import multiprocessing
 import multiprocessing.connection
 import os
-import secrets
 import signal
 import threading
 import time
@@ -20,7 +19,11 @@ from helix_integration import run_helix, validate_username as validate_helix
 from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username as validate_maigret
 from sherlock_integration import run_sherlock, validate_username as validate_sherlock
-from tool_runs import redact_sensitive_output, start_tool_run
+from tool_runs import (
+    redact_sensitive_output,
+    start_idempotent_tool_run,
+    start_tool_run,
+)
 
 _LOG = logging.getLogger(__name__)
 _TOOLS = {
@@ -37,6 +40,14 @@ class CapacityError(RuntimeError):
 
 class IdempotencyConflict(RuntimeError):
     """An idempotency key was reused for a different submission."""
+
+
+class StartupPersistenceError(RuntimeError):
+    """A failed worker startup could not be persisted."""
+
+    def __init__(self, run_id):
+        self.run_id = run_id
+        super().__init__(f"Could not persist startup failure for run {run_id}.")
 
 
 @dataclass(frozen=True)
@@ -59,25 +70,30 @@ class RunLimits:
             raise ValueError("timeout_seconds must be finite and positive.")
 
 
-def _watch_parent(parent_sentinel, deadline):
+def _watch_parent(parent_sentinel, deadline, timed_out):
     remaining = max(0, deadline - time.monotonic())
-    multiprocessing.connection.wait([parent_sentinel], timeout=remaining)
+    if not multiprocessing.connection.wait([parent_sentinel], timeout=remaining):
+        timed_out.set()
     if os.name == "posix":
         os.killpg(os.getpgrp(), signal.SIGKILL)
     else:
         os._exit(1)
 
 
-def _worker(connection, tool_name, query, max_output_bytes, deadline=None):
+def _worker(connection, tool_name, query, max_output_bytes, deadline=None, timed_out=None):
     try:
         if os.name == "posix":
             os.setsid()
         if deadline is not None:
+            if timed_out is None:
+                timed_out = threading.Event()
             parent = multiprocessing.parent_process()
             if parent is None:
                 raise RuntimeError("Background worker has no parent process.")
             threading.Thread(
-                target=_watch_parent, args=(parent.sentinel, deadline), daemon=True
+                target=_watch_parent,
+                args=(parent.sentinel, deadline, timed_out),
+                daemon=True,
             ).start()
         if tool_name == "holehe":
             previous_disable = logging.root.manager.disable
@@ -134,9 +150,8 @@ class BackgroundRuns:
         self._context = multiprocessing.get_context("spawn")
         self._lock = threading.Lock()
         self._jobs = {}
+        self._job_locks = {}
         self._pending = {}
-        self._idempotency_keys = {}
-        self._idempotency_secret = secrets.token_bytes(32)
         self._retry_wakeup = threading.Event()
         self._retry_stop = threading.Event()
         self._retry_thread = None
@@ -158,49 +173,83 @@ class BackgroundRuns:
         query = _TOOLS[tool_name][0](query)
         key_record = None
         if idempotency_key is not None:
+            key_hash = hashlib.sha256(idempotency_key.encode("ascii")).hexdigest()
             fingerprint = hmac.new(
-                self._idempotency_secret, query.encode("utf-8"), hashlib.sha256
-            ).digest()
-            key_record = (idempotency_key, tool_name, fingerprint)
+                idempotency_key.encode("ascii"),
+                query.encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+            key_record = (key_hash, fingerprint)
+        startup_error = None
+        fallback_retry = False
         with self._lock:
             if self._closed:
                 raise RuntimeError("Background run service is closed.")
             if key_record is not None:
-                existing = self._idempotency_keys.get(idempotency_key)
+                existing = database.get_idempotent_tool_run(key_record[0])
                 if existing is not None:
-                    if existing[:2] != key_record[1:]:
+                    if existing[1:] != (tool_name, key_record[1]):
                         raise IdempotencyConflict(
                             "Idempotency-Key was already used for a different run."
                         )
-                    return existing[2]
+                    return existing[0]
             if len(self._jobs) + len(self._pending) >= self.limits.max_concurrent:
                 raise CapacityError("Background run capacity reached.")
-            run_id = start_tool_run(
-                tool_name, query, sensitive_input=tool_name == "holehe"
-            )
+            if key_record is None:
+                run_id = start_tool_run(
+                    tool_name, query, sensitive_input=tool_name == "holehe"
+                )
+            else:
+                try:
+                    run_id, created = start_idempotent_tool_run(
+                        tool_name,
+                        query,
+                        sensitive_input=tool_name == "holehe",
+                        key_hash=key_record[0],
+                        input_fingerprint=key_record[1],
+                    )
+                except ValueError as exc:
+                    if "Idempotency-Key" in str(exc):
+                        raise IdempotencyConflict(str(exc)) from exc
+                    raise
+                if not created:
+                    return run_id
             cancel = threading.Event()
             completed = threading.Event()
+            state_lock = threading.Lock()
             try:
                 thread = threading.Thread(
                     target=self._supervise, args=(run_id, tool_name, query, cancel, completed),
                     name=f"tool-run-{run_id}", daemon=True,
                 )
                 self._jobs[run_id] = (cancel, thread, completed)
+                self._job_locks[run_id] = state_lock
                 thread.start()
-            except BaseException:
+            except BaseException as exc:
                 self._jobs.pop(run_id, None)
+                self._job_locks.pop(run_id, None)
                 self._pending[run_id] = ("failed", "Could not start background worker.")
                 try:
                     self._persist(run_id, *self._pending[run_id])
-                except Exception:
+                except Exception as persistence_error:
                     _LOG.exception("Could not persist background run startup failure")
+                    fallback_retry = not self._start_retry_locked()
+                    if isinstance(exc, Exception):
+                        startup_error = StartupPersistenceError(run_id)
+                        startup_error.__cause__ = persistence_error
+                    else:
+                        startup_error = exc
                 else:
                     del self._pending[run_id]
-                raise
-            if key_record is not None:
-                self._idempotency_keys[idempotency_key] = (
-                    key_record[1], key_record[2], run_id
-                )
+                    startup_error = exc
+                try:
+                    startup_error.run_id = run_id
+                except (AttributeError, TypeError):
+                    pass
+        if fallback_retry:
+            self._retry_pending(until_empty=True)
+        if startup_error is not None:
+            raise startup_error.with_traceback(startup_error.__traceback__)
         return run_id
 
     def status(self, run_id: int):
@@ -224,7 +273,13 @@ class BackgroundRuns:
     def cancel(self, run_id: int) -> bool:
         with self._lock:
             job = self._jobs.get(run_id)
-            if job is None or job[2].is_set():
+            state_lock = self._job_locks.get(run_id)
+        if job is None or job[2].is_set():
+            return False
+        if state_lock is None:
+            state_lock = self._lock
+        with state_lock:
+            if job[2].is_set():
                 return False
             job[0].set()
             return True
@@ -232,11 +287,17 @@ class BackgroundRuns:
     def close(self):
         with self._lock:
             self._closed = True
-            jobs = list(self._jobs.values())
-            for cancel, _, completed in jobs:
+            jobs = [
+                (job, self._job_locks.get(run_id))
+                for run_id, job in self._jobs.items()
+            ]
+        for (cancel, _, completed), state_lock in jobs:
+            if state_lock is None:
+                state_lock = self._lock
+            with state_lock:
                 if not completed.is_set():
                     cancel.set()
-        for _, thread, _ in jobs:
+        for (_, thread, _), _ in jobs:
             thread.join()
         self._retry_stop.set()
         self._retry_wakeup.set()
@@ -254,7 +315,11 @@ class BackgroundRuns:
     def _supervise(self, run_id, tool_name, query, cancel, completed):
         process = None
         receiver = sender = None
+        timed_out = self._context.Event()
         status, value = "failed", "Background worker failed."
+        retry_in_current_thread = False
+        state_lock = self._job_locks.get(run_id, self._lock)
+
         try:
             if not cancel.is_set():
                 receiver, sender = self._context.Pipe(duplex=False)
@@ -262,36 +327,59 @@ class BackgroundRuns:
                 process = self._context.Process(
                     target=_worker,
                     args=(sender, tool_name, query, self.limits.max_output_bytes,
-                          deadline),
+                          deadline, timed_out),
                 )
                 process.start()
                 sender.close()
                 sender = None
-                while not cancel.is_set():
-                    remaining = deadline - time.monotonic()
-                    if receiver.poll(max(0, min(remaining, 0.05))):
-                        try:
-                            payload = receiver.recv_bytes(self.limits.max_output_bytes + 1)
-                        except (EOFError, OSError):
-                            if time.monotonic() >= deadline:
-                                status, value = "timed_out", "Background run exceeded its time limit."
+                while True:
+                    with state_lock:
+                        if cancel.is_set():
                             break
-                        if payload and payload[:1] in (b"S", b"F", b"T"):
-                            status = {b"S": "success", b"F": "failed", b"T": "timed_out"}[payload[:1]]
-                            value = payload[1:].decode("utf-8", errors="replace")
-                            with self._lock:
-                                if not cancel.is_set():
-                                    completed.set()
-                        break
-                    if remaining <= 0:
-                        status, value = "timed_out", "Background run exceeded its time limit."
-                        break
-                    if not process.is_alive():
-                        if time.monotonic() >= deadline:
-                            status, value = "timed_out", "Background run exceeded its time limit."
-                        break
+                        remaining = deadline - time.monotonic()
+                        if receiver.poll(max(0, min(remaining, 0.05))):
+                            try:
+                                payload = receiver.recv_bytes(
+                                    self.limits.max_output_bytes + 1
+                                )
+                            except (EOFError, OSError):
+                                if timed_out.is_set() or time.monotonic() >= deadline:
+                                    status, value = (
+                                        "timed_out",
+                                        "Background run exceeded its time limit.",
+                                    )
+                            else:
+                                if payload and payload[:1] in (b"S", b"F", b"T"):
+                                    status = {
+                                        b"S": "success",
+                                        b"F": "failed",
+                                        b"T": "timed_out",
+                                    }[payload[:1]]
+                                    value = payload[1:].decode(
+                                        "utf-8", errors="replace"
+                                    )
+                            completed.set()
+                            break
+                        if remaining <= 0:
+                            status, value = (
+                                "timed_out",
+                                "Background run exceeded its time limit.",
+                            )
+                            completed.set()
+                            break
+                        if not process.is_alive():
+                            if timed_out.is_set() or time.monotonic() >= deadline:
+                                status, value = (
+                                    "timed_out",
+                                    "Background run exceeded its time limit.",
+                                )
+                            completed.set()
+                            break
         except Exception:
             _LOG.exception("Background worker could not be supervised")
+            with state_lock:
+                if not cancel.is_set():
+                    completed.set()
         finally:
             if process is not None:
                 try:
@@ -303,26 +391,42 @@ class BackgroundRuns:
                 receiver.close()
             if sender is not None:
                 sender.close()
-            with self._lock:
+            with state_lock:
                 if cancel.is_set() and not completed.is_set():
                     status, value = "failed", "Run cancelled."
+                completed.set()
+            with self._lock:
                 try:
                     self._persist(run_id, status, value)
                 except Exception:
                     _LOG.exception("Could not persist background run outcome")
                     self._pending[run_id] = (status, value)
                     self._retry_wakeup.set()
-                    if self._retry_thread is None:
-                        self._retry_thread = threading.Thread(
-                            target=self._retry_pending,
-                            name="tool-run-persistence-retry",
-                            daemon=True,
-                        )
-                        self._retry_thread.start()
+                    retry_in_current_thread = not self._start_retry_locked()
                 finally:
                     self._jobs.pop(run_id, None)
+                    self._job_locks.pop(run_id, None)
+            if retry_in_current_thread:
+                self._retry_pending(until_empty=True)
 
-    def _retry_pending(self):
+    def _start_retry_locked(self):
+        if self._retry_thread is not None and self._retry_thread.is_alive():
+            return True
+        try:
+            thread = threading.Thread(
+                target=self._retry_pending,
+                name="tool-run-persistence-retry",
+                daemon=True,
+            )
+            thread.start()
+        except Exception:
+            _LOG.exception("Could not start background run persistence retry")
+            return False
+        self._retry_thread = thread
+        return True
+
+    def _retry_pending(self, until_empty=False):
+        attempts = 0
         while not self._retry_stop.is_set():
             self._retry_wakeup.wait(0.5)
             self._retry_wakeup.clear()
@@ -344,3 +448,10 @@ class BackgroundRuns:
                         )
                     else:
                         del self._pending[run_id]
+            if until_empty:
+                with self._lock:
+                    if not self._pending:
+                        return
+                attempts += 1
+                if attempts >= 3:
+                    return

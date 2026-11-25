@@ -46,3 +46,14 @@ CREATE TABLE IF NOT EXISTS ToolRuns (
     CONSTRAINT chk_toolruns_status
         CHECK (status IN ('running', 'success', 'failed', 'timed_out'))
 ) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS ToolRunIdempotency (
+    keyHash CHAR(64) NOT NULL,
+    toolName VARCHAR(255) NOT NULL,
+    inputFingerprint CHAR(64) NOT NULL,
+    runID INT NOT NULL,
+    PRIMARY KEY (keyHash),
+    UNIQUE KEY uq_toolrun_idempotency_run (runID),
+    CONSTRAINT fk_toolrun_idempotency_run
+        FOREIGN KEY (runID) REFERENCES ToolRuns (runID)
+) ENGINE=InnoDB;

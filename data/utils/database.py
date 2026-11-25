@@ -371,6 +371,27 @@ def start_tool_run(tool_name: str, query_text: str):
     return _get_storage().start_tool_run(tool_name, query_text)
 
 
+def start_idempotent_tool_run(
+    tool_name: str, query_text: str, key_hash: str, input_fingerprint: str
+) -> tuple[int, bool]:
+    """Create or find a running record associated with a persistent key."""
+    return _get_storage().start_idempotent_tool_run(
+        tool_name, query_text, key_hash, input_fingerprint
+    )
+
+
+def get_idempotent_tool_run(key_hash: str) -> tuple[Any, ...] | None:
+    """Return a run association by its non-reversible idempotency-key hash."""
+    if not isinstance(key_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", key_hash):
+        raise ValueError("Invalid idempotency key hash")
+    rows = _get_storage().query(
+        """SELECT runID, toolName, inputFingerprint
+           FROM ToolRunIdempotency WHERE keyHash = ?""",
+        (key_hash,),
+    )
+    return rows[0] if rows else None
+
+
 def finish_tool_run(
     run_id: int, status: str, result_text: str | None = None,
     error_text: str | None = None,

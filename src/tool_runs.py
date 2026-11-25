@@ -59,6 +59,19 @@ def start_tool_run(
     return database.start_tool_run(tool_name, stored_query)
 
 
+def start_idempotent_tool_run(
+    tool_name: str, query_text: str, *, sensitive_input: bool,
+    key_hash: str, input_fingerprint: str,
+) -> tuple[int, bool]:
+    """Create or find a run while keeping the raw idempotency key out of storage."""
+    if not isinstance(sensitive_input, bool):
+        raise TypeError("sensitive_input must be a boolean.")
+    stored_query = REDACTED if sensitive_input else query_text
+    return database.start_idempotent_tool_run(
+        tool_name, stored_query, key_hash, input_fingerprint
+    )
+
+
 def execute_tool_run(
     tool_name: str,
     query_text: str,
