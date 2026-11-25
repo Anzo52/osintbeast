@@ -42,7 +42,6 @@ def _is_loopback_host(host):
         return False
 
 
-RUN_SERVICE = BackgroundRuns()
 RUNNABLE_TOOLS = {
     "holehe": ("email", validate_email, lambda value: run_holehe(value)["output"]),
     "maigret": ("username", validate_username, run_maigret),
@@ -166,13 +165,17 @@ INDEX_HTML = """<!doctype html>
       error.textContent = reason.message;
     }
 
-    let idempotencyKey = null;
+    const pendingKeyName = "osintbeast-pending-run";
+    function clearPendingKey() {
+      sessionStorage.removeItem(pendingKeyName);
+    }
+    async function submissionFingerprint(key, tool, input) {
+      const bytes = new TextEncoder().encode(JSON.stringify([key, tool, input]));
+      const digest = await crypto.subtle.digest("SHA-256", bytes);
+      return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+    }
     toolSelect.addEventListener("change", () => {
-      idempotencyKey = null;
       updateInputLabel();
-    });
-    queryInput.addEventListener("input", () => {
-      idempotencyKey = null;
     });
     document.querySelector("#launch").addEventListener("submit", async event => {
       event.preventDefault();
@@ -182,7 +185,23 @@ INDEX_HTML = """<!doctype html>
       submit.disabled = true;
       message.textContent = "Submitting run…";
       try {
-        idempotencyKey ||= crypto.randomUUID();
+        let pending;
+        try {
+          pending = JSON.parse(sessionStorage.getItem(pendingKeyName));
+        } catch {
+          pending = null;
+        }
+        let idempotencyKey = pending?.key;
+        if (!idempotencyKey || pending.tool !== toolSelect.value ||
+            pending.fingerprint !== await submissionFingerprint(idempotencyKey, toolSelect.value, queryInput.value)) {
+          idempotencyKey = crypto.randomUUID();
+          pending = {
+            key: idempotencyKey,
+            tool: toolSelect.value,
+            fingerprint: await submissionFingerprint(idempotencyKey, toolSelect.value, queryInput.value)
+          };
+          sessionStorage.setItem(pendingKeyName, JSON.stringify(pending));
+        }
         const run = await request("/api/runs", {
           method: "POST",
           headers: {
@@ -195,9 +214,9 @@ INDEX_HTML = """<!doctype html>
             authorized: document.querySelector("#authorized").checked
           })
         });
+        clearPendingKey();
         message.textContent = `Run #${run.id} is ${run.status}.`;
         await loadRun(run.id);
-        idempotencyKey = null;
       } catch (reason) {
         message.textContent = "";
         showError(reason);
@@ -365,7 +384,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 if not run_id_text.isdecimal():
                     self._send_json(404, {"error": "Run not found."})
                     return
-                RUN_SERVICE.status(int(run_id_text))
+                self.server.run_service.status(int(run_id_text))
                 database.reconcile_stale_tool_runs()
                 row = database.get_tool_run(
                     int(run_id_text), redact_sensitive=True
@@ -417,7 +436,7 @@ class WebHandler(BaseHTTPRequestHandler):
             input_kind, validator, _ = tool
             query_text = validator(payload.get("input"))
             idempotency_key = self.headers.get("Idempotency-Key")
-            run_id = RUN_SERVICE.submit(tool_name, query_text, idempotency_key)
+            run_id = self.server.run_service.submit(tool_name, query_text, idempotency_key)
             row = database.get_tool_run(run_id, redact_sensitive=True)
             self._send_json(202, {
                 "id": run_id,
@@ -468,14 +487,13 @@ def create_server(host="127.0.0.1", port=8000):
             "OSINTBEAST_VIEWER_TOKEN are required before starting."
         )
     database.setup_database()
-    global RUN_SERVICE
     service = BackgroundRuns()
     try:
         server = ThreadingHTTPServer((host, port), WebHandler)
     except Exception:
         service.close()
         raise
-    RUN_SERVICE = service
+    server.run_service = service
     server.daemon_threads = True
     return server
 
@@ -483,7 +501,6 @@ def create_server(host="127.0.0.1", port=8000):
 def serve(host="127.0.0.1", port=8000):
     """Serve the web UI on loopback by default."""
     server = create_server(host, port)
-    service = RUN_SERVICE
     print(f"OSINT Beast web UI: http://{host}:{server.server_port}")
     try:
         server.serve_forever()
@@ -491,7 +508,7 @@ def serve(host="127.0.0.1", port=8000):
         pass
     finally:
         server.server_close()
-        service.close()
+        server.run_service.close()
 
 
 if __name__ == "__main__":

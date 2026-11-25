@@ -330,6 +330,12 @@ capacity slot reserved while retrying the write independently of status
 requests. Calling `status(run_id)` also retries immediately and raises
 `RuntimeError` if the outcome still cannot be saved. Pending outcomes are lost
 if the application process exits.
+Idempotency keys for active runs are retained; completed-run keys are kept
+up to 1024 entries (or the configured concurrency limit), after which the
+oldest completed keys are evicted. Retrying an evicted key creates a new run.
+The browser retains an unacknowledged submission key and a salted input
+fingerprint in session storage across reloads, without storing the raw input;
+it clears the key when the server confirms the submission.
 
 These limits apply per service instance, not across web server processes or
 hosts. Use a single application process or an external coordinator to enforce

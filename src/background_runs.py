@@ -11,6 +11,7 @@ import secrets
 import signal
 import threading
 import time
+from collections import OrderedDict
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from io import StringIO
@@ -23,6 +24,7 @@ from sherlock_integration import run_sherlock, validate_username as validate_she
 from tool_runs import redact_sensitive_output, start_tool_run
 
 _LOG = logging.getLogger(__name__)
+_MAX_IDEMPOTENCY_KEYS = 1024
 _TOOLS = {
     "holehe": (validate_email, run_holehe),
     "maigret": (validate_maigret, run_maigret),
@@ -135,7 +137,9 @@ class BackgroundRuns:
         self._lock = threading.Lock()
         self._jobs = {}
         self._pending = {}
-        self._idempotency_keys = {}
+        self._pending_claims = set()
+        self._pending_failed = set()
+        self._idempotency_keys = OrderedDict()
         self._idempotency_secret = secrets.token_bytes(32)
         self._retry_wakeup = threading.Event()
         self._retry_stop = threading.Event()
@@ -178,6 +182,11 @@ class BackgroundRuns:
             run_id = start_tool_run(
                 tool_name, query, sensitive_input=tool_name == "holehe"
             )
+            if key_record is not None:
+                self._idempotency_keys[idempotency_key] = (
+                    key_record[1], key_record[2], run_id
+                )
+                self._prune_keys()
             cancel = threading.Event()
             completed = threading.Event()
             try:
@@ -194,24 +203,67 @@ class BackgroundRuns:
                     self._persist(run_id, *self._pending[run_id])
                 except Exception:
                     _LOG.exception("Could not persist background run startup failure")
+                    self._pending_failed.add(run_id)
+                    self._schedule_retry()
                 else:
                     del self._pending[run_id]
                 raise
-            if key_record is not None:
-                self._idempotency_keys[idempotency_key] = (
-                    key_record[1], key_record[2], run_id
-                )
         return run_id
 
-    def status(self, run_id: int):
+    def _prune_keys(self):
+        limit = max(_MAX_IDEMPOTENCY_KEYS, self.limits.max_concurrent)
+        for key, (_, _, run_id) in list(self._idempotency_keys.items()):
+            if len(self._idempotency_keys) <= limit:
+                break
+            if run_id not in self._jobs and run_id not in self._pending:
+                del self._idempotency_keys[key]
+
+    def _schedule_retry(self):
+        self._retry_wakeup.set()
+        if self._retry_thread is None:
+            try:
+                self._retry_thread = threading.Thread(
+                    target=self._retry_pending,
+                    name="tool-run-persistence-retry",
+                    daemon=True,
+                )
+                self._retry_thread.start()
+            except Exception:
+                self._retry_thread = None
+                _LOG.exception("Could not start persistence retry worker")
+
+    def _persist_pending(self, run_id):
         with self._lock:
-            if run_id in self._pending:
-                status, value = self._pending[run_id]
-                try:
-                    self._persist(run_id, status, value)
-                except Exception as exc:
-                    raise RuntimeError("Could not persist background run outcome.") from exc
-                del self._pending[run_id]
+            outcome = self._pending.get(run_id)
+            if outcome is None:
+                return True
+            if run_id in self._pending_claims:
+                return False
+            self._pending_claims.add(run_id)
+        persisted = False
+        try:
+            self._persist(run_id, *outcome)
+            persisted = True
+        finally:
+            with self._lock:
+                self._pending_claims.remove(run_id)
+                if not persisted:
+                    self._pending_failed.add(run_id)
+                    if self._retry_thread is None:
+                        self._schedule_retry()
+                if self._pending.get(run_id) == outcome and persisted:
+                    del self._pending[run_id]
+                    self._pending_failed.discard(run_id)
+        return True
+
+    def status(self, run_id: int):
+        try:
+            if not self._persist_pending(run_id):
+                with self._lock:
+                    if run_id in self._pending_failed:
+                        raise RuntimeError("Could not persist background run outcome.")
+        except Exception as exc:
+            raise RuntimeError("Could not persist background run outcome.") from exc
         row = database.get_tool_run(run_id, redact_sensitive=True)
         if row is None:
             return None
@@ -306,21 +358,12 @@ class BackgroundRuns:
             with self._lock:
                 if cancel.is_set() and not completed.is_set():
                     status, value = "failed", "Run cancelled."
-                try:
-                    self._persist(run_id, status, value)
-                except Exception:
-                    _LOG.exception("Could not persist background run outcome")
-                    self._pending[run_id] = (status, value)
-                    self._retry_wakeup.set()
-                    if self._retry_thread is None:
-                        self._retry_thread = threading.Thread(
-                            target=self._retry_pending,
-                            name="tool-run-persistence-retry",
-                            daemon=True,
-                        )
-                        self._retry_thread.start()
-                finally:
-                    self._jobs.pop(run_id, None)
+                self._pending[run_id] = (status, value)
+                self._jobs.pop(run_id, None)
+            try:
+                self._persist_pending(run_id)
+            except Exception:
+                _LOG.exception("Could not persist background run outcome")
 
     def _retry_pending(self):
         while not self._retry_stop.is_set():
@@ -329,18 +372,13 @@ class BackgroundRuns:
             if self._retry_stop.is_set():
                 return
             with self._lock:
-                pending = list(self._pending.items())
-            for run_id, outcome in pending:
-                with self._lock:
-                    if self._pending.get(run_id) != outcome:
-                        continue
-                    try:
-                        self._persist(run_id, *outcome)
-                    except Exception as exc:
-                        _LOG.warning(
-                            "Could not retry persistence for run %s (%s)",
-                            run_id,
-                            type(exc).__name__,
-                        )
-                    else:
-                        del self._pending[run_id]
+                pending = list(self._pending)
+            for run_id in pending:
+                try:
+                    self._persist_pending(run_id)
+                except Exception as exc:
+                    _LOG.warning(
+                        "Could not retry persistence for run %s (%s)",
+                        run_id,
+                        type(exc).__name__,
+                    )

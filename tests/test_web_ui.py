@@ -36,9 +36,9 @@ def mocked_worker(connection, tool_name, query, max_output_bytes, deadline=None)
 def run_service(monkeypatch):
     monkeypatch.setattr(background_runs, "_worker", mocked_worker)
     service = background_runs.BackgroundRuns()
-    monkeypatch.setattr(web_ui, "RUN_SERVICE", service)
+    monkeypatch.setattr(web_ui, "BackgroundRuns", lambda: service)
     yield service
-    web_ui.RUN_SERVICE.close()
+    service.close()
 
 
 def _request(url, payload=None, headers=None):
@@ -139,7 +139,7 @@ def test_shutdown_marks_active_runs_failed(tmp_path, monkeypatch, run_service):
             {"tool": "sherlock", "input": "slow", "authorized": True},
         )
         assert status == 202
-        web_ui.RUN_SERVICE.close()
+        server.run_service.close()
 
         run = database.get_tool_run(launched["id"])
         assert run[3] == "failed"
@@ -416,6 +416,8 @@ def test_unexpected_background_error_is_redacted(tmp_path, monkeypatch, caplog):
 
 def test_submission_idempotency_key_returns_existing_run(tmp_path, monkeypatch):
     server, base_url = _server(tmp_path, monkeypatch, Mock())
+    starts = Mock(wraps=server.run_service._supervise)
+    monkeypatch.setattr(server.run_service, "_supervise", starts)
     payload = {"tool": "sherlock", "input": "alice", "authorized": True}
     headers = {"Idempotency-Key": "retry-this-submission"}
     try:
@@ -425,6 +427,7 @@ def test_submission_idempotency_key_returns_existing_run(tmp_path, monkeypatch):
         assert status == 202
         assert repeated["id"] == first["id"]
         assert len(database.list_tool_runs()) == 1
+        assert starts.call_count == 1
 
         status, body = _request(
             f"{base_url}/api/runs",
@@ -437,6 +440,35 @@ def test_submission_idempotency_key_returns_existing_run(tmp_path, monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_concurrent_servers_keep_their_own_run_services(tmp_path, monkeypatch):
+    real_service = background_runs.BackgroundRuns
+    monkeypatch.setattr(web_ui, "BackgroundRuns", real_service)
+    first, first_url = _server(tmp_path, monkeypatch, Mock())
+    second, second_url = _server(tmp_path, monkeypatch, Mock())
+    try:
+        assert first.run_service is not second.run_service
+        payload = {"tool": "sherlock", "input": "alice", "authorized": True}
+        status, launched = _request(f"{first_url}/api/runs", payload)
+        assert status == 202
+        assert launched["id"] in first.run_service._jobs
+        assert launched["id"] not in second.run_service._jobs
+        assert _request(f"{first_url}/api/runs/{launched['id']}")[0] == 200
+    finally:
+        for server in (first, second):
+            server.shutdown()
+            server.server_close()
+            server.run_service.close()
+
+
+def test_browser_persists_unacknowledged_key_without_storing_input():
+    page = web_ui.INDEX_HTML
+    assert 'sessionStorage.setItem(pendingKeyName, JSON.stringify(pending))' in page
+    assert 'sessionStorage.getItem(pendingKeyName)' in page
+    assert 'crypto.subtle.digest("SHA-256", bytes)' in page
+    assert 'input: queryInput.value' in page
+    assert page.index("clearPendingKey();", page.index('const run = await request("/api/runs"')) < page.index("await loadRun(run.id);")
 
 
 def test_serve_creates_a_fresh_run_service_each_time(monkeypatch):
@@ -488,7 +520,7 @@ def test_browser_capacity_rejection_and_recovery(tmp_path, monkeypatch, run_serv
         assert status == 503
         assert "capacity" in body["error"]
         assert len(database.list_tool_runs()) == 2
-        service = web_ui.RUN_SERVICE
+        service = server.run_service
         assert service.cancel(first["id"])
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
