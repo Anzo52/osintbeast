@@ -379,6 +379,11 @@ def test_saved_views_redact_legacy_values_without_rewriting_them(
             "Found [redacted] and person+tagger@example.com",
         ),
         (
+            "alice@example.com",
+            "Found alice%40example.com and alice@example.com",
+            "Found [redacted] and [redacted]",
+        ),
+        (
             "https://example.test/a/b",
             "found https%3A//example.test/a%2Fb in a response",
             "found [redacted] in a response",
@@ -434,6 +439,47 @@ def test_redacted_saved_results_remain_bounded_after_redaction(tmp_path, monkeyp
 
     row = database.list_tool_results(max_result_text_chars=17, redact_sensitive=True)[0]
     assert row[3] == "[red… [truncated]"
+
+
+@pytest.mark.parametrize(
+    ("query", "result"),
+    [
+        ("private@example.com", "start private@example.com and more"),
+        ("alice@example.com", "start alice%40example.com and more"),
+    ],
+)
+def test_redacted_bounded_reads_hide_sensitive_values_crossing_the_limit(
+    tmp_path, monkeypatch, query, result
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "bounded-redaction.db"))
+    database.setup_database()
+    database.save_tool_result("holehe", query, result)
+
+    storage = database._get_storage()
+    list_results = storage.list_tool_results
+    calls = []
+
+    def bounded_list_results(
+        limit, max_result_text_chars=None, *, include_truncation_status=False
+    ):
+        calls.append((limit, max_result_text_chars, include_truncation_status))
+        return list_results(
+            limit,
+            max_result_text_chars,
+            include_truncation_status=include_truncation_status,
+        )
+
+    monkeypatch.setattr(storage, "list_tool_results", bounded_list_results)
+    row = database.list_tool_results(
+        limit=1, max_result_text_chars=22, redact_sensitive=True
+    )[0]
+
+    assert calls == [(1, 22, True)]
+    assert row[3] == "start … [truncated]"
+    assert query not in row[3]
+    raw_prefix = list_results(1, 22, include_truncation_status=True)[0]
+    assert len(raw_prefix[3]) <= 22
+    assert raw_prefix[5] is True
 
 
 def test_list_tool_runs_filters_and_uses_stable_cursor_pagination(

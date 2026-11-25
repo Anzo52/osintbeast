@@ -161,6 +161,35 @@ def test_mysql_result_listing_keeps_full_text_within_limit(mysql_storage, monkey
     ]
 
 
+def test_mysql_result_listing_returns_bounded_raw_prefix_for_redaction(
+    mysql_storage, monkeypatch
+):
+    storage, engine = mysql_storage
+    execute = engine.connection.exec_driver_sql
+
+    def execute_with_result(statement, parameters=()):
+        if "SUBSTR(resultText" in statement:
+            engine.connection.statements.append((statement, parameters))
+            return FakeResult(
+                [(1, "holehe", "alice@example.com", "alice%40exampl", 1, "created")]
+            )
+        return execute(statement, parameters)
+
+    monkeypatch.setattr(engine.connection, "exec_driver_sql", execute_with_result)
+    assert storage.list_tool_results(
+        20, max_result_text_chars=14, include_truncation_status=True
+    ) == [
+        (1, "holehe", "alice@example.com", "alice%40exampl", "created", True)
+    ]
+    statement, parameters = engine.connection.statements[-1]
+    assert "SUBSTR(resultText, 1, %s)" in statement
+    assert parameters == (14, 15, 20)
+    monkeypatch.setattr(database, "_get_storage", lambda: storage)
+    assert database.list_tool_results(
+        20, max_result_text_chars=14, redact_sensitive=True
+    )[0][3] == "… [truncated]"
+
+
 @pytest.mark.parametrize(
     ("statement", "expected"),
     [

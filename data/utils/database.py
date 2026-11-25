@@ -93,6 +93,42 @@ def redact_sensitive_text(text: str | None, sensitive_value: str) -> str | None:
     return pattern.sub("[redacted]", text)
 
 
+def _trailing_sensitive_prefix_length(text: str, sensitive_value: str) -> int:
+    if not sensitive_value or sensitive_value == "[redacted]":
+        return 0
+    representations = []
+    max_length = 0
+    for char in sensitive_value:
+        encoded = "".join(f"%{byte:02X}" for byte in char.encode("utf-8"))
+        options = [char, encoded]
+        if char == " ":
+            options.append("+")
+        representations.append(options)
+        max_length += max(map(len, options))
+
+    partial_start = len(text)
+    for start in range(max(0, len(text) - max_length), len(text)):
+        positions = {start}
+        for index, options in enumerate(representations):
+            next_positions = set()
+            for position in positions:
+                if position == len(text):
+                    if index < len(representations):
+                        partial_start = min(partial_start, start)
+                    continue
+                remaining = len(text) - position
+                for option in options:
+                    if len(option) > remaining:
+                        if option[:remaining].casefold() == text[position:].casefold():
+                            partial_start = min(partial_start, start)
+                    elif text[position:position + len(option)].casefold() == option.casefold():
+                        next_positions.add(position + len(option))
+            positions = next_positions
+            if not positions:
+                break
+    return len(text) - partial_start
+
+
 def _get_storage() -> Storage:
     database_url = os.environ.get("OSINTBEAST_DATABASE_URL")
     if database_url:
@@ -164,14 +200,31 @@ def list_tool_results(
     ):
         raise ValueError("max_result_text_chars must be a positive integer")
     if redact_sensitive and max_result_text_chars is not None:
-        rows = _get_storage().list_tool_results(limit)
+        rows = _get_storage().list_tool_results(
+            limit,
+            max_result_text_chars,
+            include_truncation_status=True,
+        )
     else:
         rows = _get_storage().list_tool_results(limit, max_result_text_chars)
     if not redact_sensitive:
         return rows
 
     def redact_result(row):
-        result = redact_sensitive_text(row[3], row[2])
+        source_truncated = (
+            max_result_text_chars is not None
+            and len(row) > 5
+            and row[5]
+        )
+        raw_result = row[3]
+        if source_truncated and raw_result is not None:
+            partial_length = _trailing_sensitive_prefix_length(raw_result, row[2])
+            if partial_length:
+                raw_result = raw_result[:-partial_length]
+        result = redact_sensitive_text(raw_result, row[2])
+        if source_truncated and result is not None:
+            marker = "… [truncated]"[:max_result_text_chars]
+            return result[:max_result_text_chars - len(marker)] + marker
         if (
             result is not None
             and max_result_text_chars is not None
@@ -187,7 +240,7 @@ def list_tool_results(
             row[1],
             "[redacted]",
             redact_result(row),
-            *row[4:],
+            *row[4:5],
         )
         for row in rows
     ]
