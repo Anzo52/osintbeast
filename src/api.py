@@ -128,7 +128,7 @@ def create_app(token):
             if run_id > 9223372036854775807:
                 return _error(start_response, "404 Not Found", "not_found", "Run not found.")
             try:
-                row = database.get_tool_run(run_id)
+                row = database.get_tool_run(run_id, redact_sensitive=True)
             except database.DATABASE_ERRORS:
                 return _error(start_response, "500 Internal Server Error", "storage_error",
                               "Could not retrieve the run.")

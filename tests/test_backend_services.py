@@ -25,12 +25,12 @@ def test_backend_services_return_recent_runs_and_saved_results(initialized_db):
     assert runs
     assert runs[0].run_id == run_id
     assert runs[0].tool_name == "holehe"
-    assert runs[0].query_text == "person@example.com"
+    assert runs[0].query_text == "[redacted]"
     assert runs[0].status == "success"
     assert runs[0].error_text is None
     assert results
     assert results[0].tool_name == "holehe"
-    assert results[0].query_text == "person@example.com"
+    assert results[0].query_text == "[redacted]"
     assert results[0].result_text == "output"
     assert isinstance(runs[0], backend_services.RecentToolRun)
     assert isinstance(results[0], backend_services.SavedToolResult)
