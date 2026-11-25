@@ -370,14 +370,25 @@ def test_saved_views_redact_legacy_records(tmp_path, monkeypatch, capsys, choice
             "INSERT INTO ToolRuns (toolName, queryText, status, errorText) "
             "VALUES ('holehe', 'private@example.com', 'failed', 'private@example.com error')"
         )
-    choices = iter((choice, 6))
+        run_id = conn.execute(
+            "SELECT runID FROM ToolRuns ORDER BY runID DESC LIMIT 1"
+        ).fetchone()[0]
+    choices = iter((choice, 2, 6) if choice == 0 else (choice, 6))
     monkeypatch.setattr(main, "_choose_option", lambda *args: next(choices))
+    monkeypatch.setattr("builtins.input", lambda *_args: str(run_id))
 
     main.query_menu()
 
     output = capsys.readouterr().out
     assert "private@example.com" not in output
-    assert "[redacted]" in output
+    assert "holehe" in output
+    if choice == 0:
+        assert f"Run {run_id} | holehe" in output
+        assert "input='[redacted]'" in output
+        assert "Error: '[redacted] error'" in output
+    else:
+        assert "SavedToolResult" in output
+        assert "result_text='[redacted] result'" in output
 
 
 def test_saved_view_does_not_query_if_initialization_fails(monkeypatch, capsys):

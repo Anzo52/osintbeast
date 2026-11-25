@@ -84,8 +84,8 @@ def redact_sensitive_text(text: str | None, sensitive_value: str) -> str | None:
             representations.append(r"\+")
         alternatives.append(f"(?:{'|'.join(representations)})")
     pattern = re.compile(
-        rf"(?<![A-Za-z0-9_.+-])(?<!\[){''.join(alternatives)}"
-        r"(?![A-Za-z0-9_.+-])(?!\])",
+        rf"(?<![A-Za-z0-9_.+-])(?<!%[0-9A-Fa-f]{{2}}){''.join(alternatives)}"
+        r"(?![A-Za-z0-9_+-]|%[0-9A-Fa-f]{2}|\.(?=[A-Za-z0-9_.+-]))",
         re.IGNORECASE,
     )
     return pattern.sub("[redacted]", text)
@@ -153,7 +153,7 @@ def list_tool_results(
     limit: int = 100, max_result_text_chars: int | None = None, *,
     redact_sensitive: bool = False,
 ) -> list[tuple[Any, ...]]:
-    """Return saved results, optionally truncating result text in storage."""
+    """Return saved results, optionally redacting and truncating result text."""
     _validate_list_limit(limit)
     if max_result_text_chars is not None and (
         not isinstance(max_result_text_chars, int)
@@ -161,22 +161,37 @@ def list_tool_results(
         or max_result_text_chars < 1
     ):
         raise ValueError("max_result_text_chars must be a positive integer")
-    if max_result_text_chars is None:
+    if redact_sensitive and max_result_text_chars is not None:
         rows = _get_storage().list_tool_results(limit)
     else:
         rows = _get_storage().list_tool_results(limit, max_result_text_chars)
+    if redact_sensitive:
+        rows = [
+            (
+                row[0],
+                row[1],
+                "[redacted]",
+                redact_sensitive_text(row[3], row[2]),
+                *row[4:],
+            )
+            for row in rows
+        ]
     if not redact_sensitive:
         return rows
-    return [
-        (
-            row[0],
-            row[1],
-            "[redacted]",
-            redact_sensitive_text(row[3], row[2]),
-            *row[4:],
-        )
-        for row in rows
-    ]
+    if max_result_text_chars is not None and redact_sensitive:
+        marker = "… [truncated]"[:max_result_text_chars]
+        prefix_length = max(0, max_result_text_chars - len(marker))
+        rows = [
+            (
+                *row[:3],
+                None if row[3] is None else row[3][:prefix_length] + (
+                    marker if len(row[3]) > prefix_length else ""
+                ),
+                *row[4:],
+            )
+            for row in rows
+        ]
+    return rows
 
 
 def _validate_list_limit(limit: int) -> None:
