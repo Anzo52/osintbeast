@@ -20,8 +20,12 @@ python -m pip install -e ".[sherlock]"
 ```
 
 Select **Run Holehe Check**, **Run Maigret Check**, **Run Helix Check**, or
-**Run Sherlock Check** in the menu. Email and username entry is hidden and
-requires a terminal that can disable echo; otherwise the check is cancelled.
+**Run Sherlock Check** in the menu. Email and username entry is hidden by
+default and requires a terminal that can disable echo; otherwise the check is
+cancelled. To opt in to visible entry, start the menu with
+`osintbeast --show-target-input` (or `python src/main.py --show-target-input`).
+Typed targets are then echoed and may be seen by others or retained in terminal
+scrollback or recordings.
 Sherlock uses its bundled site list and
 skips sites marked NSFW. It sends a username to many public sites; each request
 has a 15-second timeout, with a 300-second overall limit. At most two Sherlock
@@ -43,7 +47,8 @@ completed, not that every site was reachable or every match is confirmed.
 
 ## Run records and results
 
-The CLI validates input before recording a run and uses a non-echoing prompt.
+The CLI validates input before recording a run and uses a non-echoing prompt
+unless visible target entry was explicitly enabled.
 Holehe, Maigret, Helix, and Sherlock receive sensitive input through their
 in-process Python APIs, not process arguments. Their run records use a
 `[redacted]` query; direct and URL-encoded occurrences of the input are also
