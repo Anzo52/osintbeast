@@ -5,6 +5,7 @@ import sys
 import tempfile
 import zipfile
 import zlib
+from pathlib import Path
 
 from simple_term_menu import TerminalMenu
 
@@ -188,19 +189,18 @@ def query_menu():
 def show_run_history(tool_name=None, status=None, offset=0, cursor=None):
     try:
         runs = list_tool_runs(
-            limit=20, offset=offset, tool_name=tool_name, status=status,
+            limit=21, offset=offset, tool_name=tool_name, status=status,
             cursor=cursor, redact_sensitive=True,
         )
     except (OSError, *database.DATABASE_ERRORS) as exc:
         print(f"Run history query failed: {exc}")
-        return []
+        return None
     except ValueError as exc:
         print(f"Invalid history filter: {exc}")
-        return []
+        return None
     if not runs:
         print("No matching runs.")
-        return []
-    for run_id, tool, query_text, run_status, started, finished, _error in runs:
+    for run_id, tool, query_text, run_status, started, finished, _error in runs[:20]:
         summary = query_text[:80] + ("…" if len(query_text) > 80 else "")
         print(
             f"Run {run_id} | {tool} | input={summary!r} | {run_status} | "
@@ -243,23 +243,32 @@ def _parse_run_ids(value):
 
 
 def _write_export_file(output_path, content):
-    destination = os.path.abspath(output_path)
-    directory = os.path.dirname(destination)
-    prefix = f".{os.path.basename(destination)}."
+    destination = Path(output_path).expanduser()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    prefix = f".{destination.name}."
     descriptor, temporary_path = tempfile.mkstemp(
-        prefix=prefix, suffix=".tmp", dir=directory
+        prefix=prefix, suffix=".tmp", dir=destination.parent
     )
     try:
+        os.chmod(temporary_path, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8") as export_file:
+            descriptor = None
             export_file.write(content + "\n")
             export_file.flush()
             os.fsync(export_file.fileno())
         os.link(temporary_path, destination)
     finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
         try:
             os.unlink(temporary_path)
         except FileNotFoundError:
             pass
+        except OSError as exc:
+            print(f"Warning: could not remove temporary export {temporary_path}: {exc}")
 
 
 def export_selected_runs():
@@ -293,7 +302,7 @@ def export_selected_runs():
 def run_history_menu():
     tool_name = None
     status = None
-    page_cursors = [None]
+    cursors = [None]
     current_runs = show_run_history(tool_name, status)
     options = [
         "Refresh history",
@@ -309,28 +318,19 @@ def run_history_menu():
         if choice is None or choice == 6:
             return
         if choice == 0:
-            current_runs = show_run_history(
-                tool_name, status, cursor=page_cursors[-1]
-            )
+            runs = show_run_history(tool_name, status, cursor=cursors[-1])
+            if runs is not None:
+                current_runs = runs
         elif choice == 1:
             tool_value = input("Tool name (blank for any): ").strip()
             status_value = input(
                 "Status (running, success, failed, timed_out; blank for any): "
             ).strip()
-            tool_name = tool_value or None
-            status = status_value or None
-            page_cursors = [None]
-            try:
-                list_tool_runs(
-                    limit=1, tool_name=tool_name, status=status
-                )
-            except ValueError as exc:
-                print(f"Invalid history filter: {exc}")
-                tool_name = status = None
-            except (OSError, *database.DATABASE_ERRORS) as exc:
-                print(f"Run history query failed: {exc}")
-                continue
-            current_runs = show_run_history(tool_name, status)
+            runs = show_run_history(tool_value or None, status_value or None)
+            if runs is not None:
+                tool_name, status = tool_value or None, status_value or None
+                cursors = [None]
+                current_runs = runs
         elif choice == 2:
             value = input("Run ID to inspect: ").strip()
             try:
@@ -338,17 +338,22 @@ def run_history_menu():
             except ValueError:
                 print("Enter a valid run ID.")
         elif choice == 3:
-            if len(current_runs) == 20:
-                page_cursors.append(current_runs[-1][0])
-                current_runs = show_run_history(
-                    tool_name, status, cursor=page_cursors[-1]
-                )
+            if current_runs and len(current_runs) > 20:
+                cursor = current_runs[19][0]
+                runs = show_run_history(tool_name, status, cursor=cursor)
+                if runs:
+                    cursors.append(cursor)
+                    current_runs = runs
+            else:
+                print("No next page.")
         elif choice == 4:
-            if len(page_cursors) > 1:
-                page_cursors.pop()
-                current_runs = show_run_history(
-                    tool_name, status, cursor=page_cursors[-1]
-                )
+            if len(cursors) > 1:
+                runs = show_run_history(tool_name, status, cursor=cursors[-2])
+                if runs is not None:
+                    cursors.pop()
+                    current_runs = runs
+            else:
+                print("No previous page.")
         elif choice == 5:
             export_selected_runs()
 

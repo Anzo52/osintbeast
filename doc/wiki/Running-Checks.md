@@ -77,7 +77,8 @@ in the database. Sensitive input is redacted before storage, so opted-in
 exports may still contain other sensitive output or error text; store and share
 them accordingly. On POSIX, exports are created with owner-only permissions.
 Sensitive exports are disabled on Windows because file permissions inherit
-from the destination directory. Exports will not overwrite an existing file.
+from the destination directory; redacted exports remain available. Exports will
+not overwrite an existing file.
 
 Inputs, results, and errors can contain sensitive data. They are stored in
 plain text in the local database; restrict its permissions and delete records
