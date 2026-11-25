@@ -26,6 +26,7 @@ from tool_runs import (
 )
 
 _LOG = logging.getLogger(__name__)
+_SHUTDOWN_TIMEOUT_SECONDS = 5
 _TOOLS = {
     "holehe": (validate_email, run_holehe),
     "maigret": (validate_maigret, run_maigret),
@@ -287,25 +288,39 @@ class BackgroundRuns:
             return True
 
     def close(self):
-        with self._lock:
-            self._closed = True
-            jobs = [
-                (job, self._job_locks.get(run_id))
-                for run_id, job in self._jobs.items()
-            ]
+        deadline = time.monotonic() + _SHUTDOWN_TIMEOUT_SECONDS
+        self._closed = True
+        jobs = []
+        if not self._lock.acquire(timeout=max(0, deadline - time.monotonic())):
+            _LOG.warning("Background run shutdown wait exceeded its time limit")
+        else:
+            try:
+                jobs = [
+                    (job, self._job_locks.get(run_id) or self._lock)
+                    for run_id, job in self._jobs.items()
+                ]
+            finally:
+                self._lock.release()
         for (cancel, _, completed), state_lock in jobs:
-            if state_lock is None:
-                state_lock = self._lock
-            with state_lock:
-                if not completed.is_set():
-                    cancel.set()
+            if not state_lock.acquire(timeout=max(0, deadline - time.monotonic())):
+                _LOG.warning("Background run shutdown wait exceeded its time limit")
+            else:
+                try:
+                    if not completed.is_set():
+                        cancel.set()
+                finally:
+                    state_lock.release()
         for (_, thread, _), _ in jobs:
-            thread.join()
+            thread.join(timeout=max(0, deadline - time.monotonic()))
+            if thread.is_alive():
+                _LOG.warning("Background run shutdown wait exceeded its time limit")
         self._retry_stop.set()
         self._retry_wakeup.set()
         retry_thread = self._retry_thread
         if retry_thread is not None:
-            retry_thread.join()
+            retry_thread.join(timeout=max(0, deadline - time.monotonic()))
+            if retry_thread.is_alive():
+                _LOG.warning("Background run shutdown wait exceeded its time limit")
 
     @staticmethod
     def _persist(run_id, status, value):
@@ -323,7 +338,7 @@ class BackgroundRuns:
         state_lock = self._job_locks.get(run_id, self._lock)
 
         try:
-            if not cancel.is_set():
+            if not cancel.is_set() and not self._closed:
                 receiver, sender = self._context.Pipe(duplex=False)
                 deadline = time.monotonic() + self.limits.timeout_seconds
                 process = self._context.Process(
@@ -336,12 +351,12 @@ class BackgroundRuns:
                 sender = None
                 while True:
                     with state_lock:
-                        if cancel.is_set():
+                        if cancel.is_set() or self._closed:
                             break
                     remaining = deadline - time.monotonic()
                     ready = receiver.poll(max(0, min(remaining, 0.05)))
                     with state_lock:
-                        if cancel.is_set():
+                        if cancel.is_set() or self._closed:
                             break
                     if ready:
                         valid_payload = False
@@ -367,11 +382,11 @@ class BackgroundRuns:
                                     "utf-8", errors="replace"
                                 )
                         with state_lock:
-                            if valid_payload or not cancel.is_set():
+                            if valid_payload or (not cancel.is_set() and not self._closed):
                                 completed.set()
                         break
                     with state_lock:
-                        if cancel.is_set():
+                        if cancel.is_set() or self._closed:
                             break
                         if remaining <= 0:
                             status, value = (
@@ -391,7 +406,7 @@ class BackgroundRuns:
         except Exception:
             _LOG.exception("Background worker could not be supervised")
             with state_lock:
-                if not cancel.is_set():
+                if not cancel.is_set() and not self._closed:
                     completed.set()
         finally:
             if process is not None:
@@ -405,7 +420,7 @@ class BackgroundRuns:
             if sender is not None:
                 sender.close()
             with state_lock:
-                if cancel.is_set() and not completed.is_set():
+                if (cancel.is_set() or self._closed) and not completed.is_set():
                     status, value = "failed", "Run cancelled."
                 completed.set()
             with self._lock:
