@@ -1,6 +1,5 @@
 import json
 import logging
-import re
 from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
@@ -16,21 +15,7 @@ class UnexpectedToolError(RuntimeError):
 
 def _redact_sensitive_value(text: str, sensitive_value: str) -> str:
     """Redact whole input values, including partially URL-encoded forms."""
-    if not sensitive_value:
-        return text
-    alternatives = []
-    for char in sensitive_value:
-        encoded = "".join(f"%{byte:02X}" for byte in char.encode("utf-8"))
-        representations = [re.escape(char), re.escape(encoded)]
-        if char == " ":
-            representations.append(r"\+")
-        alternatives.append(f"(?:{'|'.join(representations)})")
-    pattern = re.compile(
-        rf"(?<![A-Za-z0-9_.-])(?<!\[){''.join(alternatives)}"
-        r"(?![A-Za-z0-9_.-])(?!\])",
-        re.IGNORECASE,
-    )
-    return pattern.sub("[redacted]", text)
+    return database.redact_sensitive_text(text, sensitive_value)
 
 
 def redact_sensitive_data(value, sensitive_value: str):
@@ -145,13 +130,9 @@ def _execute_tool_run(
     sensitive_input: bool,
 ) -> tuple[str, str]:
     """Execute and persist a run using an existing run identifier."""
-    try:
-        return _run_tool_and_persist(
-            tool_name, query_text, runner, run_id, sensitive_input=sensitive_input
-        )
-    except KeyboardInterrupt:
-        _mark_run_interrupted(run_id)
-        raise
+    return _run_tool_and_persist(
+        tool_name, query_text, runner, run_id, sensitive_input=sensitive_input
+    )
 
 
 def _run_tool_and_persist(
