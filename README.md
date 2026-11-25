@@ -326,9 +326,10 @@ group is killed as well; on Windows, this watchdog stops only the worker.
 Tool failures and unexpected worker exits are recorded as failures. Call
 `close()` during orderly application shutdown.
 If saving an outcome fails, the service retains it in memory and keeps its
-capacity slot reserved. Calling `status(run_id)` retries the write and raises
-`RuntimeError` if it still cannot be saved; retry after restoring database
-access. Pending outcomes are lost if the application process exits.
+capacity slot reserved while retrying the write independently of status
+requests. Calling `status(run_id)` also retries immediately and raises
+`RuntimeError` if the outcome still cannot be saved. Pending outcomes are lost
+if the application process exits.
 
 These limits apply per service instance, not across web server processes or
 hosts. Use a single application process or an external coordinator to enforce
@@ -354,7 +355,10 @@ before each run. Runs execute through the existing validators, integrations,
 and persistence service, and their status and saved output are available in
 the recent-runs view. At most two browser runs can be active at once; additional
 requests receive HTTP 503 until capacity is available. Holehe input is redacted
-in stored records and output.
+in stored records and output. Submissions accept an `Idempotency-Key`; retries
+with the same key and input return the existing run, while reusing a key for a
+different run returns HTTP 409. Keys are retained for the lifetime of the
+service.
 
 Configure separate operator and viewer tokens before starting the server:
 

@@ -1,5 +1,6 @@
 import multiprocessing
 import os
+import sqlite3
 import threading
 import time
 from types import SimpleNamespace
@@ -260,6 +261,90 @@ def test_persistence_failure_is_reported_and_retried(service, monkeypatch):
     assert service.status(run_id)["status"] == "success"
     assert len(database.list_tool_results()) == 1
     assert wait_for_run(service, service.submit("maigret", "another"))["status"] == "success"
+
+
+def test_pending_outcome_retries_without_status_requests_after_stale_reconciliation(
+    service, monkeypatch
+):
+    finish = database.finish_tool_run
+    monkeypatch.setattr(
+        database, "finish_tool_run",
+        Mock(side_effect=sqlite3.OperationalError("database unavailable")),
+    )
+    run_id = service.submit("maigret", "user")
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        with service._lock:
+            if run_id in service._pending:
+                break
+        time.sleep(0.01)
+    else:
+        pytest.fail("Run outcome was not queued for retry")
+
+    with database.connect_db() as conn:
+        conn.execute(
+            "UPDATE ToolRuns SET startedAt = datetime('now', '-11 minutes') "
+            "WHERE runID = ?",
+            (run_id,),
+        )
+    assert database.reconcile_stale_tool_runs() == 1
+    monkeypatch.setattr(database, "finish_tool_run", finish)
+
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        run = database.get_tool_run(run_id)
+        with service._lock:
+            pending = run_id in service._pending
+        if run[3] == "success" and not pending:
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("Pending outcome was not persisted without a status request")
+
+    assert run[4] == "output"
+    assert len(database.list_tool_results()) == 1
+
+
+def test_already_committed_completion_retry_does_not_duplicate_result(
+    service, monkeypatch
+):
+    finish = database.finish_tool_run
+    calls = 0
+
+    def commit_then_lose_acknowledgement(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        finish(*args, **kwargs)
+        if calls == 1:
+            raise sqlite3.OperationalError("acknowledgement lost")
+
+    monkeypatch.setattr(
+        database, "finish_tool_run", commit_then_lose_acknowledgement
+    )
+    run_id = service.submit("maigret", "user")
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        with service._lock:
+            pending = run_id in service._pending
+        if not pending and database.get_tool_run(run_id)[3] == "success":
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("Committed completion was not safely retried")
+
+    assert calls >= 2
+    assert len(database.list_tool_results()) == 1
+
+
+def test_submission_idempotency_is_scoped_to_key_and_input(service):
+    run_id = service.submit("maigret", "user", "submission-1")
+
+    assert service.submit("maigret", " user ", "submission-1") == run_id
+    with pytest.raises(background_runs.IdempotencyConflict):
+        service.submit("maigret", "other", "submission-1")
+    with pytest.raises(background_runs.IdempotencyConflict):
+        service.submit("sherlock", "user", "submission-1")
+    assert len(database.list_tool_runs()) == 1
 
 
 @pytest.mark.parametrize(
