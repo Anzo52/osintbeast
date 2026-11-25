@@ -808,6 +808,8 @@ def test_maigret_menu_action_dispatches_username(monkeypatch):
 def test_history_filter_renders_filtered_page(initialized_db, monkeypatch, capsys):
     matching_id = database.start_tool_run("holehe", "private@example.test")
     database.finish_tool_run(matching_id, "success", result_text="match")
+    wrong_status_id = database.start_tool_run("holehe", "other")
+    database.finish_tool_run(wrong_status_id, "failed", error_text="error")
     other_id = database.start_tool_run("maigret", "different")
     database.finish_tool_run(other_id, "failed", error_text="error")
     choices = iter((1, 6))
@@ -819,7 +821,33 @@ def test_history_filter_renders_filtered_page(initialized_db, monkeypatch, capsy
 
     output = capsys.readouterr().out
     assert output.count(f"Run {matching_id} | holehe") == 2
+    assert output.count(f"Run {wrong_status_id} | holehe") == 1
     assert output.count(f"Run {other_id} | maigret") == 1
+
+
+def test_export_expands_home_and_creates_parent(initialized_db, monkeypatch, tmp_path):
+    run_id = database.start_tool_run("holehe", "private")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    inputs = iter((str(run_id), "~/nested/selected.json", "no"))
+    monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+
+    main.export_selected_runs()
+
+    assert (tmp_path / "nested" / "selected.json").is_file()
+
+
+def test_export_reports_home_expansion_failure(initialized_db, monkeypatch, capsys):
+    run_id = database.start_tool_run("holehe", "private")
+    inputs = iter((str(run_id), "~/selected.json", "no"))
+    monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+    monkeypatch.setattr(
+        main.Path, "expanduser", Mock(side_effect=RuntimeError("home unavailable"))
+    )
+
+    main.export_selected_runs()
+
+    assert "Could not export runs: home unavailable" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
@@ -862,10 +890,13 @@ def test_sensitive_export_is_disabled_on_windows(
     output_path = tmp_path / "runs.json"
     inputs = iter((str(run_id), str(output_path), "yes"))
     monkeypatch.setattr("builtins.input", lambda prompt: next(inputs))
+    serialize = Mock()
+    monkeypatch.setattr(main, "export_tool_runs_json", serialize)
     monkeypatch.setattr(main.os, "name", "nt")
 
     main.export_selected_runs()
 
+    serialize.assert_not_called()
     assert not output_path.exists()
     assert "Sensitive exports are disabled on Windows" in capsys.readouterr().out
 

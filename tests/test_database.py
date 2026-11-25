@@ -407,9 +407,12 @@ def test_list_tool_runs_filters_and_uses_stable_cursor_pagination(
         limit=2, before_run_id=first_page[-1][0]
     )
     assert [row[0] for row in next_page] == run_ids[1::-1]
-    assert database.list_tool_runs(
+    failed_id = database.start_tool_run("holehe", "different status")
+    database.finish_tool_run(failed_id, "failed", error_text="error")
+    filtered_runs = database.list_tool_runs(
         tool_name="holehe", status="success"
-    )[0][0] == run_ids[2]
+    )
+    assert [row[0] for row in filtered_runs] == [run_ids[2], run_ids[0]]
     assert database.list_tool_runs(
         tool_name="holehe' OR 1=1 --"
     ) == []

@@ -5,6 +5,7 @@ import sys
 import tempfile
 import zipfile
 import zlib
+from pathlib import Path
 
 from simple_term_menu import TerminalMenu
 
@@ -243,11 +244,11 @@ def _parse_run_ids(value):
 
 
 def _write_export_file(output_path, content):
-    destination = os.path.abspath(output_path)
-    directory = os.path.dirname(destination)
-    prefix = f".{os.path.basename(destination)}."
+    destination = Path(output_path).expanduser()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    prefix = f".{destination.name}."
     descriptor, temporary_path = tempfile.mkstemp(
-        prefix=prefix, suffix=".tmp", dir=directory
+        prefix=prefix, suffix=".tmp", dir=destination.parent
     )
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as export_file:
@@ -284,7 +285,7 @@ def export_selected_runs():
             run_ids, include_sensitive=include_sensitive
         )
         _write_export_file(output_path, content)
-    except (OSError, ValueError, *database.DATABASE_ERRORS) as exc:
+    except (OSError, RuntimeError, ValueError, *database.DATABASE_ERRORS) as exc:
         print(f"Could not export runs: {exc}")
         return
     print(f"Exported {len(run_ids)} run(s) to {output_path}.")
