@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
+import checkers
 import data.utils.database as database
 import main
 import menu_utils
@@ -40,6 +41,48 @@ def test_main_menu_ignores_cancelled_or_invalid_choices(monkeypatch, choice):
     main.main_menu()
 
     action.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("choice", "runner_name", "prompt"),
+    [
+        (4, "run_holehe_check", "Enter the email to check: "),
+        (6, "run_maigret_check", "Enter the username to check: "),
+        (7, "run_helix_check", "Enter the username to check: "),
+        (8, "run_sherlock_check", "Enter the username to check: "),
+    ],
+)
+def test_visible_target_flag_reaches_each_menu_check(monkeypatch, choice, runner_name, prompt):
+    choices = iter([choice, 9])
+
+    class FakeMenu:
+        def __init__(self, options, title):
+            pass
+
+        def show(self):
+            return next(choices)
+
+    runner = Mock()
+    reader = Mock(return_value=" target ")
+    monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
+    monkeypatch.setattr(main, runner_name, runner)
+    monkeypatch.setattr("builtins.input", reader)
+    monkeypatch.setattr(checkers, "getpass", Mock(side_effect=AssertionError("unexpected getpass")))
+
+    with pytest.raises(SystemExit) as exc:
+        main.cli(["--show-target-input"])
+
+    assert exc.value.code == 0
+    reader.assert_called_once_with(prompt)
+    runner.assert_called_once_with("target")
+
+
+def test_visible_target_flag_rejects_direct_commands(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main.cli(["--show-target-input", "list-tools"])
+
+    assert exc.value.code == 2
+    assert "only available for the interactive menu" in capsys.readouterr().err
 
 
 def test_menu_reports_initialization_failure(monkeypatch, capsys):
@@ -182,7 +225,7 @@ def test_helix_menu_action_dispatches_username(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr("builtins.input", lambda prompt: " @user ")
+    monkeypatch.setattr(checkers, "getpass", lambda prompt: " @user ")
     monkeypatch.setattr(main, "run_helix_check", runner)
 
     main.main_menu()
@@ -200,7 +243,7 @@ def test_holehe_menu_action_dispatches_email(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr("builtins.input", lambda prompt: " person@example.com ")
+    monkeypatch.setattr(checkers, "getpass", lambda prompt: " person@example.com ")
     monkeypatch.setattr(main, "run_holehe_check", runner)
 
     main.main_menu()
@@ -218,7 +261,7 @@ def test_sherlock_menu_action_dispatches_username(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr("builtins.input", lambda prompt: " user ")
+    monkeypatch.setattr(checkers, "getpass", lambda prompt: " user ")
     monkeypatch.setattr(main, "run_sherlock_check", runner)
 
     main.main_menu()
@@ -327,14 +370,25 @@ def test_saved_views_redact_legacy_records(tmp_path, monkeypatch, capsys, choice
             "INSERT INTO ToolRuns (toolName, queryText, status, errorText) "
             "VALUES ('holehe', 'private@example.com', 'failed', 'private@example.com error')"
         )
-    choices = iter((choice, 6))
+        run_id = conn.execute(
+            "SELECT runID FROM ToolRuns ORDER BY runID DESC LIMIT 1"
+        ).fetchone()[0]
+    choices = iter((choice, 2, 6) if choice == 0 else (choice, 6))
     monkeypatch.setattr(main, "_choose_option", lambda *args: next(choices))
+    monkeypatch.setattr("builtins.input", lambda *_args: str(run_id))
 
     main.query_menu()
 
     output = capsys.readouterr().out
     assert "private@example.com" not in output
-    assert "[redacted]" in output
+    assert "holehe" in output
+    if choice == 0:
+        assert f"Run {run_id} | holehe" in output
+        assert "input='[redacted]'" in output
+        assert "Error: '[redacted] error'" in output
+    else:
+        assert "SavedToolResult" in output
+        assert "result_text='[redacted] result'" in output
 
 
 def test_saved_view_does_not_query_if_initialization_fails(monkeypatch, capsys):
