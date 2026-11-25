@@ -498,6 +498,54 @@ def test_cli_rejects_invalid_username_with_accepted_format(monkeypatch, capsys):
     ("argv", "runner_name", "identifier"),
     [
         (["check-email", "-person@example.com"], "run_holehe_check", "-person@example.com"),
+        *[
+            (["check-username", tool, "-user"], f"run_{tool}_check", "-user")
+            for tool in ("maigret", "helix", "sherlock")
+        ],
+    ],
+)
+@pytest.mark.parametrize("help_flag", [None, "-h", "--help"])
+@pytest.mark.parametrize("use_sys_argv", [False, True])
+def test_cli_hyphen_identifiers_preserve_trailing_help(
+    monkeypatch, capsys, argv, runner_name, identifier, help_flag, use_sys_argv
+):
+    runner = Mock(return_value=0)
+    monkeypatch.setattr(main, runner_name, runner)
+    arguments = [*argv, *([help_flag] if help_flag else [])]
+    monkeypatch.setattr(main.sys, "argv", ["osintbeast", *arguments])
+    original = arguments.copy()
+
+    if help_flag:
+        with pytest.raises(SystemExit) as exc_info:
+            main.cli(None if use_sys_argv else arguments)
+        assert exc_info.value.code == 0
+        assert f"usage: osintbeast {argv[0]}" in capsys.readouterr().out
+        runner.assert_not_called()
+    else:
+        assert main.cli(None if use_sys_argv else arguments) == 0
+        runner.assert_called_once_with(identifier)
+    assert arguments == original
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["check-email", "--", "--help"],
+        ["check-username", "maigret", "--", "--help"],
+    ],
+)
+def test_cli_explicit_end_of_options_preserves_literal_help(monkeypatch, argv):
+    runner = Mock(return_value=0)
+    runner_name = "run_holehe_check" if argv[0] == "check-email" else "run_maigret_check"
+    monkeypatch.setattr(main, runner_name, runner)
+
+    assert main.cli(argv) == 0
+    runner.assert_called_once_with("--help")
+
+
+@pytest.mark.parametrize(
+    ("argv", "runner_name", "identifier"),
+    [
         (["check-username", "maigret", "-user"], "run_maigret_check", "-user"),
     ],
 )
@@ -506,9 +554,7 @@ def test_cli_accepts_identifiers_starting_with_hyphen(
 ):
     runner = Mock(return_value=0)
     monkeypatch.setattr(main, runner_name, runner)
-
     assert main.cli(argv) == 0
-
     runner.assert_called_once_with(identifier)
 
 

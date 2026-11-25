@@ -297,7 +297,6 @@ def test_query_database_commits_state_changes(tmp_path, monkeypatch):
     assert database.query_database(
         "INSERT INTO Platforms (platform) VALUES (?)", ("committed",)
     ) == []
-
     assert database.query_database(
         "SELECT platform FROM Platforms WHERE platform = ?", ("committed",)
     ) == [("committed",)]
