@@ -131,6 +131,24 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
         server.server_close()
 
 
+def test_shutdown_marks_active_runs_failed(tmp_path, monkeypatch, run_service):
+    server, base_url = _server(tmp_path, monkeypatch, Mock())
+    try:
+        status, launched = _request(
+            f"{base_url}/api/runs",
+            {"tool": "sherlock", "input": "slow", "authorized": True},
+        )
+        assert status == 202
+        run_service.close()
+
+        run = database.get_tool_run(launched["id"])
+        assert run[3] == "failed"
+        assert run[5] == "Run cancelled."
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_web_run_views_redact_legacy_records_without_rewriting_them(
     tmp_path, monkeypatch
 ):

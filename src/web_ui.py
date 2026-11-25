@@ -42,6 +42,7 @@ def _is_loopback_host(host):
     except ValueError:
         return False
 
+
 RUN_SERVICE = BackgroundRuns()
 RUNNABLE_TOOLS = {
     "holehe": ("email", validate_email, lambda value: run_holehe(value)["output"]),
@@ -466,8 +467,8 @@ def serve(host="127.0.0.1", port=8000):
     except KeyboardInterrupt:
         pass
     finally:
-        server.server_close()
         RUN_SERVICE.close()
+        server.server_close()
 
 
 if __name__ == "__main__":

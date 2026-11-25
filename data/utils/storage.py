@@ -385,9 +385,10 @@ class MySQLStorage:
         query = self._mysql_placeholders(query, parameters)
         try:
             with self._get_engine().begin() as connection:
-                return self._normalize_rows(
-                    connection.exec_driver_sql(query, parameters).fetchall()
-                )
+                result = connection.exec_driver_sql(query, parameters)
+                if not getattr(result, "returns_rows", True):
+                    return []
+                return self._normalize_rows(result.fetchall())
         except Exception as exc:
             if exc.__class__.__module__.startswith("sqlalchemy"):
                 raise StorageError(str(exc)) from exc
