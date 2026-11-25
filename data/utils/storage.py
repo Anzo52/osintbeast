@@ -7,6 +7,8 @@ from sqlalchemy import MetaData, Table, create_engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine import URL
 
+_UNPERSISTED_RUN_ERROR = "Run outcome could not be persisted."
+
 
 class StorageError(Exception):
     """A backend-neutral storage error for application-level handling."""
@@ -243,10 +245,19 @@ class SQLiteStorage:
             cursor = conn.execute(
                 """UPDATE ToolRuns SET status = ?, resultText = ?, errorText = ?,
                    finishedAt = CURRENT_TIMESTAMP
-                   WHERE runID = ? AND status = 'running'""",
-                (status, result_text, error_text, run_id),
+                   WHERE runID = ? AND (
+                       status = 'running' OR
+                       (status = 'failed' AND errorText = ?)
+                   )""",
+                (status, result_text, error_text, run_id, _UNPERSISTED_RUN_ERROR),
             )
             if cursor.rowcount != 1:
+                row = conn.execute(
+                    "SELECT status, resultText, errorText FROM ToolRuns WHERE runID = ?",
+                    (run_id,),
+                ).fetchone()
+                if row == (status, result_text, error_text):
+                    return
                 raise ValueError("Run does not exist or is already finished.")
             if status == "success":
                 conn.execute(
@@ -590,10 +601,19 @@ class MySQLStorage:
                 result = connection.exec_driver_sql(
                     """UPDATE ToolRuns SET status = %s, resultText = %s,
                        errorText = %s, finishedAt = CURRENT_TIMESTAMP
-                       WHERE runID = %s AND status = 'running'""",
-                    (status, result_text, error_text, run_id),
+                       WHERE runID = %s AND (
+                           status = 'running' OR
+                           (status = 'failed' AND errorText = %s)
+                       )""",
+                    (status, result_text, error_text, run_id, _UNPERSISTED_RUN_ERROR),
                 )
                 if result.rowcount != 1:
+                    row = connection.exec_driver_sql(
+                        "SELECT status, resultText, errorText FROM ToolRuns WHERE runID = %s",
+                        (run_id,),
+                    ).fetchone()
+                    if row == (status, result_text, error_text):
+                        return
                     raise ValueError("Run does not exist or is already finished.")
                 if status == "success":
                     connection.exec_driver_sql(
