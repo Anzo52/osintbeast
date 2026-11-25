@@ -156,6 +156,17 @@ initialization does not rewrite legacy records. Saved run and result views
 redact queries and matching result or error text at read time; the database
 values remain unchanged. This does not repair incompatible existing tables.
 
+Redacted saved-result listings (including `/api/results`) use a default
+16,384-character result preview when no maximum is specified. SQLite and MySQL
+return bounded result prefixes and omit query text longer than 4,096 characters;
+those oversized-query results fail closed as `[redacted]`. Smaller explicit
+preview limits are supported. Truncated previews with ambiguous sensitive
+suffixes may be shorter than the limit: suffix matching has a linear work
+budget and conservatively omits the undecided window if that budget is exhausted.
+Listings with redaction disabled retain their existing uncapped behavior when
+no maximum is specified. SQL bounds data returned to the application, not the
+database engine's internal work inspecting large stored values.
+
 To use SQLite at a different location, set `OSINTBEAST_DB_PATH` before starting
 the application. For a source checkout, the default remains the repository-root
 `osintbeast.db`. For an installed package, the default is a per-user data
@@ -210,6 +221,13 @@ schema changes and use a MySQL-compatible client for custom SQL queries.
 
 Initialization errors are reported in the menu; check the path and permissions
 before retrying.
+
+The `query_database` helper is read-only; use explicit persistence helpers for
+writes. MySQL queries must start with `SELECT` or `WITH`; DDL and transaction
+control statements are rejected before execution. SQLite lock waits and MySQL
+connection, pool, and network waits are bounded to five seconds.
+Web UI shutdown waits at most five seconds for
+background cleanup and reports stalled cleanup rather than waiting indefinitely.
 
 ## Local API
 
@@ -338,6 +356,12 @@ capacity slot reserved while retrying the write independently of status
 requests. Calling `status(run_id)` also retries immediately and raises
 `RuntimeError` if the outcome still cannot be saved. Pending outcomes are lost
 if the application process exits.
+Idempotency keys for active runs are retained; completed-run keys are kept
+up to 1024 entries (or the configured concurrency limit), after which the
+oldest completed keys are evicted. Retrying an evicted key creates a new run.
+The browser retains an unacknowledged submission key and a salted input
+fingerprint in session storage across reloads, without storing the raw input;
+it clears the key when the server confirms the submission.
 If starting the supervisor fails and recording that failure also fails,
 `submit` raises `StartupPersistenceError` with a `run_id` attribute; retry
 `status(run_id)` after database access is restored. The browser API includes

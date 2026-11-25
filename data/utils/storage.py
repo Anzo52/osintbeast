@@ -8,6 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine import URL
 
 _UNPERSISTED_RUN_ERROR = "Run outcome could not be persisted."
+_DATABASE_TIMEOUT_SECONDS = 5
 
 
 class StorageError(Exception):
@@ -43,7 +44,12 @@ class Storage(Protocol):
     ) -> int: ...
 
     def list_tool_results(
-        self, limit: int, max_result_text_chars: Optional[int] = None
+        self,
+        limit: int,
+        max_result_text_chars: Optional[int] = None,
+        *,
+        include_truncation_status: bool = False,
+        max_query_text_chars: Optional[int] = None,
     ) -> list[tuple[Any, ...]]: ...
 
     def start_tool_run(self, tool_name: str, query_text: str) -> int: ...
@@ -88,7 +94,7 @@ class SQLiteStorage:
         db_path = Path(self.db_file)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._enforce_private_permissions()
-        conn = sqlite3.connect(self.db_file)
+        conn = sqlite3.connect(self.db_file, timeout=_DATABASE_TIMEOUT_SECONDS)
         self._enforce_private_permissions()
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
@@ -123,7 +129,10 @@ class SQLiteStorage:
         db_path = Path(self.db_file)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._enforce_private_permissions()
-        engine = create_engine(URL.create("sqlite", database=str(db_path.resolve())))
+        engine = create_engine(
+            URL.create("sqlite", database=str(db_path.resolve())),
+            connect_args={"timeout": _DATABASE_TIMEOUT_SECONDS},
+        )
         try:
             with engine.begin() as connection:
                 connection.exec_driver_sql("PRAGMA foreign_keys = ON")
@@ -165,31 +174,97 @@ class SQLiteStorage:
             return cursor.lastrowid
 
     def list_tool_results(
-        self, limit: int, max_result_text_chars: Optional[int] = None
+        self,
+        limit: int,
+        max_result_text_chars: Optional[int] = None,
+        *,
+        include_truncation_status: bool = False,
+        max_query_text_chars: Optional[int] = None,
     ) -> list[tuple[Any, ...]]:
+        if max_query_text_chars is not None and (
+            not isinstance(max_query_text_chars, int)
+            or isinstance(max_query_text_chars, bool)
+            or max_query_text_chars < 1
+            or max_result_text_chars is None
+            or not include_truncation_status
+        ):
+            raise ValueError("max_query_text_chars requires a bounded redaction read")
         with closing(self.connect()) as conn:
             if max_result_text_chars is None:
-                return conn.execute(
+                rows = conn.execute(
                     """SELECT resultID, toolName, queryText, resultText, createdAt
                        FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
                     (limit,),
                 ).fetchall()
+                if include_truncation_status:
+                    return [(*row, False) for row in rows]
+                return rows
+            if max_query_text_chars is not None:
+                rows = conn.execute(
+                    """SELECT resultID, toolName,
+                              CASE
+                                  WHEN LENGTH(SUBSTR(queryText, ?, 1)) > 0
+                                  THEN NULL ELSE queryText
+                              END,
+                              SUBSTR(resultText, 1, ?),
+                              CASE WHEN LENGTH(SUBSTR(resultText, ?, 1)) > 0 THEN 1 ELSE 0 END,
+                              createdAt,
+                              CASE
+                                  WHEN LENGTH(SUBSTR(queryText, ?, 1)) > 0
+                                  THEN 1 ELSE 0
+                              END
+                       FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
+                    (
+                        max_query_text_chars + 1,
+                        max_result_text_chars,
+                        max_result_text_chars + 1,
+                        max_query_text_chars + 1,
+                        limit,
+                    ),
+                ).fetchall()
+                return [
+                    (
+                        row[0],
+                        row[1],
+                        row[2],
+                        row[3],
+                        row[5],
+                        bool(row[4]),
+                        bool(row[6]),
+                    )
+                    for row in rows
+                ]
+            if include_truncation_status:
+                rows = conn.execute(
+                    """SELECT resultID, toolName, queryText,
+                              SUBSTR(resultText, 1, ?),
+                              CASE WHEN LENGTH(SUBSTR(resultText, ?, 1)) > 0 THEN 1 ELSE 0 END,
+                              createdAt
+                       FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
+                    (max_result_text_chars, max_result_text_chars + 1, limit),
+                ).fetchall()
+                return [
+                    (row[0], row[1], row[2], row[3], row[5], bool(row[4]))
+                    for row in rows
+                ]
             marker = "… [truncated]"[:max_result_text_chars]
             prefix_length = max(0, max_result_text_chars - len(marker))
             rows = conn.execute(
                 """SELECT resultID, toolName, queryText,
                           SUBSTR(resultText, 1, ?),
-                          CASE WHEN SUBSTR(resultText, ?, 1) <> '' THEN 1 ELSE 0 END,
+                          CASE WHEN LENGTH(SUBSTR(resultText, ?, 1)) > 0 THEN 1 ELSE 0 END,
                           createdAt
                    FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
-                (prefix_length, prefix_length + 1, limit),
+                (max_result_text_chars, max_result_text_chars + 1, limit),
             ).fetchall()
         return [
             (
                 row[0],
                 row[1],
                 row[2],
-                None if row[3] is None else row[3] + (marker if row[4] else ""),
+                None if row[3] is None else (
+                    row[3][:prefix_length] + marker if row[4] else row[3]
+                ),
                 row[5],
             )
             for row in rows
@@ -321,7 +396,16 @@ class MySQLStorage:
                     "mysql+pymysql://."
                 )
             try:
-                self._engine = create_engine(url, pool_pre_ping=True)
+                self._engine = create_engine(
+                    url,
+                    pool_pre_ping=True,
+                    pool_timeout=_DATABASE_TIMEOUT_SECONDS,
+                    connect_args={
+                        "connect_timeout": _DATABASE_TIMEOUT_SECONDS,
+                        "read_timeout": _DATABASE_TIMEOUT_SECONDS,
+                        "write_timeout": _DATABASE_TIMEOUT_SECONDS,
+                    },
+                )
             except Exception as exc:
                 raise StorageError(f"Unable to initialize MySQL driver: {exc}") from exc
         return self._engine
@@ -569,7 +653,9 @@ class MySQLStorage:
                 result = connection.exec_driver_sql(query, parameters)
                 if not getattr(result, "returns_rows", True):
                     return []
-                return self._normalize_rows(result.fetchall())
+                return self._normalize_rows(
+                    result.fetchall()
+                )
         except Exception as exc:
             if exc.__class__.__module__.startswith("sqlalchemy"):
                 raise StorageError(str(exc)) from exc
@@ -592,8 +678,21 @@ class MySQLStorage:
             raise
 
     def list_tool_results(
-        self, limit: int, max_result_text_chars: Optional[int] = None
+        self,
+        limit: int,
+        max_result_text_chars: Optional[int] = None,
+        *,
+        include_truncation_status: bool = False,
+        max_query_text_chars: Optional[int] = None,
     ) -> list[tuple[Any, ...]]:
+        if max_query_text_chars is not None and (
+            not isinstance(max_query_text_chars, int)
+            or isinstance(max_query_text_chars, bool)
+            or max_query_text_chars < 1
+            or max_result_text_chars is None
+            or not include_truncation_status
+        ):
+            raise ValueError("max_query_text_chars requires a bounded redaction read")
         try:
             with self._get_engine().connect() as connection:
                 if max_result_text_chars is None:
@@ -602,28 +701,75 @@ class MySQLStorage:
                            FROM ToolResults ORDER BY resultID DESC LIMIT %s""",
                         (limit,),
                     ).fetchall()
+                    if include_truncation_status:
+                        rows = [(*row, False) for row in rows]
                 else:
-                    marker = "… [truncated]"[:max_result_text_chars]
-                    prefix_length = max(0, max_result_text_chars - len(marker))
+                    if max_query_text_chars is not None:
+                        rows = connection.exec_driver_sql(
+                            """SELECT resultID, toolName,
+                                      CASE
+                                          WHEN LENGTH(SUBSTR(queryText, %s, 1)) > 0
+                                          THEN NULL ELSE queryText
+                                      END,
+                                      SUBSTR(resultText, 1, %s),
+                                      CASE WHEN LENGTH(SUBSTR(resultText, %s, 1)) > 0
+                                           THEN 1 ELSE 0 END,
+                                      createdAt,
+                                      CASE
+                                          WHEN LENGTH(SUBSTR(queryText, %s, 1)) > 0
+                                          THEN 1 ELSE 0
+                                      END
+                               FROM ToolResults ORDER BY resultID DESC LIMIT %s""",
+                            (
+                                max_query_text_chars + 1,
+                                max_result_text_chars,
+                                max_result_text_chars + 1,
+                                max_query_text_chars + 1,
+                                limit,
+                            ),
+                        ).fetchall()
+                        rows = [
+                            (
+                                row[0],
+                                row[1],
+                                row[2],
+                                row[3],
+                                row[5],
+                                bool(row[4]),
+                                bool(row[6]),
+                            )
+                            for row in rows
+                        ]
+                        return self._normalize_rows(rows)
                     rows = connection.exec_driver_sql(
                         """SELECT resultID, toolName, queryText,
                                   SUBSTR(resultText, 1, %s),
-                                  CASE WHEN SUBSTR(resultText, %s, 1) <> ''
+                                  CASE WHEN LENGTH(SUBSTR(resultText, %s, 1)) > 0
                                        THEN 1 ELSE 0 END,
                                   createdAt
                            FROM ToolResults ORDER BY resultID DESC LIMIT %s""",
-                        (prefix_length, prefix_length + 1, limit),
+                        (max_result_text_chars, max_result_text_chars + 1, limit),
                     ).fetchall()
-                    rows = [
-                        (
-                            row[0],
-                            row[1],
-                            row[2],
-                            None if row[3] is None else row[3] + (marker if row[4] else ""),
-                            row[5],
-                        )
-                        for row in rows
-                    ]
+                    if include_truncation_status:
+                        rows = [
+                            (row[0], row[1], row[2], row[3], row[5], bool(row[4]))
+                            for row in rows
+                        ]
+                    else:
+                        marker = "… [truncated]"[:max_result_text_chars]
+                        prefix_length = max(0, max_result_text_chars - len(marker))
+                        rows = [
+                            (
+                                row[0],
+                                row[1],
+                                row[2],
+                                None if row[3] is None else (
+                                    row[3][:prefix_length] + marker if row[4] else row[3]
+                                ),
+                                row[5],
+                            )
+                            for row in rows
+                        ]
                 return self._normalize_rows(rows)
         except Exception as exc:
             if exc.__class__.__module__.startswith("sqlalchemy"):

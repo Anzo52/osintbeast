@@ -177,6 +177,19 @@ def test_query_database_rejects_sqlite_attach(monkeypatch):
         anchor.close()
 
 
+def test_query_database_rejects_state_changing_statements(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "query.db"))
+    database.setup_database()
+    database.insert_data("Platforms", {"platform": "before"})
+
+    with pytest.raises(sqlite3.OperationalError):
+        database.query_database(
+            "UPDATE Platforms SET platform = ? WHERE platform = ?",
+            ("after", "before"),
+        )
+    assert database.query_database("SELECT platform FROM Platforms") == [("before",)]
+
+
 def test_setup_database_rolls_back_all_schemas_on_sql_error(tmp_path, monkeypatch):
     db_path = tmp_path / "broken.db"
     monkeypatch.setattr(database, "DB_FILE", str(db_path))
@@ -326,6 +339,35 @@ def test_insert_query_and_save_tool_result(tmp_path, monkeypatch):
     )
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "INSERT INTO Platforms (platform) VALUES ('new')",
+        "UPDATE Platforms SET platform = 'changed'",
+        "DELETE FROM Platforms",
+        "WITH target AS (SELECT 1) DELETE FROM Platforms RETURNING platform",
+        "DROP TABLE Platforms",
+    ],
+)
+def test_query_database_rejects_state_changes(tmp_path, monkeypatch, query):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "query-readonly.db"))
+    database.setup_database()
+    database.insert_data("Platforms", {"platform": "preserved"})
+
+    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        database.query_database(query)
+
+    assert database.query_database(
+        "SELECT platform FROM Platforms"
+    ) == [("preserved",)]
+
+
+def test_sqlite_connections_have_a_bounded_lock_wait(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "timeout.db"))
+    with database.connect_db() as conn:
+        assert conn.execute("PRAGMA busy_timeout").fetchone() == (5000,)
+
+
 def test_list_tool_results_orders_newest_first_and_enforces_limit(
     tmp_path, monkeypatch
 ):
@@ -372,8 +414,8 @@ def test_saved_views_redact_legacy_values_without_rewriting_them(
         boundary_run_id, "success", result_text=boundary_result
     )
     assert database.list_tool_results(
-        max_result_text_chars=30, redact_sensitive=True
-    )[0][3] == "begin [redacted] … [truncated]"
+        max_result_text_chars=19, redact_sensitive=True
+    )[0][3] == "begin … [truncated]"
 
     result_id = database.query_database(
         "SELECT resultID FROM ToolResults ORDER BY resultID LIMIT 1"
@@ -403,17 +445,286 @@ def test_saved_views_redact_legacy_values_without_rewriting_them(
             "Found [redacted] and person+tagger@example.com",
         ),
         (
+            "alice@example.com",
+            "Found alice%40example.com and alice@example.com",
+            "Found [redacted] and [redacted]",
+        ),
+        (
             "https://example.test/a/b",
             "found https%3A//example.test/a%2Fb in a response",
             "found [redacted] in a response",
         ),
+        (
+            "alice",
+            "%2Falice%3F alice... [alice] %61lice%26",
+            "%2F[redacted]%3F [redacted]... [[redacted]] [redacted]%26",
+        ),
+        (
+            "alice",
+            "%78alice alice%78 alice.example alice+tag malice",
+            "%78alice alice%78 alice.example alice+tag malice",
+        ),
         ("ali", "ali in a larger token ali%63e", "[redacted] in a larger token ali%63e"),
         ("private@example.com", "[private@example.com].", "[[redacted]]."),
         ("alice", "alice. alice.example", "[redacted]. alice.example"),
+        ("alice", "alice..example alice...example", "alice..example alice...example"),
+        ("alice", "alice... alice.. alice . ...alice...", "[redacted]... [redacted].. [redacted] . ...[redacted]..."),
+        ("alice", "alice%2E%2Eexample", "alice%2E%2Eexample"),
+        ("alice", "%C3%A9alice alice%C3%A9", "%C3%A9alice alice%C3%A9"),
+        ("alice", "%D9%A1alice alice%D9%A1", "%D9%A1alice alice%D9%A1"),
+        ("alice", "%E2%80%94alice%E2%80%94", "%E2%80%94[redacted]%E2%80%94"),
+        ("a a", "xa a a", "xa [redacted]"),
     ],
 )
-def test_redact_sensitive_text_handles_boundaries(query, text, expected):
+def test_redact_sensitive_text_handles_encoding_and_boundaries(
+    query, text, expected
+):
     assert database.redact_sensitive_text(text, query) == expected
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (None, None),
+        ("123456789012345", "123456789012345"),
+        ("12345678901234567", "12345678901234567"),
+        ("123456789012345678", "1234… [truncated]"),
+        ("x" * 1000000, "xxxx… [truncated]"),
+    ],
+)
+def test_redacted_saved_results_are_bounded_without_false_truncation(
+    tmp_path, monkeypatch, result, expected
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "capped-results.db"))
+    database.setup_database()
+    database.save_tool_result("holehe", "private@example.com", result)
+
+    row = database.list_tool_results(
+        max_result_text_chars=17, redact_sensitive=True
+    )[0]
+    assert row[2:4] == ("[redacted]", expected)
+
+
+def test_redacted_saved_results_remain_bounded_after_redaction(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "capped-redaction.db"))
+    database.setup_database()
+    database.save_tool_result("maigret", "alice", "alice alice alice")
+
+    row = database.list_tool_results(max_result_text_chars=17, redact_sensitive=True)[0]
+    assert row[3] == "[red… [truncated]"
+
+
+@pytest.mark.parametrize("query_length", [256, 4096])
+def test_sensitive_suffix_matching_has_a_linear_work_budget(monkeypatch, query_length):
+    compile_pattern = database.re.compile
+    calls = 0
+
+    class CountingPattern:
+        def __init__(self, pattern):
+            self.pattern = pattern
+
+        def fullmatch(self, character):
+            nonlocal calls
+            calls += 1
+            return self.pattern.fullmatch(character)
+
+    def compile_counted(*args, **kwargs):
+        return CountingPattern(compile_pattern(*args, **kwargs))
+
+    monkeypatch.setattr(database.re, "compile", compile_counted)
+    query = "a" * (query_length - 1) + "b"
+    window_length = 3 * query_length
+    assert database._trailing_sensitive_prefix_length("a" * 100000, query) == window_length
+    assert calls <= 16 * (window_length + window_length)
+
+
+@pytest.mark.parametrize(
+    ("text", "query", "expected"),
+    [
+        ("report alice%4", "alice@example.com", len("alice%4")),
+        ("report %C3%A", "é@example.com", len("%C3%A")),
+        ("report %61li", "alice", len("%61li")),
+        ("report İst", "Istanbul", len("İst")),
+        ("report", "alice", 0),
+    ],
+)
+def test_sensitive_suffix_state_machine_handles_incomplete_encodings(text, query, expected):
+    assert database._trailing_sensitive_prefix_length(text, query) == expected
+
+
+def test_truncated_overlapping_sensitive_occurrences_do_not_leak(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "overlap.db"))
+    database.setup_database()
+    database.save_tool_result("holehe", "a a", "a " * 30)
+    assert database.list_tool_results(
+        1, max_result_text_chars=15, redact_sensitive=True
+    )[0][3] == "… [truncated]"
+
+
+def test_truncation_aligns_an_entire_overlapping_match_chain(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "overlapping-chain.db"))
+    database.setup_database()
+    query = "secret secret"
+    result = (query + " | ") * 5 + "xsecret secret secret secret!"
+    database.save_tool_result("holehe", query, result)
+
+    preview = database.list_tool_results(
+        1, max_result_text_chars=108, redact_sensitive=True
+    )[0][3]
+
+    assert "secret" not in preview
+    assert preview == "[redacted] | " * 5 + "x… [truncated]"
+
+
+@pytest.mark.parametrize(
+    ("query", "result", "expected"),
+    [
+        ("alice", "report", "report"),
+        ("x" * 4097, "report", "[redacted]"),
+        ("alice", "z" * 20000, "z" * (16384 - 13) + "… [truncated]"),
+    ],
+)
+def test_redacted_listing_without_explicit_cap_uses_bounded_default(
+    tmp_path, monkeypatch, query, result, expected
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "default-preview.db"))
+    database.setup_database()
+    database.save_tool_result("holehe", query, result)
+    storage = database._get_storage()
+    listing = storage.list_tool_results
+    calls = []
+
+    def bounded_listing(limit, maximum=None, **kwargs):
+        calls.append((maximum, kwargs))
+        return listing(limit, maximum, **kwargs)
+
+    monkeypatch.setattr(storage, "list_tool_results", bounded_listing)
+    assert database.list_tool_results(1, redact_sensitive=True)[0][3] == expected
+    assert calls == [(16384, {
+        "include_truncation_status": True,
+        "max_query_text_chars": 4096,
+    })]
+    assert database.list_tool_results(1)[0][2:4] == (query, result)
+
+
+@pytest.mark.parametrize(
+    ("query", "result"),
+    [
+        ("private@example.com", "start private@example.com and more"),
+        ("alice@example.com", "start alice%40example.com and more"),
+        ("Istanbul", "prefix content İst trailing data"),
+    ],
+)
+def test_redacted_bounded_reads_hide_sensitive_values_crossing_the_limit(
+    tmp_path, monkeypatch, query, result
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "bounded-redaction.db"))
+    database.setup_database()
+    database.save_tool_result("holehe", query, result)
+
+    storage = database._get_storage()
+    list_results = storage.list_tool_results
+    calls = []
+
+    def bounded_list_results(
+        limit,
+        max_result_text_chars=None,
+        *,
+        include_truncation_status=False,
+        max_query_text_chars=None,
+    ):
+        calls.append(
+            (
+                limit,
+                max_result_text_chars,
+                include_truncation_status,
+                max_query_text_chars,
+            )
+        )
+        return list_results(
+            limit,
+            max_result_text_chars,
+            include_truncation_status=include_truncation_status,
+            max_query_text_chars=max_query_text_chars,
+        )
+
+    monkeypatch.setattr(storage, "list_tool_results", bounded_list_results)
+    expected_limit = 18 if query == "Istanbul" else 22
+    expected_output = (
+        "prefi… [truncated]"
+        if query == "Istanbul"
+        else "start … [truncated]"
+    )
+    row = database.list_tool_results(
+        limit=1,
+        max_result_text_chars=expected_limit,
+        redact_sensitive=True,
+    )[0]
+
+    assert calls == [(1, expected_limit, True, 4096)]
+    assert row[3] == expected_output
+    assert query not in row[3]
+    assert "İst" not in row[3]
+    raw_prefix = list_results(
+        1, expected_limit, include_truncation_status=True
+    )[0]
+    assert len(raw_prefix[3]) <= expected_limit
+    assert raw_prefix[5] is True
+
+
+@pytest.mark.parametrize(
+    ("query_length", "trailing_space", "result", "expected"),
+    [
+        (4097, False, "x" * 100, "[redacted]"),
+        (4097, False, "report", "[redacted]"),
+        (4096, False, "report", "report"),
+        (12, False, "report", "report"),
+        (4097, True, "report", "[redacted]"),
+        (4097, True, "x" * 100, "[redacted]"),
+        (12, False, "z" * 20 + " ", "zzzzzzz… [truncated]"),
+    ],
+)
+def test_redacted_bounded_reads_enforce_query_limit_independently(
+    tmp_path, monkeypatch, query_length, trailing_space, result, expected
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "oversized-query.db"))
+    database.setup_database()
+    query = "x" * (query_length - 1) + (" " if trailing_space else "x")
+    database.save_tool_result("holehe", query, result)
+    storage = database._get_storage()
+    connect = storage.connect
+    statements = []
+
+    def connect_with_trace():
+        conn = connect()
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(storage, "connect", connect_with_trace)
+
+    row = database.list_tool_results(
+        limit=1, max_result_text_chars=20, redact_sensitive=True
+    )[0]
+    bounded_row = database._get_storage().list_tool_results(
+        1,
+        20,
+        include_truncation_status=True,
+        max_query_text_chars=database.MAX_REDACTION_QUERY_CHARS,
+    )[0]
+
+    oversized = query_length > database.MAX_REDACTION_QUERY_CHARS
+    assert row[3] == expected
+    assert len(row) == 5
+    assert bounded_row[2] == (None if oversized else query)
+    assert bounded_row[3] == result[:20]
+    assert bounded_row[5] is (len(result) > 20)
+    assert bounded_row[6] is oversized
+    statement = " ".join(statements[-1].split())
+    assert (
+        "CASE WHEN LENGTH(SUBSTR(queryText, 4097, 1)) > 0 THEN NULL ELSE queryText END"
+        in statement
+    )
+    assert "SUBSTR(resultText, 1, 20)" in statement
 
 
 def test_list_tool_runs_filters_and_uses_stable_cursor_pagination(

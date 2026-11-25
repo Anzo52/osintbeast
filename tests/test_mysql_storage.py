@@ -1,7 +1,11 @@
+import sqlite3
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
+from sqlalchemy import create_engine
 
 import data.utils.database as database
 from data.utils.storage import MySQLStorage, StorageError
@@ -154,6 +158,54 @@ def test_mysql_query_uses_a_read_only_transaction(mysql_storage):
     ]
 
 
+@pytest.mark.parametrize(
+    "query",
+    [
+        "INSERT INTO Platforms (platform) VALUES ('x')",
+        "UPDATE Platforms SET platform = 'x'",
+        "DELETE FROM Platforms",
+        "DROP TABLE Platforms",
+        "ALTER TABLE Platforms ADD COLUMN x INTEGER",
+        "CREATE TABLE x (id INTEGER)",
+        "COMMIT",
+        "SET TRANSACTION READ WRITE",
+        "/*!50000 DROP TABLE Platforms */",
+    ],
+)
+def test_mysql_query_rejects_non_queries_before_execution(mysql_storage, query):
+    storage, engine = mysql_storage
+    with pytest.raises(ValueError):
+        storage.query(query)
+    assert engine.commits == 0
+    assert engine.connection.statements == [("SELECT @@SESSION.sql_mode", ())]
+
+
+def test_mysql_cte_mutation_does_not_commit(mysql_storage):
+    storage, engine = mysql_storage
+    query = "WITH target AS (SELECT 1) DELETE FROM Platforms"
+    with pytest.raises(StorageError):
+        storage.query(query)
+    assert engine.connection.statements[1] == ("START TRANSACTION READ ONLY", ())
+    assert engine.connection.platforms == ["original"]
+    assert engine.commits == 0
+
+
+def test_mysql_engine_configures_bounded_database_waits(monkeypatch):
+    import sqlalchemy
+
+    create_engine = Mock()
+    monkeypatch.setattr(sqlalchemy, "create_engine", create_engine)
+    storage = MySQLStorage(
+        "mysql://osintbeast@localhost/osintbeast", Path(), (), frozenset()
+    )
+    storage._get_engine()
+    assert create_engine.call_args.kwargs == {
+        "pool_pre_ping": True,
+        "pool_timeout": 5,
+        "connect_args": {"connect_timeout": 5, "read_timeout": 5, "write_timeout": 5},
+    }
+
+
 def test_mysql_result_listing_caps_output_in_the_query(mysql_storage):
     storage, engine = mysql_storage
 
@@ -162,7 +214,70 @@ def test_mysql_result_listing_caps_output_in_the_query(mysql_storage):
     ]
     statement, parameters = engine.connection.statements[-1]
     assert "SUBSTR(resultText, 1, %s)" in statement
-    assert parameters == (4, 5, 20)
+    assert parameters == (17, 18, 20)
+
+
+def test_mysql_result_listing_keeps_full_text_within_limit(mysql_storage, monkeypatch):
+    storage, engine = mysql_storage
+    execute = engine.connection.exec_driver_sql
+
+    def execute_with_result(statement, parameters=()):
+        if "SUBSTR(resultText" in statement:
+            return FakeResult([(1, "holehe", "query", "123456789012345", 0, "created")])
+        return execute(statement, parameters)
+
+    monkeypatch.setattr(engine.connection, "exec_driver_sql", execute_with_result)
+    assert storage.list_tool_results(20, max_result_text_chars=17) == [
+        (1, "holehe", "query", "123456789012345", "created")
+    ]
+
+
+def test_mysql_result_listing_returns_bounded_raw_prefix_for_redaction(
+    mysql_storage, monkeypatch
+):
+    storage, engine = mysql_storage
+    execute = engine.connection.exec_driver_sql
+    oversized_query = False
+
+    def execute_with_result(statement, parameters=()):
+        if "SUBSTR(resultText" in statement:
+            engine.connection.statements.append((statement, parameters))
+            return FakeResult(
+                [
+                    (
+                        1,
+                        "holehe",
+                        None if oversized_query else "alice@example.com",
+                        "alice%40exampl",
+                        1,
+                        "created",
+                        int(oversized_query),
+                    )
+                ]
+            )
+        return execute(statement, parameters)
+
+    monkeypatch.setattr(engine.connection, "exec_driver_sql", execute_with_result)
+    assert storage.list_tool_results(
+        20, max_result_text_chars=14, include_truncation_status=True
+    ) == [
+        (1, "holehe", "alice@example.com", "alice%40exampl", "created", True)
+    ]
+    statement, parameters = engine.connection.statements[-1]
+    assert "SUBSTR(resultText, 1, %s)" in statement
+    assert parameters == (14, 15, 20)
+    monkeypatch.setattr(database, "_get_storage", lambda: storage)
+    assert database.list_tool_results(
+        20, max_result_text_chars=14, redact_sensitive=True
+    )[0][3] == "… [truncated]"
+    statement, parameters = engine.connection.statements[-1]
+    assert "SUBSTR(queryText, %s, 1)" in statement
+    assert parameters == (4097, 14, 15, 4097, 20)
+
+    oversized_query = True
+    assert database.list_tool_results(
+        20, max_result_text_chars=14, redact_sensitive=True
+    )[0][3] == "[redacted]"
 
 
 @pytest.mark.parametrize(
@@ -284,6 +399,139 @@ def test_mysql_rejects_executable_or_incomplete_comments(mysql_storage, statemen
     with pytest.raises(ValueError):
         storage.query(statement)
     assert engine.connection.statements == [("SELECT @@SESSION.sql_mode", ())]
+
+
+@pytest.mark.parametrize(
+    ("query_length", "trailing_space", "result", "expected"),
+    [
+        (4097, False, "x" * 100, "[redacted]"),
+        (4097, False, "report", "[redacted]"),
+        (4096, False, "report", "report"),
+        (12, False, "report", "report"),
+        (4097, True, "report", "[redacted]"),
+        (4097, True, "x" * 100, "[redacted]"),
+        (12, False, "z" * 20 + " ", "zzzzzzz… [truncated]"),
+    ],
+)
+def test_mysql_bounded_redaction_enforces_query_limit_independently(
+    mysql_storage, monkeypatch, query_length, trailing_space, result, expected
+):
+    storage, engine = mysql_storage
+    query = "x" * (query_length - 1) + (" " if trailing_space else "x")
+    sql_rows = []
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute(
+            """CREATE TABLE ToolResults (
+                   resultID INTEGER, toolName TEXT, queryText TEXT,
+                   resultText TEXT, createdAt TEXT
+               )"""
+        )
+        conn.execute(
+            "INSERT INTO ToolResults VALUES (?, ?, ?, ?, ?)",
+            (1, "holehe", query, result, "created"),
+        )
+
+        def execute_listing(statement, parameters=()):
+            engine.connection.statements.append((statement, parameters))
+            rows = conn.execute(statement.replace("%s", "?"), parameters).fetchall()
+            sql_rows.extend(rows)
+            return FakeResult(rows)
+
+        monkeypatch.setattr(engine.connection, "exec_driver_sql", execute_listing)
+        monkeypatch.setattr(database, "_get_storage", lambda: storage)
+        row = database.list_tool_results(
+            limit=1, max_result_text_chars=20, redact_sensitive=True
+        )[0]
+
+    oversized = query_length > database.MAX_REDACTION_QUERY_CHARS
+    assert row[3] == expected
+    assert len(row) == 5
+    assert sql_rows[0][2] == (None if oversized else query)
+    assert sql_rows[0][3] == result[:20]
+    assert sql_rows[0][4] == int(len(result) > 20)
+    assert sql_rows[0][6] == int(oversized)
+    statement, parameters = engine.connection.statements[-1]
+    assert parameters == (4097, 20, 21, 4097, 1)
+    assert (
+        "CASE WHEN LENGTH(SUBSTR(queryText, %s, 1)) > 0 THEN NULL ELSE queryText END"
+        in " ".join(statement.split())
+    )
+
+
+@pytest.mark.parametrize(
+    ("query", "result", "expected"),
+    [
+        ("alice", "report", "report"),
+        ("x" * 4097, "report", "[redacted]"),
+        ("alice", "z" * 20000, "z" * (16384 - 13) + "… [truncated]"),
+    ],
+)
+def test_mysql_redacted_listing_without_cap_is_bounded(
+    mysql_storage, monkeypatch, query, result, expected
+):
+    storage, engine = mysql_storage
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute(
+            """CREATE TABLE ToolResults (
+                   resultID INTEGER, toolName TEXT, queryText TEXT,
+                   resultText TEXT, createdAt TEXT
+               )"""
+        )
+        conn.execute(
+            "INSERT INTO ToolResults VALUES (?, ?, ?, ?, ?)",
+            (1, "holehe", query, result, "created"),
+        )
+
+        def execute_listing(statement, parameters=()):
+            engine.connection.statements.append((statement, parameters))
+            return FakeResult(
+                conn.execute(statement.replace("%s", "?"), parameters).fetchall()
+            )
+
+        monkeypatch.setattr(engine.connection, "exec_driver_sql", execute_listing)
+        monkeypatch.setattr(database, "_get_storage", lambda: storage)
+        assert database.list_tool_results(1, redact_sensitive=True)[0][3] == expected
+    statement, parameters = engine.connection.statements[-1]
+    assert parameters == (4097, 16384, 16385, 4097, 1)
+    assert "LENGTH(SUBSTR(queryText" in statement
+    assert "SUBSTR(resultText, 1, %s)" in statement
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "INSERT INTO items VALUES ('added')",
+        "UPDATE items SET value = 'updated'",
+        "DELETE FROM items",
+    ],
+)
+def test_mysql_query_rejects_state_changing_statements(
+    mysql_storage, tmp_path, monkeypatch, statement
+):
+    storage, _ = mysql_storage
+    engine = create_engine(f"sqlite:///{tmp_path / 'transactions.db'}")
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql("CREATE TABLE items (value TEXT)")
+            connection.exec_driver_sql("INSERT INTO items VALUES ('original')")
+
+        with engine.connect() as connection:
+            proxy = Mock()
+            proxy.exec_driver_sql.side_effect = lambda sql, parameters=(): (
+                FakeResult([("",)]) if sql == "SELECT @@SESSION.sql_mode"
+                else connection.exec_driver_sql(sql, parameters)
+            )
+            mysql_engine = Mock()
+            mysql_engine.connect.return_value = nullcontext(proxy)
+            monkeypatch.setattr(storage, "_get_engine", lambda: mysql_engine)
+            with pytest.raises(ValueError, match="SELECT or WITH"):
+                storage.query(statement)
+            expected = [("original",)]
+            assert connection.exec_driver_sql(
+                "SELECT value FROM items ORDER BY rowid"
+            ).fetchall() == expected
+    finally:
+        engine.dispose()
 
 
 def test_mysql_identifier_validation_and_placeholders(mysql_storage):

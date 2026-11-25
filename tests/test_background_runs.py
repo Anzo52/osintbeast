@@ -28,13 +28,16 @@ def mocked_worker(connection, tool_name, query, max_output_bytes, deadline=None)
     connection.close()
 
 
-def mocked_sensitive_worker(connection, _tool_name, query, _max_output_bytes, _deadline=None):
-    status = b"F" if query.startswith("failure@") else b"S"
-    text = background_runs.redact_sensitive_output(
-        f"lookup result for {query}", query
-    )
-    connection.send_bytes(status + text.encode("utf-8"))
-    connection.close()
+def unredacted_sensitive_runner(query):
+    text = f"lookup result for {query}"
+    if query.startswith("failure@"):
+        raise ValueError(text)
+    return {"output": text}
+
+
+def sensitive_worker(connection, tool_name, query, max_output_bytes, deadline=None):
+    background_runs._TOOLS["holehe"] = (lambda value: value, unredacted_sensitive_runner)
+    background_runs._worker(connection, tool_name, query, max_output_bytes, deadline)
 
 
 def blocked_runner(query):
@@ -128,7 +131,7 @@ def test_background_outcomes_redact_sensitive_query(
 
     query = sensitive_value if prefix == b"S" else "failure@example.com"
     monkeypatch.setattr(
-        background_runs, "_worker", mocked_sensitive_worker
+        background_runs, "_worker", sensitive_worker
     )
     run_id = service.submit("holehe", query)
     run = wait_for_run(service, run_id)
@@ -176,6 +179,54 @@ def test_close_cancels_active_work_and_rejects_new_work(service):
         service.submit("maigret", "user")
 
 
+def test_close_is_bounded_when_final_persistence_stalls(service, monkeypatch, caplog):
+    entered, release = threading.Event(), threading.Event()
+    finish = database.finish_tool_run
+
+    def stalled_finish(*args, **kwargs):
+        entered.set()
+        release.wait(5)
+        return finish(*args, **kwargs)
+
+    monkeypatch.setattr(database, "finish_tool_run", stalled_finish)
+    monkeypatch.setattr(background_runs, "_SHUTDOWN_TIMEOUT_SECONDS", 0.1)
+    service.submit("maigret", "user")
+    try:
+        assert entered.wait(5)
+        start = time.monotonic()
+        service.close()
+        assert time.monotonic() - start < 0.5
+        assert "shutdown wait exceeded" in caplog.text
+    finally:
+        release.set()
+        monkeypatch.setattr(background_runs, "_SHUTDOWN_TIMEOUT_SECONDS", 5)
+        service.close()
+
+
+def test_persisting_job_uses_only_one_capacity_slot(service, monkeypatch):
+    service.limits = background_runs.RunLimits(max_concurrent=2)
+    entered, release = threading.Event(), threading.Event()
+    finish = database.finish_tool_run
+
+    def stalled_finish(run_id, *args, **kwargs):
+        if run_id == first:
+            entered.set()
+            assert release.wait(5)
+        return finish(run_id, *args, **kwargs)
+
+    first = service.submit("maigret", "slow")
+    monkeypatch.setattr(database, "finish_tool_run", stalled_finish)
+    try:
+        assert service.cancel(first)
+        assert entered.wait(5)
+        assert not service.cancel(first)
+        second = service.submit("maigret", "user")
+        assert second != first
+    finally:
+        release.set()
+    assert wait_for_run(service, second)["status"] == "success"
+
+
 def test_process_start_failure_is_recorded(service, monkeypatch):
     process = Mock(pid=None)
     process.start.side_effect = OSError("cannot start")
@@ -218,6 +269,7 @@ def test_received_result_wins_over_late_cancellation_and_timeout(service, monkey
         service.cancel(run_id)
     ))
     service._supervise(run_id, "maigret", "user", cancel, completed)
+    monkeypatch.setattr(background_runs, "time", time)
     assert service.status(run_id)["status"] == "success"
     assert late_cancellation == [False]
     receiver.poll.assert_called_once_with(0)
@@ -334,6 +386,16 @@ def test_reconciled_pending_failure_releases_capacity(service, monkeypatch):
     assert wait_for_run(service, service.submit("maigret", "another"))["status"] == "success"
 
 
+def test_pending_outcome_already_finished_releases_capacity(service):
+    run_id = database.start_tool_run("maigret", "user")
+    database.finish_tool_run(run_id, "failed", error_text="Earlier outcome.")
+    service._pending[run_id] = ("failed", "Later outcome.")
+
+    assert service.status(run_id)["errorText"] == "Earlier outcome."
+    assert run_id not in service._pending
+    assert wait_for_run(service, service.submit("maigret", "another"))["status"] == "success"
+
+
 def test_startup_persistence_failure_retries_without_status(service, monkeypatch):
     thread_class = threading.Thread
     finish = database.finish_tool_run
@@ -383,14 +445,19 @@ def test_terminal_outcomes_survive_late_cancellation(service, monkeypatch, outco
         receiver.recv_bytes.side_effect = EOFError()
     monkeypatch.setattr(service._context, "Pipe", lambda **kwargs: (receiver, sender))
     monkeypatch.setattr(service._context, "Process", lambda **kwargs: process)
-    monkeypatch.setattr(background_runs.time, "monotonic", Mock(side_effect=[0, 2]))
+    with monkeypatch.context() as time_mock:
+        time_mock.setattr(
+            background_runs,
+            "time",
+            SimpleNamespace(monotonic=Mock(side_effect=[0, 2])),
+        )
 
-    def stop(_):
-        if outcome in ("timeout", "crash"):
-            assert not service.cancel(run_id)
+        def stop(_):
+            if outcome in ("timeout", "crash"):
+                assert not service.cancel(run_id)
 
-    monkeypatch.setattr(background_runs, "_stop_process", stop)
-    service._supervise(run_id, "maigret", "user", cancel, completed)
+        monkeypatch.setattr(background_runs, "_stop_process", stop)
+        service._supervise(run_id, "maigret", "user", cancel, completed)
     run = service.status(run_id)
     assert run["status"] == {"result": "success", "timeout": "timed_out", "crash": "failed"}[outcome]
     assert run["resultText" if outcome == "result" else "errorText"] == {
@@ -495,14 +562,97 @@ def test_already_committed_completion_retry_does_not_duplicate_result(
 
 
 def test_submission_idempotency_is_scoped_to_key_and_input(service):
+    dispatch = Mock(wraps=service._supervise)
+    service._supervise = dispatch
     run_id = service.submit("maigret", "user", "submission-1")
 
     assert service.submit("maigret", " user ", "submission-1") == run_id
+    assert dispatch.call_count == 1
     with pytest.raises(background_runs.IdempotencyConflict):
         service.submit("maigret", "other", "submission-1")
     with pytest.raises(background_runs.IdempotencyConflict):
         service.submit("sherlock", "user", "submission-1")
     assert len(database.list_tool_runs()) == 1
+
+
+def test_failed_start_retries_persistence_and_keeps_idempotency_key(service, monkeypatch):
+    finish = database.finish_tool_run
+    attempts = 0
+
+    def finish_after_failure(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("temporarily unavailable")
+        return finish(*args, **kwargs)
+
+    monkeypatch.setattr(database, "finish_tool_run", finish_after_failure)
+    thread_class = threading.Thread
+
+    def thread_factory(*args, **kwargs):
+        if kwargs.get("name", "").startswith("tool-run-") and kwargs["name"] != "tool-run-persistence-retry":
+            raise RuntimeError("worker thread unavailable")
+        return thread_class(*args, **kwargs)
+
+    monkeypatch.setattr(background_runs.threading, "Thread", thread_factory)
+    with pytest.raises(RuntimeError, match="worker thread unavailable"):
+        service.submit("maigret", "user", "failed-start-key")
+    run_id = database.list_tool_runs()[0][0]
+    assert service.submit("maigret", "user", "failed-start-key") == run_id
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and database.get_tool_run(run_id)[3] != "failed":
+        time.sleep(0.01)
+    assert database.get_tool_run(run_id)[3] == "failed"
+    assert run_id not in service._pending
+    assert len(database.list_tool_runs()) == 1
+
+
+def test_slow_pending_persistence_does_not_hold_service_lock(service, monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    run_id = service.submit("maigret", "user")
+    assert wait_for_run(service, run_id)["status"] == "success"
+    with service._lock:
+        service._pending[run_id] = ("success", "output")
+
+    def slow_write(*args, **kwargs):
+        started.set()
+        assert release.wait(3)
+
+    monkeypatch.setattr(database, "finish_tool_run", slow_write)
+    retry = threading.Thread(target=service._persist_pending, args=(run_id,))
+    retry.start()
+    operations_done = threading.Event()
+    results = []
+
+    def operations():
+        results.append(service.cancel(run_id))
+        try:
+            service.submit("maigret", "another")
+        except background_runs.CapacityError:
+            results.append("capacity")
+        operations_done.set()
+
+    try:
+        assert started.wait(2)
+        actions = threading.Thread(target=operations)
+        actions.start()
+        assert operations_done.wait(1), "Run operations blocked on the persistence write"
+    finally:
+        release.set()
+        retry.join(3)
+        actions.join(3)
+    assert results == [False, "capacity"]
+    assert not retry.is_alive()
+
+
+def test_idempotency_keys_are_bounded_after_completion(service, monkeypatch):
+    monkeypatch.setattr(background_runs, "_MAX_IDEMPOTENCY_KEYS", 3)
+    for index in range(5):
+        run_id = service.submit("maigret", "user", f"key-{index}")
+        assert wait_for_run(service, run_id)["status"] == "success"
+    assert len(service._idempotency_keys) <= 3
+    assert service.submit("maigret", "user", "key-4") == run_id
 
 
 @pytest.mark.parametrize(
@@ -567,6 +717,25 @@ def test_worker_redacts_sensitive_output_and_suppresses_console_output(
     assert payload == b"SFound [redacted]"
     assert sensitive_value not in captured.out
     assert sensitive_value not in captured.err
+    connection.close.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("error", "prefix"),
+    [(ValueError, b"F"), (TimeoutError, b"T")],
+)
+def test_worker_redacts_sensitive_failure(monkeypatch, error, prefix):
+    sensitive_value = "person@example.com"
+    if os.name == "posix":
+        monkeypatch.setattr(os, "setsid", lambda: None)
+    runner = Mock(side_effect=error(f"Lookup for {sensitive_value} failed"))
+    monkeypatch.setitem(background_runs._TOOLS, "holehe", (lambda value: value, runner))
+    connection = Mock()
+
+    background_runs._worker(connection, "holehe", sensitive_value, 1024)
+
+    runner.assert_called_once_with(sensitive_value)
+    connection.send_bytes.assert_called_once_with(prefix + b"Lookup for [redacted] failed")
     connection.close.assert_called_once()
 
 
