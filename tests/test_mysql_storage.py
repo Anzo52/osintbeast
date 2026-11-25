@@ -43,14 +43,15 @@ class FakeEngine:
     def __init__(self):
         self.connection = FakeConnection()
         self.transaction_errors = []
+        self.commits = 0
 
     def begin(self):
-        return self.connection_context()
+        return self.connection_context(commit=True)
 
     def connect(self):
         return self.connection_context()
 
-    def connection_context(self):
+    def connection_context(self, commit=False):
         engine = self
 
         class Context:
@@ -60,6 +61,8 @@ class FakeEngine:
             def __exit__(self, exc_type, exc_value, _):
                 if exc_type is not None:
                     engine.transaction_errors.append(exc_value)
+                elif commit:
+                    engine.commits += 1
                 return False
 
         return Context()
@@ -114,6 +117,16 @@ def test_mysql_core_operations_use_bound_values_and_preserve_transactional_flow(
         for sql, params in statements
     )
     assert any("INSERT INTO ToolResults" in sql for sql, _ in statements)
+
+
+def test_mysql_query_commits_state_changes(mysql_storage):
+    storage, engine = mysql_storage
+
+    assert storage.query("INSERT INTO Platforms (platform) VALUES (?)", ("x",)) == [
+        ("platform",), ("platformID",)
+    ]
+
+    assert engine.commits == 1
 
 
 def test_mysql_result_listing_caps_output_in_the_query(mysql_storage):

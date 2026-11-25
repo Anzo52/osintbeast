@@ -42,6 +42,7 @@ def _is_loopback_host(host):
     except ValueError:
         return False
 
+
 RUN_SERVICE = BackgroundRuns()
 RUNNABLE_TOOLS = {
     "holehe": ("email", validate_email, lambda value: run_holehe(value)["output"]),
@@ -341,7 +342,12 @@ class WebHandler(BaseHTTPRequestHandler):
                 limit = int(values[0])
                 self._send_json(
                     200,
-                    [self._run_payload(row) for row in database.list_tool_runs(limit)],
+                    [
+                        self._run_payload(row)
+                        for row in database.list_tool_runs(
+                            limit, redact_sensitive=True
+                        )
+                    ],
                 )
             elif path.path.startswith("/api/runs/"):
                 run_id_text = path.path.removeprefix("/api/runs/")
@@ -350,7 +356,9 @@ class WebHandler(BaseHTTPRequestHandler):
                     return
                 RUN_SERVICE.status(int(run_id_text))
                 database.reconcile_stale_tool_runs()
-                row = database.get_tool_run(int(run_id_text))
+                row = database.get_tool_run(
+                    int(run_id_text), redact_sensitive=True
+                )
                 if row is None:
                     self._send_json(404, {"error": "Run not found."})
                 else:
@@ -434,8 +442,8 @@ class WebHandler(BaseHTTPRequestHandler):
     do_OPTIONS = _reject_method
 
 
-def serve(host="127.0.0.1", port=8000):
-    """Serve the web UI on loopback by default."""
+def create_server(host="127.0.0.1", port=8000):
+    """Create an initialized, authenticated web server."""
     if not _is_loopback_host(host):
         raise ValueError("The web UI may only bind to a loopback address.")
     tokens = _configured_tokens()
@@ -447,14 +455,20 @@ def serve(host="127.0.0.1", port=8000):
     database.setup_database()
     server = ThreadingHTTPServer((host, port), WebHandler)
     server.daemon_threads = True
+    return server
+
+
+def serve(host="127.0.0.1", port=8000):
+    """Serve the web UI on loopback by default."""
+    server = create_server(host, port)
     print(f"OSINT Beast web UI: http://{host}:{server.server_port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        server.server_close()
         RUN_SERVICE.close()
+        server.server_close()
 
 
 if __name__ == "__main__":

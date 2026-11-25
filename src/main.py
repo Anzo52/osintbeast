@@ -119,7 +119,7 @@ def _run_check(tool_name, query_text, validator, runner):
         status, value = execute_tool_run(
             tool_name, query_text, runner, sensitive_input=True
         )
-    except database.DATABASE_ERRORS as exc:
+    except (OSError, *database.DATABASE_ERRORS) as exc:
         print(f"Could not record {tool_name} run: {exc}. Initialize the database and check its permissions.")
         return 1
     if status == "success":
@@ -190,11 +190,14 @@ def show_run_history(tool_name=None, status=None, offset=0, cursor=None):
     try:
         runs = list_tool_runs(
             limit=21, offset=offset, tool_name=tool_name, status=status,
-            cursor=cursor,
+            cursor=cursor, redact_sensitive=True,
         )
-    except database.DATABASE_ERRORS as exc:
+    except (OSError, *database.DATABASE_ERRORS) as exc:
         print(f"Run history query failed: {exc}")
-        return
+        return None
+    except ValueError as exc:
+        print(f"Invalid history filter: {exc}")
+        return None
     if not runs:
         print("No matching runs.")
     for run_id, tool, query_text, run_status, started, finished, _error in runs[:20]:
@@ -208,11 +211,11 @@ def show_run_history(tool_name=None, status=None, offset=0, cursor=None):
 
 def inspect_tool_run(run_id):
     try:
-        run = get_tool_run(run_id)
+        run = get_tool_run(run_id, redact_sensitive=True)
     except ValueError as exc:
         print(f"Could not inspect run: {exc}")
         return
-    except database.DATABASE_ERRORS as exc:
+    except (OSError, *database.DATABASE_ERRORS) as exc:
         print(f"Could not inspect run: {exc}")
         return
     if run is None:
@@ -239,6 +242,35 @@ def _parse_run_ids(value):
     return run_ids
 
 
+def _write_export_file(output_path, content):
+    destination = Path(output_path).expanduser()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    prefix = f".{destination.name}."
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix=prefix, suffix=".tmp", dir=destination.parent
+    )
+    try:
+        os.chmod(temporary_path, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as export_file:
+            descriptor = None
+            export_file.write(content + "\n")
+            export_file.flush()
+            os.fsync(export_file.fileno())
+        os.link(temporary_path, destination)
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(f"Warning: could not remove temporary export {temporary_path}: {exc}")
+
+
 def export_selected_runs():
     run_ids = _parse_run_ids(input("Run IDs to export (comma-separated): "))
     if run_ids is None:
@@ -250,37 +282,17 @@ def export_selected_runs():
     include_sensitive = input(
         "Include sensitive input, result, and error text? [y/N]: "
     ).strip().casefold() in {"y", "yes"}
-    try:
-        if include_sensitive and os.name == "nt":
-            raise ValueError("Sensitive exports are not supported on Windows.")
-        content = export_tool_runs_json(run_ids, include_sensitive=include_sensitive)
-        destination = Path(output_path).expanduser()
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.exists():
-            raise FileExistsError(f"Export destination already exists: {destination}")
-        fd, temporary = tempfile.mkstemp(
-            prefix=f".{destination.name}.", dir=destination.parent
+    if include_sensitive and os.name == "nt":
+        print(
+            "Sensitive exports are disabled on Windows because file permissions "
+            "are inherited from the destination directory."
         )
-        try:
-            os.chmod(temporary, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as export_file:
-                fd = None
-                export_file.write(content + "\n")
-                export_file.flush()
-                os.fsync(export_file.fileno())
-            os.link(temporary, destination)
-        finally:
-            if fd is not None:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-            try:
-                os.unlink(temporary)
-            except FileNotFoundError:
-                pass
-            except OSError as exc:
-                print(f"Warning: could not remove temporary export {temporary}: {exc}")
+        return
+    try:
+        content = export_tool_runs_json(
+            run_ids, include_sensitive=include_sensitive
+        )
+        _write_export_file(output_path, content)
     except (OSError, ValueError, *database.DATABASE_ERRORS) as exc:
         print(f"Could not export runs: {exc}")
         return
@@ -314,11 +326,7 @@ def run_history_menu():
             status_value = input(
                 "Status (running, success, failed, timed_out; blank for any): "
             ).strip()
-            try:
-                runs = show_run_history(tool_value or None, status_value or None)
-            except ValueError as exc:
-                print(f"Invalid history filter: {exc}")
-                continue
+            runs = show_run_history(tool_value or None, status_value or None)
             if runs is not None:
                 tool_name, status = tool_value or None, status_value or None
                 cursors = [None]
@@ -388,7 +396,10 @@ def _build_parser():
     email_command = commands.add_parser("check-email", help="check an email address with Holehe")
     email_command.add_argument(
         "email",
-        help="email address (for example, person@example.com)",
+        help=(
+            "email address (for example, person@example.com); "
+            "use -- before an address beginning with -"
+        ),
     )
     email_command.set_defaults(handler=lambda args: run_holehe_check(args.email))
 
@@ -405,7 +416,8 @@ def _build_parser():
         "username",
         help=(
             "up to 100 ASCII letters, digits, dots, underscores or hyphens; "
-            "Helix accepts up to 50 and an optional leading @"
+            "Helix accepts up to 50 and an optional leading @; "
+            "use -- before a username beginning with -"
         ),
     )
     username_command.set_defaults(
@@ -430,6 +442,13 @@ def _build_parser():
 
 def cli(argv=None):
     parser = _build_parser()
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv and argv[0] == "check-email" and len(argv) > 1:
+        if argv[1].startswith("-") and argv[1] not in ("--", "-h", "--help"):
+            argv.insert(1, "--")
+    elif argv and argv[0] == "check-username" and len(argv) > 2:
+        if argv[2].startswith("-") and argv[2] not in ("--", "-h", "--help"):
+            argv.insert(2, "--")
     args = parser.parse_args(argv)
     if args.command is None:
         while True:

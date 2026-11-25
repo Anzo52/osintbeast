@@ -2,7 +2,6 @@ import json
 import sqlite3
 import threading
 import time
-from http.server import ThreadingHTTPServer
 from unittest.mock import Mock
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
@@ -70,14 +69,12 @@ def _server(tmp_path, monkeypatch, runner):
     monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", "operator-secret")
     monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", "viewer-secret")
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "web.db"))
-    database.setup_database()
     monkeypatch.setattr(
         web_ui,
         "RUNNABLE_TOOLS",
         {"sherlock": ("username", validate_username, runner)},
     )
-    server = ThreadingHTTPServer(("127.0.0.1", 0), web_ui.WebHandler)
-    server.daemon_threads = True
+    server = web_ui.create_server("127.0.0.1", 0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, f"http://127.0.0.1:{server.server_port}"
@@ -98,7 +95,7 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
         status, running = _request(f"{base_url}/api/runs/{launched['id']}")
         assert status == 200
         assert running["status"] == "running"
-        assert running["input"] == "alice"
+        assert running["input"] == "[redacted]"
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
             status, detail = _request(f"{base_url}/api/runs/{launched['id']}")
@@ -108,8 +105,8 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
 
         assert status == 200
         assert detail["status"] == "success"
-        assert detail["input"] == "alice"
-        assert detail["result"] == f"alice: {output}"
+        assert detail["input"] == "[redacted]"
+        assert detail["result"] == f"[redacted]: {output}"
         assert database.query_database(
             "SELECT toolName, queryText, resultText FROM ToolResults"
         ) == [("sherlock", "alice", f"alice: {output}")]
@@ -134,11 +131,30 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
         server.server_close()
 
 
-def test_web_run_views_show_migrated_legacy_records(tmp_path, monkeypatch):
+def test_shutdown_marks_active_runs_failed(tmp_path, monkeypatch, run_service):
+    server, base_url = _server(tmp_path, monkeypatch, Mock())
+    try:
+        status, launched = _request(
+            f"{base_url}/api/runs",
+            {"tool": "sherlock", "input": "slow", "authorized": True},
+        )
+        assert status == 202
+        run_service.close()
+
+        run = database.get_tool_run(launched["id"])
+        assert run[3] == "failed"
+        assert run[5] == "Run cancelled."
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_web_run_views_redact_legacy_records_without_rewriting_them(
+    tmp_path, monkeypatch
+):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "web.db"))
     database.setup_database()
     with database.connect_db() as conn:
-        conn.execute("DELETE FROM OsintBeastMigrations")
         conn.execute(
             "INSERT INTO ToolRuns (toolName, queryText, status, errorText) "
             "VALUES ('holehe', 'private@example.com', 'failed', 'private%40example.com')"
@@ -153,6 +169,9 @@ def test_web_run_views_show_migrated_legacy_records(tmp_path, monkeypatch):
         assert status == 200
         assert detail["input"] == "[redacted]"
         assert detail["error"] == "[redacted]"
+        assert database.query_database(
+            "SELECT queryText, errorText FROM ToolRuns"
+        ) == [("private@example.com", "private%40example.com")]
     finally:
         server.shutdown()
         server.server_close()
@@ -385,7 +404,7 @@ def test_unexpected_background_error_is_redacted(tmp_path, monkeypatch, caplog):
                 break
             time.sleep(0.01)
         assert detail["status"] == "failed"
-        assert detail["input"] == "unexpected"
+        assert detail["input"] == "[redacted]"
         assert detail["error"] == "sherlock failed unexpectedly (Exception)."
     finally:
         server.shutdown()

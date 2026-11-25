@@ -16,7 +16,6 @@ TOKENS = {OPERATOR_TOKEN: "operator", VIEWER_TOKEN: "viewer"}
 @pytest.fixture
 def api_server(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "api.db"))
-    database.setup_database()
     monkeypatch.setenv("OSINTBEAST_API_TOKENS", json.dumps(TOKENS))
     server = web_api.create_server(port=0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)

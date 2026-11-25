@@ -97,8 +97,9 @@ failed operations print a corrective message and return a nonzero status.
 
 ### Running checks
 
-Select a supported check from the menu. Sensitive input is entered through a
-non-echoing prompt; checks send it to third-party sites. See the
+Select a supported check from the menu. Typed target input is visible in the
+terminal, so be aware of people who can see your screen; checks send it to
+third-party sites. See the
 [running checks guide](doc/wiki/Running-Checks.md) for optional installations,
 tool limits, run history, exports, and privacy details.
 
@@ -149,8 +150,9 @@ database is `osintbeast.db` in the repository root, regardless of the current
 working directory. SQLite initialization creates missing tables and indexes in one
 transaction; running it again preserves existing records and recreates missing
 schema objects, including the new run-history table in existing databases. The
-legacy tool-record redaction runs once per database; it does not repair
-incompatible existing tables.
+initialization does not rewrite legacy records. Saved run and result views
+redact queries and matching result or error text at read time; the database
+values remain unchanged. This does not repair incompatible existing tables.
 
 To use SQLite at a different location, set `OSINTBEAST_DB_PATH` before starting
 the application. For a source checkout, the default remains the repository-root

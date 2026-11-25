@@ -90,7 +90,8 @@ def test_background_outcomes_are_persisted(service, query, status, text):
     run_id = service.submit("maigret", query)
     run = wait_for_run(service, run_id)
     assert run["status"] == status
-    assert run["resultText" if status == "success" else "errorText"] == text
+    expected_text = text.replace(query, "[redacted]")
+    assert run["resultText" if status == "success" else "errorText"] == expected_text
     assert run["finishedAt"] is not None
     assert len(database.list_tool_results()) == (1 if status == "success" else 0)
 
