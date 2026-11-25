@@ -396,6 +396,36 @@ def test_cli_rejects_invalid_email_without_running_tool(monkeypatch, capsys):
     runner.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("arguments", "runner_name", "identifier", "runner_output"),
+    [
+        (
+            ["check-email", "--", "-person@example.com"],
+            "run_holehe",
+            "-person@example.com",
+            {"output": "output"},
+        ),
+        (
+            ["check-username", "sherlock", "--", "-user"],
+            "run_sherlock",
+            "-user",
+            "output",
+        ),
+    ],
+)
+def test_cli_accepts_hyphen_identifiers_after_separator(
+    tmp_path, monkeypatch, arguments, runner_name, identifier, runner_output
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "cli.db"))
+    database.setup_database()
+    runner = Mock(return_value=runner_output)
+    monkeypatch.setattr(main, runner_name, runner)
+
+    assert main.cli(arguments) == 0
+
+    runner.assert_called_once_with(identifier)
+
+
 def test_cli_rejects_invalid_username_with_accepted_format(monkeypatch, capsys):
     runner = Mock()
     monkeypatch.setattr(main, "run_sherlock", runner)
