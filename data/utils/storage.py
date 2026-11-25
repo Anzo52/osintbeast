@@ -580,7 +580,7 @@ class MySQLStorage:
             with self._get_engine().begin() as connection:
                 row = connection.exec_driver_sql(
                     """SELECT requestHash, runID FROM ToolRunRequests
-                       WHERE idempotencyKey = %s FOR UPDATE""",
+                       WHERE idempotencyKey = %s""",
                     (idempotency_key,),
                 ).fetchone()
                 existing = _matching_idempotent_run(row, request_hash)

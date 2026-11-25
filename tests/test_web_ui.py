@@ -790,10 +790,24 @@ const loadRun = async () => { throw new Error("poll failed"); };
   const secondBody = JSON.parse(requests[1].body);
   fail = false;
   await fire();
+  const clearedOnConfirmation = sessionStorage.getItem(pendingKeyName) === null;
+  queryInput.value = "";
+  sessionStorage.setItem(pendingKeyName, saved);
+  new Function("queryInput", "toolSelect", "sessionStorage", "document", "crypto",
+    "updateInputLabel", "error", "showError", "request", "loadRun", __SCRIPT__)(
+      queryInput, toolSelect, sessionStorage, document, crypto, updateInputLabel,
+      error, showError, request, loadRun);
+  queryInput.value = "person@example.com";
+  queryInput.handlers.input();
+  const removedDuringReentry = sessionStorage.getItem(pendingKeyName) === null;
+  fail = true;
+  await fire();
+  const reloadedKey = requests[requests.length - 1].headers["Idempotency-Key"];
   console.log(JSON.stringify({record, saved, clearedOnEdit, sameKey, secondBody,
-    clearedOnConfirmation: sessionStorage.getItem(pendingKeyName) === null}));
+    clearedOnConfirmation, removedDuringReentry, reloadedKey}));
 })().catch(err => { console.error(err); process.exit(1); });
 """
+    harness = harness.replace("__SCRIPT__", json.dumps(script))
     result = subprocess.run(
         ["node", "-e", harness], check=True, capture_output=True, text=True, timeout=10,
     )
@@ -804,3 +818,5 @@ const loadRun = async () => { throw new Error("poll failed"); };
     assert outcome["clearedOnEdit"] and outcome["sameKey"]
     assert outcome["secondBody"]["input"] == "person@example.com"
     assert outcome["clearedOnConfirmation"]
+    assert outcome["removedDuringReentry"]
+    assert outcome["reloadedKey"] == outcome["record"]["key"]

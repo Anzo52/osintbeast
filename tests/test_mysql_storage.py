@@ -4,6 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
 
 import data.utils.database as database
 from data.utils.storage import MySQLStorage, StorageError
@@ -101,6 +102,22 @@ def test_mysql_initialization_executes_both_idempotent_schema_files(mysql_storag
         in statement
         for statement in statements
     )
+
+
+def test_mysql_concurrent_idempotency_uses_unique_key_without_gap_lock(mysql_storage, monkeypatch):
+    storage, engine = mysql_storage
+    connection = engine.connection
+    select = Mock()
+    select.fetchone.return_value = None
+    insert = Mock(lastrowid=42)
+    conflict = IntegrityError("insert", (), Exception("duplicate key"))
+    execute = Mock(side_effect=[select, insert, conflict])
+    monkeypatch.setattr(connection, "exec_driver_sql", execute)
+    monkeypatch.setattr(storage, "get_idempotent_tool_run", Mock(return_value=41))
+
+    assert storage.start_idempotent_tool_run("maigret", "user", "key", "hash") == (41, False)
+    assert "FOR UPDATE" not in execute.call_args_list[0].args[0]
+    assert engine.transaction_errors == [conflict]
 
 
 def test_mysql_core_operations_use_bound_values_and_preserve_transactional_flow(

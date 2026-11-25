@@ -205,6 +205,12 @@ INDEX_HTML = """<!doctype html>
 
     const pendingKeyName = "osintbeastPendingRun";
     let inputVersion = 0;
+    let restoredPending = null;
+    if (!queryInput.value) {
+      try {
+        restoredPending = JSON.parse(sessionStorage.getItem(pendingKeyName));
+      } catch (_) {}
+    }
     function clearPendingKey() {
       sessionStorage.removeItem(pendingKeyName);
     }
@@ -236,17 +242,18 @@ INDEX_HTML = """<!doctype html>
       try {
         let pending;
         try {
-          pending = JSON.parse(sessionStorage.getItem(pendingKeyName));
+          pending = JSON.parse(sessionStorage.getItem(pendingKeyName)) || restoredPending;
         } catch (_) {
-          pending = null;
+          pending = restoredPending;
         }
+        restoredPending = null;
         if (!pending || typeof pending.key !== "string" || pending.tool !== tool ||
             pending.fingerprint !== await submissionFingerprint(pending.key, tool, input)) {
           const key = crypto.randomUUID();
           pending = {key, tool, fingerprint: await submissionFingerprint(key, tool, input)};
-          if (inputVersion === version) {
-            sessionStorage.setItem(pendingKeyName, JSON.stringify(pending));
-          }
+        }
+        if (inputVersion === version) {
+          sessionStorage.setItem(pendingKeyName, JSON.stringify(pending));
         }
         const run = await request("/api/runs", {
           method: "POST",

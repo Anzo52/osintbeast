@@ -391,7 +391,9 @@ may launch runs and read results; viewers may only read results. The browser
 prompts for a token and keeps it in session storage for the current tab.
 The browser retains a pending idempotency key and a fingerprint of the input in
 session storage across reloads, without storing the raw input there. It clears
-the key on confirmation or input change. Launch retries use the key so the same
+the stored key on confirmation or input change. If a reload leaves the input
+empty, re-entering the same input and submitting can recover the key from memory;
+reloading again before submitting loses it. Launch retries use the key so the same
 submitted request returns its original run instead of starting another. The server binds only to resolved
 IPv4 or IPv6 loopback addresses. Do not expose it through a tunnel or reverse
 proxy; keep its database and results restricted to authorized local users.
