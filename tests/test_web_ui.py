@@ -4,11 +4,10 @@ import sqlite3
 import threading
 import time
 import uuid
-from http.server import ThreadingHTTPServer
+from unittest.mock import Mock
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
-from unittest.mock import Mock
 
 import pytest
 
@@ -78,14 +77,12 @@ def _server(tmp_path, monkeypatch, runner):
     monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", OPERATOR_TOKEN)
     monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", VIEWER_TOKEN)
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "web.db"))
-    database.setup_database()
     monkeypatch.setattr(
         web_ui,
         "RUNNABLE_TOOLS",
         {"sherlock": ("username", validate_username, runner)},
     )
-    server = ThreadingHTTPServer(("127.0.0.1", 0), web_ui.WebHandler)
-    server.daemon_threads = True
+    server = web_ui.create_server("127.0.0.1", 0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, f"http://127.0.0.1:{server.server_port}"
@@ -106,7 +103,7 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
         status, running = _request(f"{base_url}/api/runs/{launched['id']}")
         assert status == 200
         assert running["status"] == "running"
-        assert running["input"] == "alice"
+        assert running["input"] == "[redacted]"
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
             status, detail = _request(f"{base_url}/api/runs/{launched['id']}")
@@ -116,8 +113,8 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
 
         assert status == 200
         assert detail["status"] == "success"
-        assert detail["input"] == "alice"
-        assert detail["result"] == f"alice: {output}"
+        assert detail["input"] == "[redacted]"
+        assert detail["result"] == f"[redacted]: {output}"
         assert database.query_database(
             "SELECT toolName, queryText, resultText FROM ToolResults"
         ) == [("sherlock", "alice", f"alice: {output}")]
@@ -127,7 +124,8 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
         assert recent[0]["id"] == launched["id"]
         assert recent[0]["status"] == "success"
 
-        with urlopen(base_url, timeout=2) as response:
+        page_request = Request(base_url)
+        with urlopen(page_request, timeout=2) as response:
             page = response.read().decode()
         assert "Authorization required" in page
         assert 'id="authorized" type="checkbox" required' in page
@@ -138,11 +136,30 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
         server.server_close()
 
 
-def test_web_run_views_show_migrated_legacy_records(tmp_path, monkeypatch):
+def test_shutdown_marks_active_runs_failed(tmp_path, monkeypatch, run_service):
+    server, base_url = _server(tmp_path, monkeypatch, Mock())
+    try:
+        status, launched = _request(
+            f"{base_url}/api/runs",
+            {"tool": "sherlock", "input": "slow", "authorized": True},
+        )
+        assert status == 202
+        run_service.close()
+
+        run = database.get_tool_run(launched["id"])
+        assert run[3] == "failed"
+        assert run[5] == "Run cancelled."
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_web_run_views_redact_legacy_records_without_rewriting_them(
+    tmp_path, monkeypatch
+):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "web.db"))
     database.setup_database()
     with database.connect_db() as conn:
-        conn.execute("DELETE FROM OsintBeastMigrations")
         conn.execute(
             "INSERT INTO ToolRuns (toolName, queryText, status, errorText) "
             "VALUES ('holehe', 'private@example.com', 'failed', 'private%40example.com')"
@@ -157,6 +174,9 @@ def test_web_run_views_show_migrated_legacy_records(tmp_path, monkeypatch):
         assert status == 200
         assert detail["input"] == "[redacted]"
         assert detail["error"] == "[redacted]"
+        assert database.query_database(
+            "SELECT queryText, errorText FROM ToolRuns"
+        ) == [("private@example.com", "private%40example.com")]
     finally:
         server.shutdown()
         server.server_close()
@@ -284,9 +304,7 @@ def test_validation_and_authorization_failures_do_not_launch(
         server.server_close()
 
 
-def test_viewer_authentication_cannot_launch_and_401_has_challenge(
-    tmp_path, monkeypatch
-):
+def test_browser_authentication_roles(tmp_path, monkeypatch):
     runner = Mock(return_value="should not run")
     server, base_url = _server(tmp_path, monkeypatch, runner)
     try:
@@ -306,6 +324,11 @@ def test_viewer_authentication_cannot_launch_and_401_has_challenge(
         assert status == 401
         assert body["error"] == "Invalid credentials."
 
+        page_request = Request(base_url)
+        with urlopen(page_request, timeout=2) as response:
+            page = response.read().decode()
+        assert "Authorized tool runs" in page
+
         connection = http.client.HTTPConnection(
             "127.0.0.1", server.server_port, timeout=2
         )
@@ -323,6 +346,13 @@ def test_viewer_authentication_cannot_launch_and_401_has_challenge(
         )
         assert status == 403
         assert body["error"] == "Operator role required."
+
+        status, body = _request(
+            f"{base_url}/api/runs",
+            headers={"Authorization": ""},
+        )
+        assert status == 401
+        assert body["error"] == "Authentication required."
         runner.assert_not_called()
         assert database.query_database("SELECT * FROM ToolRuns") == []
     finally:
@@ -424,6 +454,19 @@ def test_launch_idempotency_returns_existing_run(tmp_path, monkeypatch):
         server.server_close()
 
 
+def test_missing_auth_configuration_and_non_loopback_bind_fail_closed(monkeypatch):
+    monkeypatch.delenv("OSINTBEAST_OPERATOR_TOKEN", raising=False)
+    monkeypatch.delenv("OSINTBEAST_VIEWER_TOKEN", raising=False)
+
+    with pytest.raises(RuntimeError, match="tokens"):
+        web_ui.create_server("127.0.0.1", 0)
+
+    monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", OPERATOR_TOKEN)
+    monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", VIEWER_TOKEN)
+    with pytest.raises(ValueError, match="loopback"):
+        web_ui.create_server("0.0.0.0", 0)
+
+
 def test_terminal_tool_error_is_available_for_review(tmp_path, monkeypatch):
     runner = Mock(side_effect=RuntimeError("dependency missing"))
     server, base_url = _server(tmp_path, monkeypatch, runner)
@@ -466,7 +509,7 @@ def test_unexpected_background_error_is_redacted(tmp_path, monkeypatch, caplog):
                 break
             time.sleep(0.01)
         assert detail["status"] == "failed"
-        assert detail["input"] == "unexpected"
+        assert detail["input"] == "[redacted]"
         assert detail["error"] == "sherlock failed unexpectedly (Exception)."
     finally:
         server.shutdown()

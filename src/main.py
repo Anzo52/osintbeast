@@ -2,27 +2,30 @@ import argparse
 import os
 import subprocess
 import sys
+import tempfile
 import zipfile
 import zlib
 
 from simple_term_menu import TerminalMenu
 
-from checkers import _run_email_check_menu, _run_username_check_menu
-import data.utils.database as database
 from backend_services import get_recent_tool_runs, get_saved_tool_results
-from data.utils.init_db import init_db
-from menu_utils import _choose_option, _download_tool_menu, _install_tool_menu
+from checkers import _run_email_check_menu, _run_username_check_menu
+from data.utils import database
 from data.utils.database import (
     export_tool_runs_json,
     get_tool_run,
     list_tool_runs,
 )
+from data.utils.init_db import init_db
 from downloader import download_tool
-from helix_integration import run_helix, validate_username as validate_helix_username
-from installer import install_tool
+from helix_integration import run_helix
+from helix_integration import validate_username as validate_helix_username
 from holehe_integration import run_holehe, validate_email
+from installer import install_tool
 from maigret_integration import run_maigret, validate_username
-from sherlock_integration import run_sherlock, validate_username as validate_sherlock_username
+from menu_utils import _choose_option, _download_tool_menu, _install_tool_menu
+from sherlock_integration import run_sherlock
+from sherlock_integration import validate_username as validate_sherlock_username
 from tool_registry import get_supported_tools, is_tool_installed
 from tool_runs import execute_tool_run
 
@@ -115,7 +118,7 @@ def _run_check(tool_name, query_text, validator, runner):
         status, value = execute_tool_run(
             tool_name, query_text, runner, sensitive_input=True
         )
-    except database.DATABASE_ERRORS as exc:
+    except (OSError, *database.DATABASE_ERRORS) as exc:
         print(f"Could not record {tool_name} run: {exc}. Initialize the database and check its permissions.")
         return 1
     if status == "success":
@@ -182,32 +185,37 @@ def query_menu():
         return query_view("results")
 
 
-def show_run_history(tool_name=None, status=None, offset=0):
+def show_run_history(tool_name=None, status=None, offset=0, cursor=None):
     try:
         runs = list_tool_runs(
-            limit=20, offset=offset, tool_name=tool_name, status=status
+            limit=20, offset=offset, tool_name=tool_name, status=status,
+            cursor=cursor, redact_sensitive=True,
         )
-    except database.DATABASE_ERRORS as exc:
+    except (OSError, *database.DATABASE_ERRORS) as exc:
         print(f"Run history query failed: {exc}")
-        return
+        return []
+    except ValueError as exc:
+        print(f"Invalid history filter: {exc}")
+        return []
     if not runs:
         print("No matching runs.")
-        return
+        return []
     for run_id, tool, query_text, run_status, started, finished, _error in runs:
         summary = query_text[:80] + ("…" if len(query_text) > 80 else "")
         print(
             f"Run {run_id} | {tool} | input={summary!r} | {run_status} | "
             f"started={started} | finished={finished or '—'}"
         )
+    return runs
 
 
 def inspect_tool_run(run_id):
     try:
-        run = get_tool_run(run_id)
+        run = get_tool_run(run_id, redact_sensitive=True)
     except ValueError as exc:
         print(f"Could not inspect run: {exc}")
         return
-    except database.DATABASE_ERRORS as exc:
+    except (OSError, *database.DATABASE_ERRORS) as exc:
         print(f"Could not inspect run: {exc}")
         return
     if run is None:
@@ -234,6 +242,26 @@ def _parse_run_ids(value):
     return run_ids
 
 
+def _write_export_file(output_path, content):
+    destination = os.path.abspath(output_path)
+    directory = os.path.dirname(destination)
+    prefix = f".{os.path.basename(destination)}."
+    descriptor, temporary_path = tempfile.mkstemp(
+        prefix=prefix, suffix=".tmp", dir=directory
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as export_file:
+            export_file.write(content + "\n")
+            export_file.flush()
+            os.fsync(export_file.fileno())
+        os.link(temporary_path, destination)
+    finally:
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
+
+
 def export_selected_runs():
     run_ids = _parse_run_ids(input("Run IDs to export (comma-separated): "))
     if run_ids is None:
@@ -245,15 +273,17 @@ def export_selected_runs():
     include_sensitive = input(
         "Include sensitive input, result, and error text? [y/N]: "
     ).strip().casefold() in {"y", "yes"}
+    if include_sensitive and os.name == "nt":
+        print(
+            "Sensitive exports are disabled on Windows because file permissions "
+            "are inherited from the destination directory."
+        )
+        return
     try:
-        content = export_tool_runs_json(run_ids, include_sensitive=include_sensitive)
-        with open(
-            output_path,
-            "x",
-            encoding="utf-8",
-            opener=lambda path, flags: os.open(path, flags, 0o600),
-        ) as export_file:
-            export_file.write(content + "\n")
+        content = export_tool_runs_json(
+            run_ids, include_sensitive=include_sensitive
+        )
+        _write_export_file(output_path, content)
     except (OSError, ValueError, *database.DATABASE_ERRORS) as exc:
         print(f"Could not export runs: {exc}")
         return
@@ -263,8 +293,8 @@ def export_selected_runs():
 def run_history_menu():
     tool_name = None
     status = None
-    offset = 0
-    show_run_history(tool_name, status, offset)
+    page_cursors = [None]
+    current_runs = show_run_history(tool_name, status)
     options = [
         "Refresh history",
         "Filter by tool/status",
@@ -279,7 +309,9 @@ def run_history_menu():
         if choice is None or choice == 6:
             return
         if choice == 0:
-            show_run_history(tool_name, status, offset)
+            current_runs = show_run_history(
+                tool_name, status, cursor=page_cursors[-1]
+            )
         elif choice == 1:
             tool_value = input("Tool name (blank for any): ").strip()
             status_value = input(
@@ -287,16 +319,18 @@ def run_history_menu():
             ).strip()
             tool_name = tool_value or None
             status = status_value or None
-            offset = 0
+            page_cursors = [None]
             try:
-                list_tool_runs(tool_name=tool_name, status=status)
+                list_tool_runs(
+                    limit=1, tool_name=tool_name, status=status
+                )
             except ValueError as exc:
                 print(f"Invalid history filter: {exc}")
                 tool_name = status = None
-            except database.DATABASE_ERRORS as exc:
+            except (OSError, *database.DATABASE_ERRORS) as exc:
                 print(f"Run history query failed: {exc}")
                 continue
-            show_run_history(tool_name, status, offset)
+            current_runs = show_run_history(tool_name, status)
         elif choice == 2:
             value = input("Run ID to inspect: ").strip()
             try:
@@ -304,11 +338,17 @@ def run_history_menu():
             except ValueError:
                 print("Enter a valid run ID.")
         elif choice == 3:
-            offset += 20
-            show_run_history(tool_name, status, offset)
+            if len(current_runs) == 20:
+                page_cursors.append(current_runs[-1][0])
+                current_runs = show_run_history(
+                    tool_name, status, cursor=page_cursors[-1]
+                )
         elif choice == 4:
-            offset = max(0, offset - 20)
-            show_run_history(tool_name, status, offset)
+            if len(page_cursors) > 1:
+                page_cursors.pop()
+                current_runs = show_run_history(
+                    tool_name, status, cursor=page_cursors[-1]
+                )
         elif choice == 5:
             export_selected_runs()
 
@@ -351,7 +391,10 @@ def _build_parser():
     email_command = commands.add_parser("check-email", help="check an email address with Holehe")
     email_command.add_argument(
         "email",
-        help="email address (for example, person@example.com)",
+        help=(
+            "email address (for example, person@example.com); "
+            "use -- before an address beginning with -"
+        ),
     )
     email_command.set_defaults(handler=lambda args: run_holehe_check(args.email))
 
@@ -368,7 +411,8 @@ def _build_parser():
         "username",
         help=(
             "up to 100 ASCII letters, digits, dots, underscores or hyphens; "
-            "Helix accepts up to 50 and an optional leading @"
+            "Helix accepts up to 50 and an optional leading @; "
+            "use -- before a username beginning with -"
         ),
     )
     username_command.set_defaults(
@@ -393,6 +437,13 @@ def _build_parser():
 
 def cli(argv=None):
     parser = _build_parser()
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if argv and argv[0] == "check-email" and len(argv) > 1:
+        if argv[1].startswith("-") and argv[1] not in ("--", "-h", "--help"):
+            argv.insert(1, "--")
+    elif argv and argv[0] == "check-username" and len(argv) > 2:
+        if argv[2].startswith("-") and argv[2] not in ("--", "-h", "--help"):
+            argv.insert(2, "--")
     args = parser.parse_args(argv)
     if args.command is None:
         while True:

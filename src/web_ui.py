@@ -9,13 +9,16 @@ import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
-import data.utils.database as database
 from background_runs import BackgroundRuns, CapacityError
-from helix_integration import run_helix, validate_username as validate_helix_username
+from data.utils import database
+from helix_integration import run_helix
+from helix_integration import validate_username as validate_helix_username
 from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username
-from sherlock_integration import run_sherlock, validate_username as validate_sherlock_username
+from sherlock_integration import run_sherlock
+from sherlock_integration import validate_username as validate_sherlock_username
 from tool_registry import get_tool_metadata
+
 
 RUN_SERVICE = BackgroundRuns()
 RUNNABLE_TOOLS = {
@@ -140,7 +143,7 @@ INDEX_HTML = """<!doctype html>
         sessionStorage.removeItem("osintbeastToken");
         throw new Error("Authentication failed.");
       }
-      sessionStorage.setItem("osintbeastToken", token);
+      if (token) sessionStorage.setItem("osintbeastToken", token);
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || "Request failed.");
       return body;
@@ -247,6 +250,37 @@ INDEX_HTML = """<!doctype html>
 
 class WebHandler(BaseHTTPRequestHandler):
     server_version = "OSINTBeast"
+
+    def _authenticate(self, required_role):
+        tokens = _configured_tokens()
+        if not tokens["operator"] or not tokens["viewer"]:
+            self._send_json(503, {"error": "Authentication is not configured."})
+            return False
+        authorization = self.headers.get("Authorization", "")
+        scheme, _, credential = authorization.partition(" ")
+        credential = credential.strip()
+        if scheme.lower() != "bearer" or not credential:
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", "Bearer")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            self.wfile.write(json.dumps(
+                {"error": "Authentication required."},
+                ensure_ascii=False,
+            ).encode("utf-8"))
+            return False
+        if tokens["operator"] and hmac.compare_digest(credential, tokens["operator"]):
+            role = "operator"
+        elif tokens["viewer"] and hmac.compare_digest(credential, tokens["viewer"]):
+            role = "viewer"
+        else:
+            self._send_json(401, {"error": "Invalid credentials."})
+            return False
+        if required_role == "operator" and role != "operator":
+            self._send_json(403, {"error": "Operator role required."})
+            return False
+        return True
 
     def _has_local_host(self):
         host_header = self.headers.get("Host", "")
@@ -400,7 +434,12 @@ class WebHandler(BaseHTTPRequestHandler):
                 limit = int(values[0])
                 self._send_json(
                     200,
-                    [self._run_payload(row) for row in database.list_tool_runs(limit)],
+                    [
+                        self._run_payload(row)
+                        for row in database.list_tool_runs(
+                            limit, redact_sensitive=True
+                        )
+                    ],
                 )
             elif path.path.startswith("/api/runs/"):
                 run_id_text = path.path.removeprefix("/api/runs/")
@@ -409,7 +448,9 @@ class WebHandler(BaseHTTPRequestHandler):
                     return
                 RUN_SERVICE.status(int(run_id_text))
                 database.reconcile_stale_tool_runs()
-                row = database.get_tool_run(int(run_id_text))
+                row = database.get_tool_run(
+                    int(run_id_text), redact_sensitive=True
+                )
                 if row is None:
                     self._send_json(404, {"error": "Run not found."})
                 else:
@@ -502,22 +543,29 @@ class WebHandler(BaseHTTPRequestHandler):
     do_OPTIONS = _reject_method
 
 
-def serve(host="127.0.0.1", port=8000):
-    """Serve the web UI on loopback by default."""
+def create_server(host="127.0.0.1", port=8000):
+    """Create an initialized, authenticated web server."""
     address = _resolve_loopback_host(host)
     _configured_tokens()
     database.setup_database()
     server = _create_http_server(address, port)
     server.daemon_threads = True
-    displayed_host = f"[{address}]" if address.version == 6 else str(address)
+    return server
+
+
+def serve(host="127.0.0.1", port=8000):
+    """Serve the web UI on loopback by default."""
+    server = create_server(host, port)
+    address = server.server_address[0]
+    displayed_host = f"[{address}]" if server.address_family == socket.AF_INET6 else address
     print(f"OSINT Beast web UI: http://{displayed_host}:{server.server_port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        server.server_close()
         RUN_SERVICE.close()
+        server.server_close()
 
 
 if __name__ == "__main__":

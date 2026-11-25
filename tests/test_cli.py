@@ -6,7 +6,6 @@ from unittest.mock import Mock
 
 import pytest
 
-import checkers
 import data.utils.database as database
 import main
 import menu_utils
@@ -183,7 +182,7 @@ def test_helix_menu_action_dispatches_username(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr(checkers, "getpass", lambda prompt: " @user ")
+    monkeypatch.setattr("builtins.input", lambda prompt: " @user ")
     monkeypatch.setattr(main, "run_helix_check", runner)
 
     main.main_menu()
@@ -201,7 +200,7 @@ def test_holehe_menu_action_dispatches_email(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr(checkers, "getpass", lambda prompt: " person@example.com ")
+    monkeypatch.setattr("builtins.input", lambda prompt: " person@example.com ")
     monkeypatch.setattr(main, "run_holehe_check", runner)
 
     main.main_menu()
@@ -219,7 +218,7 @@ def test_sherlock_menu_action_dispatches_username(monkeypatch):
 
     runner = Mock()
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
-    monkeypatch.setattr(checkers, "getpass", lambda prompt: " user ")
+    monkeypatch.setattr("builtins.input", lambda prompt: " user ")
     monkeypatch.setattr(main, "run_sherlock_check", runner)
 
     main.main_menu()
@@ -316,11 +315,10 @@ def test_query_menu_offers_structured_run_history(monkeypatch):
 
 
 @pytest.mark.parametrize("choice", [0, 1])
-def test_saved_views_migrate_legacy_records(tmp_path, monkeypatch, capsys, choice):
+def test_saved_views_redact_legacy_records(tmp_path, monkeypatch, capsys, choice):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "legacy.db"))
     database.setup_database()
     with database.connect_db() as conn:
-        conn.execute("DELETE FROM OsintBeastMigrations")
         conn.execute(
             "INSERT INTO ToolResults (toolName, queryText, resultText) "
             "VALUES ('holehe', 'private@example.com', 'private@example.com result')"
@@ -339,7 +337,7 @@ def test_saved_views_migrate_legacy_records(tmp_path, monkeypatch, capsys, choic
     assert "[redacted]" in output
 
 
-def test_saved_view_does_not_query_if_migration_fails(monkeypatch, capsys):
+def test_saved_view_does_not_query_if_initialization_fails(monkeypatch, capsys):
     monkeypatch.setattr(main, "_choose_option", lambda *args: 0)
     monkeypatch.setattr(
         database, "setup_database", Mock(side_effect=sqlite3.OperationalError("failed"))
@@ -398,6 +396,36 @@ def test_cli_rejects_invalid_email_without_running_tool(monkeypatch, capsys):
     runner.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("arguments", "runner_name", "identifier", "runner_output"),
+    [
+        (
+            ["check-email", "--", "-person@example.com"],
+            "run_holehe",
+            "-person@example.com",
+            {"output": "output"},
+        ),
+        (
+            ["check-username", "sherlock", "--", "-user"],
+            "run_sherlock",
+            "-user",
+            "output",
+        ),
+    ],
+)
+def test_cli_accepts_hyphen_identifiers_after_separator(
+    tmp_path, monkeypatch, arguments, runner_name, identifier, runner_output
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "cli.db"))
+    database.setup_database()
+    runner = Mock(return_value=runner_output)
+    monkeypatch.setattr(main, runner_name, runner)
+
+    assert main.cli(arguments) == 0
+
+    runner.assert_called_once_with(identifier)
+
+
 def test_cli_rejects_invalid_username_with_accepted_format(monkeypatch, capsys):
     runner = Mock()
     monkeypatch.setattr(main, "run_sherlock", runner)
@@ -410,6 +438,24 @@ def test_cli_rejects_invalid_username_with_accepted_format(monkeypatch, capsys):
         in capsys.readouterr().out
     )
     runner.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("argv", "runner_name", "identifier"),
+    [
+        (["check-email", "-person@example.com"], "run_holehe_check", "-person@example.com"),
+        (["check-username", "maigret", "-user"], "run_maigret_check", "-user"),
+    ],
+)
+def test_cli_accepts_identifiers_starting_with_hyphen(
+    monkeypatch, argv, runner_name, identifier
+):
+    runner = Mock(return_value=0)
+    monkeypatch.setattr(main, runner_name, runner)
+
+    assert main.cli(argv) == 0
+
+    runner.assert_called_once_with(identifier)
 
 
 def test_cli_reports_optional_dependency_failure_and_nonzero_status(
@@ -449,11 +495,10 @@ def test_cli_returns_nonzero_for_database_execution_error(monkeypatch, capsys):
 
 
 @pytest.mark.parametrize("view", ["runs", "results"])
-def test_cli_query_migrates_legacy_records(tmp_path, monkeypatch, capsys, view):
+def test_cli_query_redacts_legacy_records(tmp_path, monkeypatch, capsys, view):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "legacy-cli.db"))
     database.setup_database()
     with database.connect_db() as conn:
-        conn.execute("DELETE FROM OsintBeastMigrations")
         conn.execute(
             "INSERT INTO ToolResults (toolName, queryText, resultText) "
             "VALUES ('holehe', 'private@example.com', 'private@example.com result')"
