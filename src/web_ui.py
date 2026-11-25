@@ -7,7 +7,9 @@ import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
-from background_runs import BackgroundRuns, CapacityError, IdempotencyConflict
+from background_runs import (
+    BackgroundRuns, CapacityError, IdempotencyConflict, StartupPersistenceError,
+)
 from data.utils import database
 from helix_integration import run_helix, validate_username as validate_helix_username
 from holehe_integration import run_holehe, validate_email
@@ -110,7 +112,10 @@ INDEX_HTML = """<!doctype html>
       }
       if (token) sessionStorage.setItem("osintbeastToken", token);
       const body = await response.json();
-      if (!response.ok) throw new Error(body.error || "Request failed.");
+      if (!response.ok) {
+        const run = Number.isSafeInteger(body.id) ? ` Run #${body.id}.` : "";
+        throw new Error((body.error || "Request failed.") + run);
+      }
       return body;
     }
 
@@ -434,6 +439,11 @@ class WebHandler(BaseHTTPRequestHandler):
             self._send_json(409, {"error": str(exc)})
         except CapacityError:
             self._send_json(503, {"error": "Background run capacity reached. Try again later."})
+        except StartupPersistenceError as exc:
+            self._send_json(503, {
+                "error": "Could not persist the run outcome. Retry status later.",
+                "id": exc.run_id,
+            })
         except (RuntimeError, OSError):
             self._send_json(503, {"error": "The tool run could not be started. Try again later."})
         except database.DATABASE_ERRORS:

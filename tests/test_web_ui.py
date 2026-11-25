@@ -501,3 +501,26 @@ def test_browser_capacity_rejection_and_recovery(tmp_path, monkeypatch, run_serv
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_browser_exposes_run_id_when_startup_failure_cannot_be_saved(tmp_path, monkeypatch):
+    server, base_url = _server(tmp_path, monkeypatch, Mock())
+    run_service = web_ui.RUN_SERVICE
+    run_id = database.start_tool_run("sherlock", "alice")
+    run_service._pending[run_id] = ("failed", "Could not start background worker.")
+    monkeypatch.setattr(
+        run_service, "submit", Mock(side_effect=background_runs.StartupPersistenceError(run_id))
+    )
+    try:
+        status, body = _request(
+            f"{base_url}/api/runs",
+            {"tool": "sherlock", "input": "alice", "authorized": True},
+        )
+        assert status == 503
+        assert body["id"] == run_id
+        status, detail = _request(f"{base_url}/api/runs/{run_id}")
+        assert status == 200
+        assert detail["error"] == "Could not start background worker."
+    finally:
+        server.shutdown()
+        server.server_close()

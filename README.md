@@ -330,6 +330,10 @@ capacity slot reserved while retrying the write independently of status
 requests. Calling `status(run_id)` also retries immediately and raises
 `RuntimeError` if the outcome still cannot be saved. Pending outcomes are lost
 if the application process exits.
+If starting the supervisor fails and recording that failure also fails,
+`submit` raises `StartupPersistenceError` with a `run_id` attribute; retry
+`status(run_id)` after database access is restored. The browser API includes
+that ID in its 503 response.
 
 These limits apply per service instance, not across web server processes or
 hosts. Use a single application process or an external coordinator to enforce
