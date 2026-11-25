@@ -449,7 +449,7 @@ def test_launch_idempotency_returns_existing_run(tmp_path, monkeypatch):
             {"Idempotency-Key": key},
         )
         assert status == 409
-        assert "different request" in body["error"]
+        assert "different run" in body["error"]
         assert len(database.list_tool_runs()) == 1
     finally:
         server.shutdown()
@@ -557,6 +557,8 @@ def test_serve_creates_a_fresh_run_service_each_time(monkeypatch):
 
     class Server:
         server_port = 8000
+        server_address = ("127.0.0.1", server_port)
+        address_family = web_ui.socket.AF_INET
 
         def __init__(self, _address, _handler):
             pass
@@ -570,8 +572,8 @@ def test_serve_creates_a_fresh_run_service_each_time(monkeypatch):
     monkeypatch.setattr(web_ui, "BackgroundRuns", Service)
     monkeypatch.setattr(web_ui, "ThreadingHTTPServer", Server)
     monkeypatch.setattr(database, "setup_database", Mock())
-    monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", "operator")
-    monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", "viewer")
+    monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", OPERATOR_TOKEN)
+    monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", VIEWER_TOKEN)
 
     web_ui.serve()
     web_ui.serve()
