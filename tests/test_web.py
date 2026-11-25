@@ -176,7 +176,7 @@ def test_result_route_returns_saved_result_without_query_text(client, monkeypatc
 
     response = client.get("/api/results/9", headers=auth_headers())
 
-    get_result.assert_called_once_with(9)
+    get_result.assert_called_once_with(9, redact_sensitive=True)
     assert response.status_code == 200
     assert response.json == {
         "result_id": 9,

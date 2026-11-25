@@ -39,7 +39,10 @@ __all__ = (
 
 def get_recent_tool_runs(limit: int = 20) -> list[RecentToolRun]:
     """Return a bounded page of named recent tool runs."""
-    return [RecentToolRun(*row) for row in _list_tool_runs(limit)]
+    return [
+        RecentToolRun(*row)
+        for row in _list_tool_runs(limit, redact_sensitive=True)
+    ]
 
 
 def get_saved_tool_results(limit: int = 20) -> list[SavedToolResult]:
@@ -51,6 +54,8 @@ def get_saved_tool_results(limit: int = 20) -> list[SavedToolResult]:
     ):
         raise ValueError("limit must be between 1 and 20")
     rows = _list_tool_results(
-        limit, max_result_text_chars=MAX_SAVED_RESULT_TEXT_CHARS
+        limit,
+        max_result_text_chars=MAX_SAVED_RESULT_TEXT_CHARS,
+        redact_sensitive=True,
     )
     return [SavedToolResult(*row) for row in rows]
