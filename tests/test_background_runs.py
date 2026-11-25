@@ -176,6 +176,30 @@ def test_close_cancels_active_work_and_rejects_new_work(service):
         service.submit("maigret", "user")
 
 
+def test_close_is_bounded_when_final_persistence_stalls(service, monkeypatch, caplog):
+    entered, release = threading.Event(), threading.Event()
+    finish = database.finish_tool_run
+
+    def stalled_finish(*args, **kwargs):
+        entered.set()
+        release.wait(5)
+        return finish(*args, **kwargs)
+
+    monkeypatch.setattr(database, "finish_tool_run", stalled_finish)
+    monkeypatch.setattr(background_runs, "_SHUTDOWN_TIMEOUT_SECONDS", 0.1)
+    service.submit("maigret", "user")
+    try:
+        assert entered.wait(5)
+        start = time.monotonic()
+        service.close()
+        assert time.monotonic() - start < 0.5
+        assert "shutdown wait exceeded" in caplog.text
+    finally:
+        release.set()
+        monkeypatch.setattr(background_runs, "_SHUTDOWN_TIMEOUT_SECONDS", 5)
+        service.close()
+
+
 def test_process_start_failure_is_recorded(service, monkeypatch):
     process = Mock(pid=None)
     process.start.side_effect = OSError("cannot start")
@@ -218,6 +242,7 @@ def test_received_result_wins_over_late_cancellation_and_timeout(service, monkey
         service.cancel(run_id)
     ))
     service._supervise(run_id, "maigret", "user", cancel, completed)
+    monkeypatch.setattr(background_runs, "time", time)
     assert service.status(run_id)["status"] == "success"
     assert late_cancellation == [False]
     receiver.poll.assert_called_once_with(0)
@@ -383,14 +408,19 @@ def test_terminal_outcomes_survive_late_cancellation(service, monkeypatch, outco
         receiver.recv_bytes.side_effect = EOFError()
     monkeypatch.setattr(service._context, "Pipe", lambda **kwargs: (receiver, sender))
     monkeypatch.setattr(service._context, "Process", lambda **kwargs: process)
-    monkeypatch.setattr(background_runs.time, "monotonic", Mock(side_effect=[0, 2]))
+    with monkeypatch.context() as time_mock:
+        time_mock.setattr(
+            background_runs,
+            "time",
+            SimpleNamespace(monotonic=Mock(side_effect=[0, 2])),
+        )
 
-    def stop(_):
-        if outcome in ("timeout", "crash"):
-            assert not service.cancel(run_id)
+        def stop(_):
+            if outcome in ("timeout", "crash"):
+                assert not service.cancel(run_id)
 
-    monkeypatch.setattr(background_runs, "_stop_process", stop)
-    service._supervise(run_id, "maigret", "user", cancel, completed)
+        monkeypatch.setattr(background_runs, "_stop_process", stop)
+        service._supervise(run_id, "maigret", "user", cancel, completed)
     run = service.status(run_id)
     assert run["status"] == {"result": "success", "timeout": "timed_out", "crash": "failed"}[outcome]
     assert run["resultText" if outcome == "result" else "errorText"] == {
