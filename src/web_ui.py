@@ -21,7 +21,6 @@ from sherlock_integration import validate_username as validate_sherlock_username
 from tool_registry import get_tool_metadata
 
 
-RUN_SERVICE = BackgroundRuns()
 RUNNABLE_TOOLS = {
     "holehe": ("email", validate_email, lambda value: run_holehe(value)["output"]),
     "maigret": ("username", validate_username, run_maigret),
@@ -203,13 +202,17 @@ INDEX_HTML = """<!doctype html>
       error.textContent = reason.message;
     }
 
-    let idempotencyKey = null;
+    const pendingKeyName = "osintbeast-pending-run";
+    function clearPendingKey() {
+      sessionStorage.removeItem(pendingKeyName);
+    }
+    async function submissionFingerprint(key, tool, input) {
+      const bytes = new TextEncoder().encode(JSON.stringify([key, tool, input]));
+      const digest = await crypto.subtle.digest("SHA-256", bytes);
+      return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+    }
     toolSelect.addEventListener("change", () => {
-      idempotencyKey = null;
       updateInputLabel();
-    });
-    queryInput.addEventListener("input", () => {
-      idempotencyKey = null;
     });
     document.querySelector("#launch").addEventListener("submit", async event => {
       event.preventDefault();
@@ -219,7 +222,23 @@ INDEX_HTML = """<!doctype html>
       submit.disabled = true;
       message.textContent = "Submitting run…";
       try {
-        idempotencyKey ||= crypto.randomUUID();
+        let pending;
+        try {
+          pending = JSON.parse(sessionStorage.getItem(pendingKeyName));
+        } catch {
+          pending = null;
+        }
+        let idempotencyKey = pending?.key;
+        if (!idempotencyKey || pending.tool !== toolSelect.value ||
+            pending.fingerprint !== await submissionFingerprint(idempotencyKey, toolSelect.value, queryInput.value)) {
+          idempotencyKey = crypto.randomUUID();
+          pending = {
+            key: idempotencyKey,
+            tool: toolSelect.value,
+            fingerprint: await submissionFingerprint(idempotencyKey, toolSelect.value, queryInput.value)
+          };
+          sessionStorage.setItem(pendingKeyName, JSON.stringify(pending));
+        }
         const run = await request("/api/runs", {
           method: "POST",
           headers: {
@@ -232,9 +251,9 @@ INDEX_HTML = """<!doctype html>
             authorized: document.querySelector("#authorized").checked
           })
         });
+        clearPendingKey();
         message.textContent = `Run #${run.id} is ${run.status}.`;
         await loadRun(run.id);
-        idempotencyKey = null;
       } catch (reason) {
         message.textContent = "";
         showError(reason);
@@ -252,37 +271,6 @@ INDEX_HTML = """<!doctype html>
 
 class WebHandler(BaseHTTPRequestHandler):
     server_version = "OSINTBeast"
-
-    def _authenticate(self, required_role):
-        tokens = _configured_tokens()
-        if not tokens["operator"] or not tokens["viewer"]:
-            self._send_json(503, {"error": "Authentication is not configured."})
-            return False
-        authorization = self.headers.get("Authorization", "")
-        scheme, _, credential = authorization.partition(" ")
-        credential = credential.strip()
-        if scheme.lower() != "bearer" or not credential:
-            self.send_response(401)
-            self.send_header("WWW-Authenticate", "Bearer")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.end_headers()
-            self.wfile.write(json.dumps(
-                {"error": "Authentication required."},
-                ensure_ascii=False,
-            ).encode("utf-8"))
-            return False
-        if tokens["operator"] and hmac.compare_digest(credential, tokens["operator"]):
-            role = "operator"
-        elif tokens["viewer"] and hmac.compare_digest(credential, tokens["viewer"]):
-            role = "viewer"
-        else:
-            self._send_json(401, {"error": "Invalid credentials."})
-            return False
-        if required_role == "operator" and role != "operator":
-            self._send_json(403, {"error": "Operator role required."})
-            return False
-        return True
 
     def _has_local_host(self):
         host_header = self.headers.get("Host", "")
@@ -448,7 +436,7 @@ class WebHandler(BaseHTTPRequestHandler):
                 if not run_id_text.isdecimal():
                     self._send_json(404, {"error": "Run not found."})
                     return
-                RUN_SERVICE.status(int(run_id_text))
+                self.server.run_service.status(int(run_id_text))
                 database.reconcile_stale_tool_runs()
                 row = database.get_tool_run(
                     int(run_id_text), redact_sensitive=True
@@ -503,7 +491,7 @@ class WebHandler(BaseHTTPRequestHandler):
             if not IDEMPOTENCY_KEY_PATTERN.fullmatch(idempotency_key):
                 self._send_json(400, {"error": "A valid Idempotency-Key is required."})
                 return
-            run_id = RUN_SERVICE.submit(
+            run_id = self.server.run_service.submit(
                 tool_name, query_text, idempotency_key=idempotency_key
             )
             row = database.get_tool_run(run_id, redact_sensitive=True)
@@ -555,14 +543,13 @@ def create_server(host="127.0.0.1", port=8000):
     address = _resolve_loopback_host(host)
     _configured_tokens()
     database.setup_database()
-    global RUN_SERVICE
     service = BackgroundRuns()
     try:
         server = _create_http_server(address, port)
     except Exception:
         service.close()
         raise
-    RUN_SERVICE = service
+    server.run_service = service
     server.daemon_threads = True
     return server
 
@@ -573,7 +560,6 @@ def serve(host="127.0.0.1", port=8000):
     address = server.server_address[0]
     displayed_host = f"[{address}]" if server.address_family == socket.AF_INET6 else address
     print(f"OSINT Beast web UI: http://{displayed_host}:{server.server_port}")
-    service = RUN_SERVICE
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -582,7 +568,7 @@ def serve(host="127.0.0.1", port=8000):
         try:
             server.server_close()
         finally:
-            service.close()
+            server.run_service.close()
 
 
 if __name__ == "__main__":

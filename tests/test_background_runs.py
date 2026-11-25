@@ -200,6 +200,30 @@ def test_close_is_bounded_when_final_persistence_stalls(service, monkeypatch, ca
         service.close()
 
 
+def test_persisting_job_uses_only_one_capacity_slot(service, monkeypatch):
+    service.limits = background_runs.RunLimits(max_concurrent=2)
+    entered, release = threading.Event(), threading.Event()
+    finish = database.finish_tool_run
+
+    def stalled_finish(run_id, *args, **kwargs):
+        if run_id == first:
+            entered.set()
+            assert release.wait(5)
+        return finish(run_id, *args, **kwargs)
+
+    first = service.submit("maigret", "slow")
+    monkeypatch.setattr(database, "finish_tool_run", stalled_finish)
+    try:
+        assert service.cancel(first)
+        assert entered.wait(5)
+        assert not service.cancel(first)
+        second = service.submit("maigret", "user")
+        assert second != first
+    finally:
+        release.set()
+    assert wait_for_run(service, second)["status"] == "success"
+
+
 def test_process_start_failure_is_recorded(service, monkeypatch):
     process = Mock(pid=None)
     process.start.side_effect = OSError("cannot start")
@@ -356,6 +380,16 @@ def test_reconciled_pending_failure_releases_capacity(service, monkeypatch):
         )
     assert database.reconcile_stale_tool_runs(1) == 1
     assert service.status(run_id)["errorText"] == "Could not start background worker."
+    assert wait_for_run(service, service.submit("maigret", "another"))["status"] == "success"
+
+
+def test_pending_outcome_already_finished_releases_capacity(service):
+    run_id = database.start_tool_run("maigret", "user")
+    database.finish_tool_run(run_id, "failed", error_text="Earlier outcome.")
+    service._pending[run_id] = ("failed", "Later outcome.")
+
+    assert service.status(run_id)["errorText"] == "Earlier outcome."
+    assert run_id not in service._pending
     assert wait_for_run(service, service.submit("maigret", "another"))["status"] == "success"
 
 
@@ -525,14 +559,97 @@ def test_already_committed_completion_retry_does_not_duplicate_result(
 
 
 def test_submission_idempotency_is_scoped_to_key_and_input(service):
+    dispatch = Mock(wraps=service._supervise)
+    service._supervise = dispatch
     run_id = service.submit("maigret", "user", "submission-1")
 
     assert service.submit("maigret", " user ", "submission-1") == run_id
+    assert dispatch.call_count == 1
     with pytest.raises(background_runs.IdempotencyConflict):
         service.submit("maigret", "other", "submission-1")
     with pytest.raises(background_runs.IdempotencyConflict):
         service.submit("sherlock", "user", "submission-1")
     assert len(database.list_tool_runs()) == 1
+
+
+def test_failed_start_retries_persistence_and_keeps_idempotency_key(service, monkeypatch):
+    finish = database.finish_tool_run
+    attempts = 0
+
+    def finish_after_failure(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("temporarily unavailable")
+        return finish(*args, **kwargs)
+
+    monkeypatch.setattr(database, "finish_tool_run", finish_after_failure)
+    thread_class = threading.Thread
+
+    def thread_factory(*args, **kwargs):
+        if kwargs.get("name", "").startswith("tool-run-") and kwargs["name"] != "tool-run-persistence-retry":
+            raise RuntimeError("worker thread unavailable")
+        return thread_class(*args, **kwargs)
+
+    monkeypatch.setattr(background_runs.threading, "Thread", thread_factory)
+    with pytest.raises(RuntimeError, match="worker thread unavailable"):
+        service.submit("maigret", "user", "failed-start-key")
+    run_id = database.list_tool_runs()[0][0]
+    assert service.submit("maigret", "user", "failed-start-key") == run_id
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and database.get_tool_run(run_id)[3] != "failed":
+        time.sleep(0.01)
+    assert database.get_tool_run(run_id)[3] == "failed"
+    assert run_id not in service._pending
+    assert len(database.list_tool_runs()) == 1
+
+
+def test_slow_pending_persistence_does_not_hold_service_lock(service, monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    run_id = service.submit("maigret", "user")
+    assert wait_for_run(service, run_id)["status"] == "success"
+    with service._lock:
+        service._pending[run_id] = ("success", "output")
+
+    def slow_write(*args, **kwargs):
+        started.set()
+        assert release.wait(3)
+
+    monkeypatch.setattr(database, "finish_tool_run", slow_write)
+    retry = threading.Thread(target=service._persist_pending, args=(run_id,))
+    retry.start()
+    operations_done = threading.Event()
+    results = []
+
+    def operations():
+        results.append(service.cancel(run_id))
+        try:
+            service.submit("maigret", "another")
+        except background_runs.CapacityError:
+            results.append("capacity")
+        operations_done.set()
+
+    try:
+        assert started.wait(2)
+        actions = threading.Thread(target=operations)
+        actions.start()
+        assert operations_done.wait(1), "Run operations blocked on the persistence write"
+    finally:
+        release.set()
+        retry.join(3)
+        actions.join(3)
+    assert results == [False, "capacity"]
+    assert not retry.is_alive()
+
+
+def test_idempotency_keys_are_bounded_after_completion(service, monkeypatch):
+    monkeypatch.setattr(background_runs, "_MAX_IDEMPOTENCY_KEYS", 3)
+    for index in range(5):
+        run_id = service.submit("maigret", "user", f"key-{index}")
+        assert wait_for_run(service, run_id)["status"] == "success"
+    assert len(service._idempotency_keys) <= 3
+    assert service.submit("maigret", "user", "key-4") == run_id
 
 
 @pytest.mark.parametrize(
