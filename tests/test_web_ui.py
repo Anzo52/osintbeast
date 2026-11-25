@@ -1,6 +1,7 @@
 import http.client
 import json
 import sqlite3
+import socket
 import threading
 import time
 import uuid
@@ -86,6 +87,84 @@ def _server(tmp_path, monkeypatch, runner):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, f"http://127.0.0.1:{server.server_port}"
+
+
+def test_serve_shutdown_marks_active_runs_failed(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "shutdown.db"))
+    database.setup_database()
+    server = Mock(
+        server_port=8000,
+        server_address=("127.0.0.1", 8000),
+        address_family=socket.AF_INET,
+    )
+    def create_server(*args, **kwargs):
+        server.run_service = background_runs.BackgroundRuns()
+        return server
+
+    monkeypatch.setattr(web_ui, "create_server", Mock(side_effect=create_server))
+    launched = []
+
+    def launch_and_interrupt():
+        launched.append(server.run_service.submit("sherlock", "slow"))
+        raise KeyboardInterrupt
+
+    server.serve_forever.side_effect = launch_and_interrupt
+    web_ui.serve()
+    run = database.get_tool_run(launched[0])
+    assert run[3] == "failed"
+    assert run[5] == "Run cancelled."
+    assert run[7] is not None
+    server.server_close.assert_called_once()
+
+
+def test_serve_can_restart_in_the_same_process(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "restart.db"))
+    database.setup_database()
+    server = Mock(
+        server_port=8000,
+        server_address=("127.0.0.1", 8000),
+        address_family=socket.AF_INET,
+    )
+
+    def create_server(*args, **kwargs):
+        server.run_service = background_runs.BackgroundRuns()
+        return server
+
+    monkeypatch.setattr(web_ui, "create_server", Mock(side_effect=create_server))
+    services, run_ids = [], []
+
+    def launch_and_interrupt():
+        services.append(server.run_service)
+        run_ids.append(server.run_service.submit("sherlock", "slow"))
+        raise KeyboardInterrupt
+
+    server.serve_forever.side_effect = launch_and_interrupt
+    web_ui.serve()
+    web_ui.serve()
+    assert services[0] is not services[1]
+    assert len(set(run_ids)) == 2
+    assert all(database.get_tool_run(run_id)[3] == "failed" for run_id in run_ids)
+    assert server.server_close.call_count == 2
+
+
+def test_serve_closes_socket_even_if_service_cleanup_fails(monkeypatch):
+    server = Mock(
+        server_port=8000,
+        server_address=("127.0.0.1", 8000),
+        address_family=socket.AF_INET,
+    )
+    server.serve_forever.side_effect = KeyboardInterrupt
+    service = Mock()
+    service.close.side_effect = [RuntimeError("cleanup failed"), None]
+
+    def create_server(*args, **kwargs):
+        server.run_service = service
+        return server
+
+    monkeypatch.setattr(web_ui, "create_server", Mock(side_effect=create_server))
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        web_ui.serve()
+    server.server_close.assert_called_once()
 
 
 def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):

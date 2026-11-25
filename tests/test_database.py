@@ -127,18 +127,17 @@ def test_setup_database_preserves_existing_data_and_repairs_missing_objects(
     ) == [("idx_services_platform",)]
 
 
-def test_query_database_commits_state_changing_statements(tmp_path, monkeypatch):
+def test_query_database_rejects_state_changing_statements(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "query.db"))
     database.setup_database()
     database.insert_data("Platforms", {"platform": "before"})
 
-    assert database.query_database(
-        "UPDATE Platforms SET platform = ? WHERE platform = ?",
-        ("after", "before"),
-    ) == []
-    assert database.query_database(
-        "SELECT platform FROM Platforms WHERE platform = ?", ("after",)
-    ) == [("after",)]
+    with pytest.raises(sqlite3.OperationalError):
+        database.query_database(
+            "UPDATE Platforms SET platform = ? WHERE platform = ?",
+            ("after", "before"),
+        )
+    assert database.query_database("SELECT platform FROM Platforms") == [("before",)]
 
 
 def test_setup_database_rolls_back_all_schemas_on_sql_error(tmp_path, monkeypatch):
@@ -290,16 +289,33 @@ def test_insert_query_and_save_tool_result(tmp_path, monkeypatch):
     )
 
 
-def test_query_database_commits_state_changes(tmp_path, monkeypatch):
-    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "query-commit.db"))
+@pytest.mark.parametrize(
+    "query",
+    [
+        "INSERT INTO Platforms (platform) VALUES ('new')",
+        "UPDATE Platforms SET platform = 'changed'",
+        "DELETE FROM Platforms",
+        "WITH target AS (SELECT 1) DELETE FROM Platforms RETURNING platform",
+        "DROP TABLE Platforms",
+    ],
+)
+def test_query_database_rejects_state_changes(tmp_path, monkeypatch, query):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "query-readonly.db"))
     database.setup_database()
+    database.insert_data("Platforms", {"platform": "preserved"})
+
+    with pytest.raises(sqlite3.OperationalError, match="readonly"):
+        database.query_database(query)
 
     assert database.query_database(
-        "INSERT INTO Platforms (platform) VALUES (?)", ("committed",)
-    ) == []
-    assert database.query_database(
-        "SELECT platform FROM Platforms WHERE platform = ?", ("committed",)
-    ) == [("committed",)]
+        "SELECT platform FROM Platforms"
+    ) == [("preserved",)]
+
+
+def test_sqlite_connections_have_a_bounded_lock_wait(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "timeout.db"))
+    with database.connect_db() as conn:
+        assert conn.execute("PRAGMA busy_timeout").fetchone() == (5000,)
 
 
 def test_list_tool_results_orders_newest_first_and_enforces_limit(

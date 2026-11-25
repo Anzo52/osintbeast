@@ -565,8 +565,10 @@ def serve(host="127.0.0.1", port=8000):
     except KeyboardInterrupt:
         pass
     finally:
-        server.server_close()
-        server.run_service.close()
+        try:
+            server.server_close()
+        finally:
+            server.run_service.close()
 
 
 if __name__ == "__main__":
