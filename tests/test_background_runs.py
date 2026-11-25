@@ -268,8 +268,11 @@ def test_thread_start_and_persistence_failure_exposes_run_id(service, monkeypatc
         patch.setattr(background_runs.threading, "Thread", Mock(side_effect=RuntimeError("unavailable")))
         patch.setattr(database, "finish_tool_run", Mock(side_effect=OSError("unavailable")))
         with pytest.raises(background_runs.StartupPersistenceError) as error:
-            service.submit("maigret", "user")
+            service.submit("maigret", "user", "startup-retry")
         run_id = error.value.run_id
+        assert service.submit("maigret", "user", "startup-retry") == run_id
+        with pytest.raises(background_runs.IdempotencyConflict):
+            service.submit("maigret", "another", "startup-retry")
         assert database.get_tool_run(run_id)[3] == "running"
         with pytest.raises(background_runs.CapacityError):
             service.submit("maigret", "another")
@@ -292,6 +295,37 @@ def test_reconciled_pending_failure_releases_capacity(service, monkeypatch):
     assert database.reconcile_stale_tool_runs(1) == 1
     assert service.status(run_id)["errorText"] == "Could not start background worker."
     assert wait_for_run(service, service.submit("maigret", "another"))["status"] == "success"
+
+
+def test_startup_persistence_failure_retries_without_status(service, monkeypatch):
+    thread_class = threading.Thread
+    finish = database.finish_tool_run
+
+    def create_thread(*args, **kwargs):
+        if kwargs.get("name", "").startswith("tool-run-") and (
+            kwargs["name"] != "tool-run-persistence-retry"
+        ):
+            raise RuntimeError("unavailable")
+        return thread_class(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(background_runs.threading, "Thread", create_thread)
+        patch.setattr(database, "finish_tool_run", Mock(side_effect=OSError("unavailable")))
+        with pytest.raises(background_runs.StartupPersistenceError) as error:
+            service.submit("maigret", "user", "startup-retry")
+        run_id = error.value.run_id
+    monkeypatch.setattr(database, "finish_tool_run", finish)
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        with service._lock:
+            pending = run_id in service._pending
+        if not pending:
+            break
+        time.sleep(0.01)
+    else:
+        pytest.fail("Startup failure was not retried")
+    assert database.get_tool_run(run_id)[5] == "Could not start background worker."
+    assert service.submit("maigret", "user", "startup-retry") == run_id
 
 
 @pytest.mark.parametrize("outcome", ["result", "timeout", "crash"])
