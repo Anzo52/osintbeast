@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -201,12 +202,66 @@ def test_mysql_result_listing_returns_bounded_raw_prefix_for_redaction(
     )[0][3] == "… [truncated]"
     statement, parameters = engine.connection.statements[-1]
     assert "SUBSTR(queryText, %s, 1)" in statement
-    assert parameters == (15, 4097, 14, 15, 15, 4097, 20)
+    assert parameters == (4097, 14, 15, 4097, 20)
 
     oversized_query = True
     assert database.list_tool_results(
         20, max_result_text_chars=14, redact_sensitive=True
     )[0][3] == "[redacted]"
+
+
+@pytest.mark.parametrize(
+    ("query_length", "result", "expected"),
+    [
+        (4097, "x" * 100, "[redacted]"),
+        (4097, "report", "[redacted]"),
+        (4096, "report", "report"),
+        (12, "report", "report"),
+    ],
+)
+def test_mysql_bounded_redaction_enforces_query_limit_independently(
+    mysql_storage, monkeypatch, query_length, result, expected
+):
+    storage, engine = mysql_storage
+    query = "x" * query_length
+    sql_rows = []
+    with sqlite3.connect(":memory:") as conn:
+        conn.execute(
+            """CREATE TABLE ToolResults (
+                   resultID INTEGER, toolName TEXT, queryText TEXT,
+                   resultText TEXT, createdAt TEXT
+               )"""
+        )
+        conn.execute(
+            "INSERT INTO ToolResults VALUES (?, ?, ?, ?, ?)",
+            (1, "holehe", query, result, "created"),
+        )
+
+        def execute_listing(statement, parameters=()):
+            engine.connection.statements.append((statement, parameters))
+            rows = conn.execute(statement.replace("%s", "?"), parameters).fetchall()
+            sql_rows.extend(rows)
+            return FakeResult(rows)
+
+        monkeypatch.setattr(engine.connection, "exec_driver_sql", execute_listing)
+        monkeypatch.setattr(database, "_get_storage", lambda: storage)
+        row = database.list_tool_results(
+            limit=1, max_result_text_chars=20, redact_sensitive=True
+        )[0]
+
+    oversized = query_length > database.MAX_REDACTION_QUERY_CHARS
+    assert row[3] == expected
+    assert len(row) == 5
+    assert sql_rows[0][2] == (None if oversized else query)
+    assert sql_rows[0][3] == result[:20]
+    assert sql_rows[0][4] == int(len(result) > 20)
+    assert sql_rows[0][6] == int(oversized)
+    statement, parameters = engine.connection.statements[-1]
+    assert parameters == (4097, 20, 21, 4097, 1)
+    assert (
+        "CASE WHEN SUBSTR(queryText, %s, 1) <> '' THEN NULL ELSE queryText END"
+        in " ".join(statement.split())
+    )
 
 
 @pytest.mark.parametrize(

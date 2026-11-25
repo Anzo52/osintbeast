@@ -506,12 +506,32 @@ def test_redacted_bounded_reads_hide_sensitive_values_crossing_the_limit(
     assert raw_prefix[5] is True
 
 
-def test_redacted_bounded_reads_fail_closed_for_oversized_legacy_queries(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    ("query_length", "result", "expected"),
+    [
+        (4097, "x" * 100, "[redacted]"),
+        (4097, "report", "[redacted]"),
+        (4096, "report", "report"),
+        (12, "report", "report"),
+    ],
+)
+def test_redacted_bounded_reads_enforce_query_limit_independently(
+    tmp_path, monkeypatch, query_length, result, expected
 ):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "oversized-query.db"))
     database.setup_database()
-    database.save_tool_result("holehe", "x" * 4097, "x" * 100)
+    query = "x" * query_length
+    database.save_tool_result("holehe", query, result)
+    storage = database._get_storage()
+    connect = storage.connect
+    statements = []
+
+    def connect_with_trace():
+        conn = connect()
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(storage, "connect", connect_with_trace)
 
     row = database.list_tool_results(
         limit=1, max_result_text_chars=20, redact_sensitive=True
@@ -523,9 +543,19 @@ def test_redacted_bounded_reads_fail_closed_for_oversized_legacy_queries(
         max_query_text_chars=database.MAX_REDACTION_QUERY_CHARS,
     )[0]
 
-    assert row[3] == "[redacted]"
-    assert bounded_row[2] is None
-    assert bounded_row[6] is True
+    oversized = query_length > database.MAX_REDACTION_QUERY_CHARS
+    assert row[3] == expected
+    assert len(row) == 5
+    assert bounded_row[2] == (None if oversized else query)
+    assert bounded_row[3] == result[:20]
+    assert bounded_row[5] is (len(result) > 20)
+    assert bounded_row[6] is oversized
+    statement = " ".join(statements[-1].split())
+    assert (
+        "CASE WHEN SUBSTR(queryText, 4097, 1) <> '' THEN NULL ELSE queryText END"
+        in statement
+    )
+    assert "SUBSTR(resultText, 1, 20)" in statement
 
 
 def test_list_tool_runs_filters_and_uses_stable_cursor_pagination(

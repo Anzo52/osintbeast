@@ -191,24 +191,20 @@ class SQLiteStorage:
                 rows = conn.execute(
                     """SELECT resultID, toolName,
                               CASE
-                                  WHEN SUBSTR(resultText, ?, 1) <> ''
-                                   AND SUBSTR(queryText, ?, 1) <> ''
+                                  WHEN SUBSTR(queryText, ?, 1) <> ''
                                   THEN NULL ELSE queryText
                               END,
                               SUBSTR(resultText, 1, ?),
                               CASE WHEN SUBSTR(resultText, ?, 1) <> '' THEN 1 ELSE 0 END,
                               createdAt,
                               CASE
-                                  WHEN SUBSTR(resultText, ?, 1) <> ''
-                                   AND SUBSTR(queryText, ?, 1) <> ''
+                                  WHEN SUBSTR(queryText, ?, 1) <> ''
                                   THEN 1 ELSE 0
                               END
                        FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
                     (
-                        max_result_text_chars + 1,
                         max_query_text_chars + 1,
                         max_result_text_chars,
-                        max_result_text_chars + 1,
                         max_result_text_chars + 1,
                         max_query_text_chars + 1,
                         limit,
@@ -588,8 +584,7 @@ class MySQLStorage:
                         rows = connection.exec_driver_sql(
                             """SELECT resultID, toolName,
                                       CASE
-                                          WHEN SUBSTR(resultText, %s, 1) <> ''
-                                           AND SUBSTR(queryText, %s, 1) <> ''
+                                          WHEN SUBSTR(queryText, %s, 1) <> ''
                                           THEN NULL ELSE queryText
                                       END,
                                       SUBSTR(resultText, 1, %s),
@@ -597,16 +592,13 @@ class MySQLStorage:
                                            THEN 1 ELSE 0 END,
                                       createdAt,
                                       CASE
-                                          WHEN SUBSTR(resultText, %s, 1) <> ''
-                                           AND SUBSTR(queryText, %s, 1) <> ''
+                                          WHEN SUBSTR(queryText, %s, 1) <> ''
                                           THEN 1 ELSE 0
                                       END
                                FROM ToolResults ORDER BY resultID DESC LIMIT %s""",
                             (
-                                max_result_text_chars + 1,
                                 max_query_text_chars + 1,
                                 max_result_text_chars,
-                                max_result_text_chars + 1,
                                 max_result_text_chars + 1,
                                 max_query_text_chars + 1,
                                 limit,

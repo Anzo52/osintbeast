@@ -226,8 +226,8 @@ def list_tool_results(
             and len(row) > 5
             and row[5]
         )
-        if source_truncated and len(row) > 6 and row[6]:
-            return "[redacted]"
+        if len(row) > 6 and row[6]:
+            return "[redacted]"[:max_result_text_chars]
         raw_result = row[3]
         if source_truncated and raw_result is not None:
             partial_length = _trailing_sensitive_prefix_length(raw_result, row[2])
