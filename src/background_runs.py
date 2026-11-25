@@ -38,16 +38,16 @@ class CapacityError(RuntimeError):
     """The configured number of active runs has been reached."""
 
 
-class IdempotencyConflict(RuntimeError):
-    """An idempotency key was reused for a different submission."""
-
-
 class StartupPersistenceError(RuntimeError):
-    """A failed worker startup could not be persisted."""
+    """A startup failure could not be recorded; run_id can be used to retry."""
 
     def __init__(self, run_id):
+        super().__init__("Could not persist background run startup failure.")
         self.run_id = run_id
-        super().__init__(f"Could not persist startup failure for run {run_id}.")
+
+
+class IdempotencyConflict(RuntimeError):
+    """An idempotency key was reused for a different submission."""
 
 
 @dataclass(frozen=True)
@@ -259,7 +259,9 @@ class BackgroundRuns:
                 try:
                     self._persist(run_id, status, value)
                 except Exception as exc:
-                    raise RuntimeError("Could not persist background run outcome.") from exc
+                    row = database.get_tool_run(run_id) if isinstance(exc, ValueError) else None
+                    if row is None or row[3] == "running":
+                        raise RuntimeError("Could not persist background run outcome.") from exc
                 del self._pending[run_id]
         row = database.get_tool_run(run_id, redact_sensitive=True)
         if row is None:
@@ -336,29 +338,40 @@ class BackgroundRuns:
                     with state_lock:
                         if cancel.is_set():
                             break
-                        remaining = deadline - time.monotonic()
-                        if receiver.poll(max(0, min(remaining, 0.05))):
-                            try:
-                                payload = receiver.recv_bytes(
-                                    self.limits.max_output_bytes + 1
+                    remaining = deadline - time.monotonic()
+                    ready = receiver.poll(max(0, min(remaining, 0.05)))
+                    with state_lock:
+                        if cancel.is_set():
+                            break
+                    if ready:
+                        valid_payload = False
+                        try:
+                            payload = receiver.recv_bytes(
+                                self.limits.max_output_bytes + 1
+                            )
+                        except (EOFError, OSError):
+                            if timed_out.is_set() or time.monotonic() >= deadline:
+                                status, value = (
+                                    "timed_out",
+                                    "Background run exceeded its time limit.",
                                 )
-                            except (EOFError, OSError):
-                                if timed_out.is_set() or time.monotonic() >= deadline:
-                                    status, value = (
-                                        "timed_out",
-                                        "Background run exceeded its time limit.",
-                                    )
-                            else:
-                                if payload and payload[:1] in (b"S", b"F", b"T"):
-                                    status = {
-                                        b"S": "success",
-                                        b"F": "failed",
-                                        b"T": "timed_out",
-                                    }[payload[:1]]
-                                    value = payload[1:].decode(
-                                        "utf-8", errors="replace"
-                                    )
-                            completed.set()
+                        else:
+                            if payload and payload[:1] in (b"S", b"F", b"T"):
+                                valid_payload = True
+                                status = {
+                                    b"S": "success",
+                                    b"F": "failed",
+                                    b"T": "timed_out",
+                                }[payload[:1]]
+                                value = payload[1:].decode(
+                                    "utf-8", errors="replace"
+                                )
+                        with state_lock:
+                            if valid_payload or not cancel.is_set():
+                                completed.set()
+                        break
+                    with state_lock:
+                        if cancel.is_set():
                             break
                         if remaining <= 0:
                             status, value = (
@@ -441,6 +454,15 @@ class BackgroundRuns:
                     try:
                         self._persist(run_id, *outcome)
                     except Exception as exc:
+                        row = None
+                        if isinstance(exc, ValueError):
+                            try:
+                                row = database.get_tool_run(run_id)
+                            except Exception:
+                                pass
+                        if row is not None and row[3] != "running":
+                            del self._pending[run_id]
+                            continue
                         _LOG.warning(
                             "Could not retry persistence for run %s (%s)",
                             run_id,

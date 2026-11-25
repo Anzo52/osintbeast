@@ -2,9 +2,10 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine
 
 import data.utils.database as database
-from data.utils.storage import MySQLStorage, StorageError
+from data.utils.storage import MySQLStorage, SQLiteStorage, StorageError
 
 
 class FakeResult:
@@ -106,6 +107,11 @@ def test_mysql_initialization_executes_both_idempotent_schema_files(mysql_storag
         "CREATE TABLE IF NOT EXISTS ToolRunIdempotency" in statement
         for statement in statements
     )
+    assert any(
+        "idempotencyKey VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin"
+        in statement
+        for statement in statements
+    )
 
 
 def test_mysql_core_operations_use_bound_values_and_preserve_transactional_flow(
@@ -158,6 +164,44 @@ def test_mysql_idempotent_run_returns_existing_association(mysql_storage):
     )
 
 
+def test_sqlite_distinct_idempotency_apis_replay_independently(tmp_path, monkeypatch):
+    schema_dir = Path(__file__).resolve().parents[1] / "data" / "schemas"
+    db_file = str(tmp_path / "runs.db")
+
+    def make_storage():
+        return SQLiteStorage(
+            db_file, schema_dir, database.SCHEMA_FILES, database.INSERTABLE_TABLES
+        )
+
+    storage = make_storage()
+    storage.setup()
+    monkeypatch.setattr(database, "_get_storage", lambda: storage)
+    key = "a" * 64
+    fingerprint = "b" * 64
+    request_hash = "c" * 64
+    background_id, background_created = database.start_idempotent_tool_run(
+        "holehe", "[redacted]", key, fingerprint
+    )
+    request_id, request_created = database.start_idempotent_request(
+        "holehe", "[redacted]", key, request_hash
+    )
+    assert background_created and request_created
+    assert background_id != request_id
+
+    storage = make_storage()
+    storage.setup()
+    assert database.get_idempotent_tool_run(key) == (
+        background_id, "holehe", fingerprint
+    )
+    assert database.get_idempotent_request(key, request_hash) == request_id
+    assert database.start_idempotent_tool_run(
+        "holehe", "[redacted]", key, fingerprint
+    ) == (background_id, False)
+    assert database.start_idempotent_request(
+        "holehe", "[redacted]", key, request_hash
+    ) == (request_id, False)
+
+
 def test_mysql_query_commits_state_changes(mysql_storage):
     storage, engine = mysql_storage
 
@@ -177,6 +221,35 @@ def test_mysql_result_listing_caps_output_in_the_query(mysql_storage):
     statement, parameters = engine.connection.statements[-1]
     assert "SUBSTR(resultText, 1, %s)" in statement
     assert parameters == (4, 5, 20)
+
+
+@pytest.mark.parametrize(
+    ("statement", "expected"),
+    [
+        ("INSERT INTO items VALUES ('added')", [("original",), ("added",)]),
+        ("UPDATE items SET value = 'updated'", [("updated",)]),
+        ("DELETE FROM items", []),
+    ],
+)
+def test_mysql_query_commits_statements_without_rows(
+    mysql_storage, tmp_path, monkeypatch, statement, expected
+):
+    storage, _ = mysql_storage
+    engine = create_engine(f"sqlite:///{tmp_path / 'transactions.db'}")
+    monkeypatch.setattr(storage, "_get_engine", lambda: engine)
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql("CREATE TABLE items (value TEXT)")
+            connection.exec_driver_sql("INSERT INTO items VALUES ('original')")
+
+        assert storage.query(statement) == []
+        assert storage.query("SELECT value FROM items ORDER BY rowid") == expected
+        with engine.connect() as connection:
+            assert connection.exec_driver_sql(
+                "SELECT value FROM items ORDER BY rowid"
+            ).fetchall() == expected
+    finally:
+        engine.dispose()
 
 
 def test_mysql_identifier_validation_and_placeholders(mysql_storage):

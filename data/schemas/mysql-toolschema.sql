@@ -57,3 +57,13 @@ CREATE TABLE IF NOT EXISTS ToolRunIdempotency (
     CONSTRAINT fk_toolrun_idempotency_run
         FOREIGN KEY (runID) REFERENCES ToolRuns (runID)
 ) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS ToolRunRequests (
+    idempotencyKey VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    requestHash CHAR(64) NOT NULL,
+    runID INT NOT NULL,
+    PRIMARY KEY (idempotencyKey),
+    UNIQUE KEY uq_toolrunrequests_runid (runID),
+    CONSTRAINT fk_toolrunrequests_toolrun
+        FOREIGN KEY (runID) REFERENCES ToolRuns (runID)
+) ENGINE=InnoDB;
