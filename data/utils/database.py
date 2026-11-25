@@ -116,7 +116,7 @@ def connect_db():
 
 
 def setup_database() -> None:
-    """Create missing schema objects and migrate legacy SQLite records."""
+    """Create missing schema objects without replacing existing data."""
     _get_storage().setup()
 
 
@@ -170,6 +170,8 @@ def list_tool_results(
             )
             for row in rows
         ]
+    if not redact_sensitive:
+        return rows
     if max_result_text_chars is not None and redact_sensitive:
         marker = "… [truncated]"[:max_result_text_chars]
         prefix_length = max(0, max_result_text_chars - len(marker))

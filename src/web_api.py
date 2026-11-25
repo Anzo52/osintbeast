@@ -230,6 +230,7 @@ def create_server(host="127.0.0.1", port=8765, tokens=None):
     configured_tokens = _validate_tokens(tokens) if tokens is not None else load_tokens()
     if not isinstance(port, int) or not 0 <= port <= 65535:
         raise ValueError("API port must be between 0 and 65535.")
+    database.setup_database()
     return ThreadingHTTPServer(
         (str(address), port), _make_handler(configured_tokens)
     )

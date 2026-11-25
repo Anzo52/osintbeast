@@ -1,42 +1,16 @@
-import re
 import sqlite3
 from contextlib import closing
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol
-from urllib.parse import quote, quote_plus
-
 from sqlalchemy import MetaData, Table, create_engine
 from sqlalchemy.engine import URL
+
+_UNPERSISTED_RUN_ERROR = "Run outcome could not be persisted."
 
 
 class StorageError(Exception):
     """A backend-neutral storage error for application-level handling."""
-
-
-def _redact_legacy_tool_records(conn: sqlite3.Connection) -> None:
-    def redact(text: Optional[str], query: str) -> Optional[str]:
-        if text is None or not query or query == "[redacted]":
-            return text
-        variants = {query, quote(query, safe=""), quote_plus(query)}
-        for variant in sorted(variants, key=len, reverse=True):
-            text = re.sub(re.escape(variant), lambda _: "[redacted]", text, flags=re.IGNORECASE)
-        return text
-
-    for row_id, query, result in conn.execute(
-        "SELECT resultID, queryText, resultText FROM ToolResults"
-    ):
-        conn.execute(
-            "UPDATE ToolResults SET queryText = ?, resultText = ? WHERE resultID = ?",
-            ("[redacted]", redact(result, query), row_id),
-        )
-    for row_id, query, result, error in conn.execute(
-        "SELECT runID, queryText, resultText, errorText FROM ToolRuns"
-    ):
-        conn.execute(
-            "UPDATE ToolRuns SET queryText = ?, resultText = ?, errorText = ? WHERE runID = ?",
-            ("[redacted]", redact(result, query), redact(error, query), row_id),
-        )
 
 
 class Storage(Protocol):
@@ -116,18 +90,6 @@ class SQLiteStorage:
 
         with closing(self.connect()) as conn, conn:
             conn.executescript("BEGIN IMMEDIATE;\n" + "\n".join(schemas))
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS OsintBeastMigrations (name TEXT PRIMARY KEY)"
-            )
-            if not conn.execute(
-                "SELECT 1 FROM OsintBeastMigrations WHERE name = ?",
-                ("redact_legacy_tool_records",),
-            ).fetchone():
-                _redact_legacy_tool_records(conn)
-                conn.execute(
-                    "INSERT INTO OsintBeastMigrations (name) VALUES (?)",
-                    ("redact_legacy_tool_records",),
-                )
 
     def insert(self, table: str, data: Mapping[str, Any]) -> None:
         if not data:
@@ -157,7 +119,7 @@ class SQLiteStorage:
     def query(
         self, query: str, parameters: tuple[Any, ...] = ()
     ) -> list[tuple[Any, ...]]:
-        with closing(self.connect()) as conn:
+        with closing(self.connect()) as conn, conn:
             return conn.execute(query, parameters).fetchall()
 
     def save_tool_result(
@@ -222,10 +184,19 @@ class SQLiteStorage:
             cursor = conn.execute(
                 """UPDATE ToolRuns SET status = ?, resultText = ?, errorText = ?,
                    finishedAt = CURRENT_TIMESTAMP
-                   WHERE runID = ? AND status = 'running'""",
-                (status, result_text, error_text, run_id),
+                   WHERE runID = ? AND (
+                       status = 'running' OR
+                       (status = 'failed' AND errorText = ?)
+                   )""",
+                (status, result_text, error_text, run_id, _UNPERSISTED_RUN_ERROR),
             )
             if cursor.rowcount != 1:
+                row = conn.execute(
+                    "SELECT status, resultText, errorText FROM ToolRuns WHERE runID = ?",
+                    (run_id,),
+                ).fetchone()
+                if row == (status, result_text, error_text):
+                    return
                 raise ValueError("Run does not exist or is already finished.")
             if status == "success":
                 conn.execute(
@@ -424,10 +395,11 @@ class MySQLStorage:
     ) -> list[tuple[Any, ...]]:
         query = self._mysql_placeholders(query, parameters)
         try:
-            with self._get_engine().connect() as connection:
-                return self._normalize_rows(
-                    connection.exec_driver_sql(query, parameters).fetchall()
-                )
+            with self._get_engine().begin() as connection:
+                result = connection.exec_driver_sql(query, parameters)
+                if not getattr(result, "returns_rows", True):
+                    return []
+                return self._normalize_rows(result.fetchall())
         except Exception as exc:
             if exc.__class__.__module__.startswith("sqlalchemy"):
                 raise StorageError(str(exc)) from exc
@@ -514,10 +486,19 @@ class MySQLStorage:
                 result = connection.exec_driver_sql(
                     """UPDATE ToolRuns SET status = %s, resultText = %s,
                        errorText = %s, finishedAt = CURRENT_TIMESTAMP
-                       WHERE runID = %s AND status = 'running'""",
-                    (status, result_text, error_text, run_id),
+                       WHERE runID = %s AND (
+                           status = 'running' OR
+                           (status = 'failed' AND errorText = %s)
+                       )""",
+                    (status, result_text, error_text, run_id, _UNPERSISTED_RUN_ERROR),
                 )
                 if result.rowcount != 1:
+                    row = connection.exec_driver_sql(
+                        "SELECT status, resultText, errorText FROM ToolRuns WHERE runID = %s",
+                        (run_id,),
+                    ).fetchone()
+                    if row == (status, result_text, error_text):
+                        return
                     raise ValueError("Run does not exist or is already finished.")
                 if status == "success":
                     connection.exec_driver_sql(

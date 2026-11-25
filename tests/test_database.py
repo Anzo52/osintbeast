@@ -127,84 +127,18 @@ def test_setup_database_preserves_existing_data_and_repairs_missing_objects(
     ) == [("idx_services_platform",)]
 
 
-def test_setup_database_redacts_legacy_runs_and_results_once(tmp_path, monkeypatch):
-    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "legacy.db"))
+def test_query_database_commits_state_changing_statements(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "query.db"))
     database.setup_database()
-    with database.connect_db() as conn:
-        conn.execute("DELETE FROM OsintBeastMigrations")
-        conn.execute(
-            "INSERT INTO ToolResults VALUES (7, 'holehe', ?, ?, '2020-01-01')",
-            ("Person+tag@example.com", "PERSON+TAG@example.com person%2btag%40example.com"),
-        )
-        conn.execute(
-            "INSERT INTO ToolRuns VALUES (8, 'holehe', ?, 'failed', NULL, ?, "
-            "'2020-01-01', '2020-01-02')",
-            ("Person+tag@example.com", "failed: Person%2Btag%40example.com"),
-        )
-        conn.execute(
-            "INSERT INTO ToolRuns VALUES (9, 'maigret', 'alice', 'success', "
-            "'found ALICE', NULL, '2020-01-03', '2020-01-04')"
-        )
-        conn.execute(
-            "INSERT INTO ToolRuns VALUES (10, 'maigret', '', 'running', "
-            "NULL, NULL, '2020-01-05', NULL)"
-        )
-        conn.execute(
-            "INSERT INTO ToolResults VALUES (11, 'holehe', '[redacted]', "
-            "'already sanitized', '2020-01-06')"
-        )
+    database.insert_data("Platforms", {"platform": "before"})
 
-    database.setup_database()
-
-    assert database.list_tool_results() == [
-        (11, "holehe", "[redacted]", "already sanitized", "2020-01-06"),
-        (7, "holehe", "[redacted]", "[redacted] [redacted]", "2020-01-01"),
-    ]
-    assert database.get_tool_run(8) == (
-        8, "holehe", "[redacted]", "failed", None, "failed: [redacted]",
-        "2020-01-01", "2020-01-02",
-    )
-    assert database.get_tool_run(9) == (
-        9, "maigret", "[redacted]", "success", "found [redacted]", None,
-        "2020-01-03", "2020-01-04",
-    )
-    assert database.get_tool_run(10) == (
-        10, "maigret", "[redacted]", "running", None, None, "2020-01-05", None,
-    )
-    database.save_tool_result("holehe", "new", "new result")
-    database.setup_database()
-    assert database.list_tool_results()[0][2:4] == ("new", "new result")
-    assert database.get_tool_run(8)[5] == "failed: [redacted]"
-
-
-def test_legacy_redaction_rolls_back_on_error(tmp_path, monkeypatch):
-    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "rollback.db"))
-    database.setup_database()
-    with database.connect_db() as conn:
-        conn.execute("DELETE FROM OsintBeastMigrations")
-        conn.execute(
-            "INSERT INTO ToolResults (toolName, queryText, resultText) "
-            "VALUES ('holehe', 'private', 'private result')"
-        )
-        conn.execute(
-            "INSERT INTO ToolRuns (toolName, queryText, status) "
-            "VALUES ('holehe', 'private', 'running')"
-        )
-        conn.execute(
-            "CREATE TRIGGER fail_redaction BEFORE UPDATE ON ToolRuns "
-            "BEGIN SELECT RAISE(ABORT, 'migration failed'); END"
-        )
-
-    with pytest.raises(sqlite3.IntegrityError, match="migration failed"):
-        database.setup_database()
-
-    assert database.list_tool_results()[0][2:4] == ("private", "private result")
-    assert database.list_tool_runs()[0][2] == "private"
-    assert database.query_database("SELECT name FROM OsintBeastMigrations") == []
-    with database.connect_db() as conn:
-        conn.execute("DROP TRIGGER fail_redaction")
-    database.setup_database()
-    assert database.list_tool_results()[0][2:4] == ("[redacted]", "[redacted] result")
+    assert database.query_database(
+        "UPDATE Platforms SET platform = ? WHERE platform = ?",
+        ("after", "before"),
+    ) == []
+    assert database.query_database(
+        "SELECT platform FROM Platforms WHERE platform = ?", ("after",)
+    ) == [("after",)]
 
 
 def test_setup_database_rolls_back_all_schemas_on_sql_error(tmp_path, monkeypatch):
@@ -289,12 +223,17 @@ def test_holehe_result_redacts_partially_encoded_input(tmp_path, monkeypatch):
     database.setup_database()
     query = "person+tag@example.com"
     holehe_integration.save_tool_result(
-        "holehe", query, "Found person+tag%40example.com"
+        "holehe",
+        query,
+        "Found person+tag%40example.com and person+tag@example.com.au",
     )
 
     assert database.query_database(
         "SELECT queryText, resultText FROM ToolResults"
-    ) == [("[redacted]", "Found [redacted]")]
+    ) == [(
+        "[redacted]",
+        "Found [redacted] and person+tag@example.com.au",
+    )]
 
 
 def test_database_path_override_is_shared_across_modules(tmp_path):
@@ -351,6 +290,19 @@ def test_insert_query_and_save_tool_result(tmp_path, monkeypatch):
     )
 
 
+def test_query_database_commits_state_changes(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "query-commit.db"))
+    database.setup_database()
+
+    assert database.query_database(
+        "INSERT INTO Platforms (platform) VALUES (?)", ("committed",)
+    ) == []
+
+    assert database.query_database(
+        "SELECT platform FROM Platforms WHERE platform = ?", ("committed",)
+    ) == [("committed",)]
+
+
 def test_list_tool_results_orders_newest_first_and_enforces_limit(
     tmp_path, monkeypatch
 ):
@@ -368,50 +320,73 @@ def test_list_tool_results_orders_newest_first_and_enforces_limit(
             database.list_tool_results(limit=limit)
 
 
-def test_saved_views_redact_legacy_values_and_truncate_after_redaction(
+def test_saved_views_redact_legacy_values_without_rewriting_them(
     tmp_path, monkeypatch
 ):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "legacy-views.db"))
     database.setup_database()
-    query = "private@example.com"
-    result = f"begin {query} end"
+    query = "person+tag@example.com"
+    result = "Found person+tag%40example.com and person+tagger@example.com"
     run_id = database.start_tool_run("holehe", query)
     database.finish_tool_run(run_id, "success", result_text=result)
 
     assert database.get_tool_run(run_id, redact_sensitive=True)[2:6] == (
-        "[redacted]", "success", "begin [redacted] end", None,
-    )
-    assert database.list_tool_runs(redact_sensitive=True)[0][2:] == (
         "[redacted]", "success",
-        database.list_tool_runs()[0][4],
-        database.list_tool_runs()[0][5],
-        None,
+        "Found [redacted] and person+tagger@example.com", None,
+    )
+    assert database.list_tool_runs(redact_sensitive=True)[0][2] == "[redacted]"
+    raw_run = database.list_tool_runs()[0]
+    assert raw_run[2] == query
+    assert database.list_tool_results(
+        redact_sensitive=True
+    )[0][2:4] == (
+        "[redacted]", "Found [redacted] and person+tagger@example.com",
+    )
+    boundary_query = "private@example.com"
+    boundary_run_id = database.start_tool_run("holehe", boundary_query)
+    boundary_result = f"begin {boundary_query} end"
+    database.finish_tool_run(
+        boundary_run_id, "success", result_text=boundary_result
     )
     assert database.list_tool_results(
-        max_result_text_chars=19, redact_sensitive=True
-    )[0][2:4] == ("[redacted]", "begin … [truncated]")
+        max_result_text_chars=30, redact_sensitive=True
+    )[0][3] == "begin [redacted] … [truncated]"
+
     result_id = database.query_database(
-        "SELECT resultID FROM ToolResults"
+        "SELECT resultID FROM ToolResults ORDER BY resultID LIMIT 1"
     )[0][0]
     assert database.get_tool_result(
         result_id, redact_sensitive=True
-    )["result"] == "begin [redacted] end"
+    )["result"] == "Found [redacted] and person+tagger@example.com"
     assert database.query_database(
         "SELECT queryText, resultText FROM ToolRuns WHERE runID = ?", (run_id,)
     ) == [(query, result)]
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolResults ORDER BY resultID"
+    ) == [(query, result), (boundary_query, boundary_result)]
 
 
 @pytest.mark.parametrize(
     ("query", "text", "expected"),
     [
+        (
+            "ali",
+            "malicious output includes ali as a standalone token",
+            "malicious output includes [redacted] as a standalone token",
+        ),
+        (
+            "person+tag@example.com",
+            "Found person+tag%40example.com and person+tagger@example.com",
+            "Found [redacted] and person+tagger@example.com",
+        ),
+        (
+            "https://example.test/a/b",
+            "found https%3A//example.test/a%2Fb in a response",
+            "found [redacted] in a response",
+        ),
         ("ali", "ali in a larger token ali%63e", "[redacted] in a larger token ali%63e"),
         ("private@example.com", "[private@example.com].", "[[redacted]]."),
         ("alice", "alice. alice.example", "[redacted]. alice.example"),
-        (
-            "person+tag@example.com",
-            "Found person+tag%40example.com",
-            "Found [redacted]",
-        ),
     ],
 )
 def test_redact_sensitive_text_handles_boundaries(query, text, expected):

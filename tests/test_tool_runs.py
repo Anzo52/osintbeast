@@ -49,6 +49,62 @@ def test_failed_runs_are_recorded(initialized_db, tool, error, status):
     assert database.list_tool_results() == []
 
 
+def test_keyboard_interrupt_is_preserved_if_failure_persistence_fails(
+    initialized_db, monkeypatch
+):
+    run_id = database.start_tool_run("maigret", "test")
+    monkeypatch.setattr(
+        database,
+        "finish_tool_run",
+        Mock(side_effect=sqlite3.OperationalError("database is locked")),
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="stop"):
+        tool_runs.execute_tool_run(
+            "maigret",
+            "test",
+            Mock(side_effect=KeyboardInterrupt("stop")),
+            run_id=run_id,
+            sensitive_input=False,
+        )
+
+
+def test_keyboard_interrupt_during_result_redaction_marks_run_failed(
+    initialized_db, monkeypatch
+):
+    monkeypatch.setattr(
+        tool_runs,
+        "redact_sensitive_output",
+        Mock(side_effect=KeyboardInterrupt()),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        tool_runs.execute_tool_run(
+            "holehe", "private", lambda _: "output", sensitive_input=True
+        )
+
+    assert database.query_database("SELECT status, errorText FROM ToolRuns") == [
+        ("failed", "Tool run interrupted.")
+    ]
+
+
+def test_keyboard_interrupt_after_run_creation_marks_run_failed(
+    initialized_db, monkeypatch
+):
+    monkeypatch.setattr(
+        tool_runs, "_execute_tool_run", Mock(side_effect=KeyboardInterrupt())
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        tool_runs.execute_tool_run(
+            "maigret", "test", lambda _: "output", sensitive_input=False
+        )
+
+    assert database.query_database("SELECT status, errorText FROM ToolRuns") == [
+        ("failed", "Tool run interrupted.")
+    ]
+
+
 @pytest.mark.parametrize("existing_run", [False, True])
 @pytest.mark.parametrize("sensitive_input", [False, True])
 def test_interrupted_runs_are_recorded(initialized_db, existing_run, sensitive_input):
@@ -186,7 +242,7 @@ def test_finish_is_atomic_if_legacy_result_insert_fails(initialized_db):
     ) == [("running", None, None)]
 
 
-def test_reinitializing_legacy_database_redacts_results(tmp_path, monkeypatch):
+def test_reinitializing_legacy_database_preserves_results(tmp_path, monkeypatch):
     path = tmp_path / "legacy.db"
     monkeypatch.setattr(database, "DB_FILE", str(path))
     with sqlite3.connect(path) as conn:
@@ -200,7 +256,7 @@ def test_reinitializing_legacy_database_redacts_results(tmp_path, monkeypatch):
     database.setup_database()
 
     assert database.query_database("SELECT queryText, resultText FROM ToolResults") == [
-        ("[redacted]", "[redacted] result")
+        ("old", "old result")
     ]
     assert database.query_database("SELECT * FROM ToolRuns") == []
 
@@ -422,6 +478,33 @@ def test_finish_tool_run_rejects_invalid_terminal_states(
     assert database.query_database(
         "SELECT status, resultText, errorText, finishedAt FROM ToolRuns"
     ) == [("running", None, None, None)]
+
+
+def test_finish_tool_run_is_idempotent_for_committed_completion(initialized_db):
+    run_id = database.start_tool_run("maigret", "user")
+
+    database.finish_tool_run(run_id, "success", result_text="output")
+    database.finish_tool_run(run_id, "success", result_text="output")
+
+    assert database.get_tool_run(run_id)[3:6] == ("success", "output", None)
+    assert len(database.list_tool_results()) == 1
+
+
+def test_finish_tool_run_replaces_stale_reconciliation(initialized_db):
+    run_id = database.start_tool_run("maigret", "user")
+    with database.connect_db() as conn:
+        conn.execute(
+            "UPDATE ToolRuns SET startedAt = datetime('now', '-11 minutes') "
+            "WHERE runID = ?",
+            (run_id,),
+        )
+
+    assert database.reconcile_stale_tool_runs() == 1
+    database.finish_tool_run(run_id, "success", result_text="output")
+    database.finish_tool_run(run_id, "success", result_text="output")
+
+    assert database.get_tool_run(run_id)[3:6] == ("success", "output", None)
+    assert len(database.list_tool_results()) == 1
 
 
 @pytest.mark.parametrize(

@@ -28,6 +28,8 @@ def create_app(config=None):
     )
     if config:
         app.config.update(config)
+    if app.config.get("API_TOKEN"):
+        database.setup_database()
 
     @app.before_request
     def require_api_token():

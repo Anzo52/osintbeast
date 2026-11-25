@@ -24,7 +24,10 @@ Values remaining after any configured redaction are stored as plain text.
 Output is displayed in the terminal and database views. The saved-results
 database view displays up to 20 rows and truncates displayed result text at
 16,384 characters; this does not change the stored output. Direct database
-writes can bypass application redaction. Run history can be exported to JSON;
+writes can bypass application redaction. Saved run and result views also redact
+queries and matching result or error text at read time, including for legacy
+records; this view redaction does not alter stored database values. Run history
+can be exported to JSON;
 exports redact input, result, and error fields by default and require explicit
 consent to include their stored values. On POSIX, export files are created with
 owner-only permissions. Sensitive exports are disabled on Windows because
