@@ -504,10 +504,10 @@ class WebHandler(BaseHTTPRequestHandler):
             })
         except (UnicodeDecodeError, json.JSONDecodeError):
             self._send_json(400, {"error": "Request body must contain valid JSON."})
-        except ValueError as exc:
-            self._send_json(400, {"error": str(exc)})
         except IdempotencyConflict as exc:
             self._send_json(409, {"error": str(exc)})
+        except ValueError as exc:
+            self._send_json(400, {"error": str(exc)})
         except CapacityError:
             self._send_json(503, {"error": "Background run capacity reached. Try again later."})
         except StartupPersistenceError as exc:
@@ -542,6 +542,11 @@ def create_server(host="127.0.0.1", port=8000):
     """Create an initialized, authenticated web server."""
     address = _resolve_loopback_host(host)
     _configured_tokens()
+    secret = os.getenv("OSINTBEAST_IDEMPOTENCY_SECRET", "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{32,256}", secret):
+        raise RuntimeError(
+            "OSINTBEAST_IDEMPOTENCY_SECRET must contain 32-256 URL-safe characters."
+        )
     database.setup_database()
     service = BackgroundRuns()
     try:

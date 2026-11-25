@@ -1,3 +1,5 @@
+import hashlib
+import json
 import multiprocessing
 import os
 import sqlite3
@@ -65,6 +67,7 @@ def parent_that_exits(sender, ready):
 
 @pytest.fixture
 def service(tmp_path, monkeypatch):
+    monkeypatch.setenv("OSINTBEAST_IDEMPOTENCY_SECRET", "test-secret-" + "x" * 32)
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "runs.db"))
     database.setup_database()
     monkeypatch.setattr(background_runs, "_worker", mocked_worker)
@@ -572,6 +575,31 @@ def test_submission_idempotency_is_scoped_to_key_and_input(service):
     assert len(database.list_tool_runs()) == 1
 
 
+def test_sensitive_idempotency_fingerprint_is_keyed_and_survives_restart(service):
+    query = "person@example.com"
+    run_id = service.submit("holehe", query, "sensitive-key")
+    service.close()
+
+    replacement = background_runs.BackgroundRuns()
+    try:
+        assert replacement.submit("holehe", query, "sensitive-key") == run_id
+        with pytest.raises(background_runs.IdempotencyConflict):
+            replacement.submit("holehe", "other@example.com", "sensitive-key")
+        with sqlite3.connect(database.DB_FILE) as conn:
+            fingerprint = conn.execute(
+                "SELECT requestHash FROM ToolRunRequests WHERE idempotencyKey = ?",
+                ("sensitive-key",),
+            ).fetchone()[0]
+            assert conn.execute(
+                "SELECT queryText FROM ToolRuns WHERE runID = ?", (run_id,)
+            ).fetchone()[0] == "[redacted]"
+        raw = json.dumps(["holehe", query], ensure_ascii=False, separators=(",", ":"))
+        assert fingerprint != hashlib.sha256(raw.encode()).hexdigest()
+        assert query not in fingerprint
+    finally:
+        replacement.close()
+
+
 def test_failed_start_retries_persistence_and_keeps_idempotency_key(service, monkeypatch):
     finish = database.finish_tool_run
     attempts = 0
@@ -643,13 +671,67 @@ def test_slow_pending_persistence_does_not_hold_service_lock(service, monkeypatc
     assert not retry.is_alive()
 
 
-def test_idempotency_keys_are_bounded_after_completion(service, monkeypatch):
-    monkeypatch.setattr(background_runs, "_MAX_IDEMPOTENCY_KEYS", 3)
+def test_idempotency_keys_remain_available_after_completion(service):
+    run_ids = []
     for index in range(5):
         run_id = service.submit("maigret", "user", f"key-{index}")
+        run_ids.append(run_id)
         assert wait_for_run(service, run_id)["status"] == "success"
-    assert len(service._idempotency_keys) <= 3
-    assert service.submit("maigret", "user", "key-4") == run_id
+    for index, run_id in enumerate(run_ids):
+        assert service.submit("maigret", "user", f"key-{index}") == run_id
+    assert len(database.list_tool_runs()) == len(run_ids)
+
+
+def test_services_share_idempotency_but_not_capacity(service):
+    other = background_runs.BackgroundRuns(service.limits)
+    try:
+        run_id = service.submit("maigret", "slow", "shared-key")
+        assert other.submit("maigret", "slow", "shared-key") == run_id
+        with pytest.raises(background_runs.IdempotencyConflict):
+            other.submit("maigret", "user", "shared-key")
+        other_id = other.submit("maigret", "user", "other-key")
+        assert other_id != run_id
+        assert wait_for_run(other, other_id)["status"] == "success"
+    finally:
+        other.close()
+
+
+def test_concurrent_services_dispatch_one_idempotent_run(service, monkeypatch):
+    other = background_runs.BackgroundRuns(service.limits)
+    lookup = database.get_idempotent_tool_run
+    barrier = threading.Barrier(2)
+    results, errors = [], []
+    dispatch = Mock(wraps=service._supervise)
+    other_dispatch = Mock(wraps=other._supervise)
+    service._supervise = dispatch
+    other._supervise = other_dispatch
+
+    def synchronized_lookup(*args):
+        existing = lookup(*args)
+        barrier.wait(timeout=5)
+        return existing
+
+    monkeypatch.setattr(database, "get_idempotent_tool_run", synchronized_lookup)
+
+    def submit(instance):
+        try:
+            results.append(instance.submit("maigret", "slow", "concurrent-key"))
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=submit, args=(instance,)) for instance in (service, other)]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+        assert not any(thread.is_alive() for thread in threads)
+        assert not errors
+        assert len(results) == 2 and results[0] == results[1]
+        assert dispatch.call_count + other_dispatch.call_count == 1
+        assert len(database.list_tool_runs()) == 1
+    finally:
+        other.close()
 
 
 @pytest.mark.parametrize(

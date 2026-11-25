@@ -49,10 +49,10 @@ CREATE TABLE IF NOT EXISTS ToolRuns (
 
 CREATE TABLE IF NOT EXISTS ToolRunRequests (
     idempotencyKey VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
-    requestHash CHAR(64) NOT NULL,
+    requestHash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     runID INT NOT NULL,
     PRIMARY KEY (idempotencyKey),
     UNIQUE KEY uq_toolrunrequests_runid (runID),
     CONSTRAINT fk_toolrunrequests_toolrun
-        FOREIGN KEY (runID) REFERENCES ToolRuns (runID)
+        FOREIGN KEY (runID) REFERENCES ToolRuns (runID) ON DELETE CASCADE
 ) ENGINE=InnoDB;

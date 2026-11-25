@@ -50,5 +50,5 @@ CREATE TABLE IF NOT EXISTS ToolRunRequests (
     idempotencyKey TEXT PRIMARY KEY,
     requestHash TEXT NOT NULL,
     runID INTEGER NOT NULL UNIQUE,
-    FOREIGN KEY (runID) REFERENCES ToolRuns (runID)
+    FOREIGN KEY (runID) REFERENCES ToolRuns (runID) ON DELETE CASCADE
 );

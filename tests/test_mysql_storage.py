@@ -4,9 +4,10 @@ from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
 
 import data.utils.database as database
-from data.utils.storage import MySQLStorage, StorageError
+from data.utils.storage import IdempotencyConflict, MySQLStorage, StorageError
 
 
 class FakeResult:
@@ -101,6 +102,45 @@ def test_mysql_initialization_executes_both_idempotent_schema_files(mysql_storag
         in statement
         for statement in statements
     )
+
+
+@pytest.mark.parametrize("error_code", [1062, 1205, 1213])
+@pytest.mark.parametrize("same_request", [True, False])
+def test_mysql_idempotency_retries_transaction_after_contention(
+    mysql_storage, monkeypatch, error_code, same_request
+):
+    storage, engine = mysql_storage
+    selects = 0
+
+    class RowResult:
+        def __init__(self, row):
+            self.row = row
+
+        def fetchone(self):
+            return self.row
+
+    def execute(statement, parameters=()):
+        nonlocal selects
+        engine.connection.statements.append((statement, parameters))
+        if statement.startswith("SELECT requestHash"):
+            selects += 1
+            return RowResult(None if selects == 1 else (
+                "a" * 64 if same_request else "b" * 64, 42
+            ))
+        if statement.startswith("INSERT INTO ToolRunRequests"):
+            raise OperationalError(statement, parameters, Exception(error_code, "contention"))
+        return FakeResult()
+
+    monkeypatch.setattr(engine.connection, "exec_driver_sql", execute)
+    if same_request:
+        assert storage.start_idempotent_tool_run("holehe", "[redacted]", "key", "a" * 64) == (
+            42, False
+        )
+    else:
+        with pytest.raises(IdempotencyConflict):
+            storage.start_idempotent_tool_run("holehe", "[redacted]", "key", "a" * 64)
+    assert selects == 2
+    assert len(engine.transaction_errors) >= 1
 
 
 def test_mysql_core_operations_use_bound_values_and_preserve_transactional_flow(

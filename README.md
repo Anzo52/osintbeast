@@ -114,7 +114,8 @@ machine and do not expose it through a proxy or port forward.
 
 Set `OSINTBEAST_API_TOKENS` to a JSON object whose keys are unique,
 cryptographically random URL-safe tokens of at least 32 characters and whose
-values are roles. Configure the value through a secret manager or another
+values are roles. The server validates token format, not randomness; generating
+unpredictable tokens is the operator's responsibility. Configure the value through a secret manager or another
 private environment mechanism; do not commit it, place it in a URL, or include
 it in logs:
 
@@ -339,9 +340,7 @@ capacity slot reserved while retrying the write independently of status
 requests. Calling `status(run_id)` also retries immediately and raises
 `RuntimeError` if the outcome still cannot be saved. Pending outcomes are lost
 if the application process exits.
-Idempotency keys for active runs are retained; completed-run keys are kept
-up to 1024 entries (or the configured concurrency limit), after which the
-oldest completed keys are evicted. Retrying an evicted key creates a new run.
+Idempotency keys are retained with their run-history records.
 The browser retains an unacknowledged submission key and a salted input
 fingerprint in session storage across reloads, without storing the raw input;
 it clears the key when the server confirms the submission.
@@ -376,8 +375,7 @@ the recent-runs view. At most two browser runs can be active at once; additional
 requests receive HTTP 503 until capacity is available. Holehe input is redacted
 in stored records and output. Submissions accept an `Idempotency-Key`; retries
 with the same key and input return the existing run, while reusing a key for a
-different run returns HTTP 409. Keys are retained for the lifetime of the
-service.
+different run returns HTTP 409. Keys persist with their run-history records.
 
 Set separate, cryptographically random operator and viewer tokens before
 starting the server:
@@ -385,15 +383,28 @@ starting the server:
 ```bash
 export OSINTBEAST_OPERATOR_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
 export OSINTBEAST_VIEWER_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+export OSINTBEAST_IDEMPOTENCY_SECRET="<persistently stored random secret>"
 python -m web_ui
 ```
 
-Tokens must each contain 32–256 URL-safe characters and must differ. Operators
-may launch runs and read results; viewers may only read results. The browser
-prompts for a token and keeps it in session storage for the current tab.
-Launch retries use an idempotency key so the same submitted request returns its
-original run instead of starting another. The server binds only to resolved
-IPv4 or IPv6 loopback addresses. Do not expose it through a tunnel or reverse
+Generate the idempotency secret separately with
+`python -c 'import secrets; print(secrets.token_urlsafe(32))'`, store it
+outside the database, and reuse it across restarts and all server instances
+sharing the database. It must be 32–256 URL-safe characters. Randomness is
+the operator's responsibility; format validation cannot establish entropy.
+Keep this secret private: changing it makes existing idempotency keys conflict
+until their run-history records are removed. Restore it alongside database
+backups to preserve retry behavior.
+
+Send a configured token using HTTP bearer authentication. Tokens must each
+contain 32–256 URL-safe characters and must differ. Operators may launch runs
+and read results; viewers may only read results. Missing, invalid, or
+unauthorized credentials are rejected. The browser prompts for an access token
+and keeps it only in session storage for the current tab. Generate both tokens
+randomly and keep them private; format validation cannot establish entropy.
+The server refuses to start unless the tokens and idempotency secret are
+configured and binds only to resolved IPv4 or IPv6 loopback addresses. Do not
+expose it through a tunnel or reverse
 proxy; keep its database and results restricted to authorized local users.
 
 ## Responsible use and privacy

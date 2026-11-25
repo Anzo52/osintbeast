@@ -395,8 +395,8 @@ def start_tool_run(tool_name: str, query_text: str):
 def _validate_idempotency_key(idempotency_key: str, request_hash: str) -> None:
     if (
         not isinstance(idempotency_key, str)
-        or not 16 <= len(idempotency_key) <= 128
-        or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for char in idempotency_key)
+        or not 1 <= len(idempotency_key) <= 128
+        or any(not 33 <= ord(char) <= 126 for char in idempotency_key)
     ):
         raise ValueError("Invalid idempotency key.")
     if (

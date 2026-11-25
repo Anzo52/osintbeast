@@ -2,21 +2,21 @@
 
 import hashlib
 import hmac
+import json
 import logging
 import math
 import multiprocessing
 import multiprocessing.connection
 import os
-import secrets
 import signal
 import threading
 import time
-from collections import OrderedDict
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
 from io import StringIO
 
 import data.utils.database as database
+from data.utils.storage import IdempotencyConflict as IdempotencyConflict
 from helix_integration import run_helix, validate_username as validate_helix
 from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username as validate_maigret
@@ -24,7 +24,6 @@ from sherlock_integration import run_sherlock, validate_username as validate_she
 from tool_runs import redact_sensitive_output, start_tool_run
 
 _LOG = logging.getLogger(__name__)
-_MAX_IDEMPOTENCY_KEYS = 1024
 _SHUTDOWN_TIMEOUT_SECONDS = 5
 _TOOLS = {
     "holehe": (validate_email, run_holehe),
@@ -47,10 +46,6 @@ class StartupPersistenceError(RuntimeError):
             message += f" {startup_error}"
         super().__init__(message)
         self.run_id = run_id
-
-
-class IdempotencyConflict(RuntimeError):
-    """An idempotency key was reused for a different submission."""
 
 
 @dataclass(frozen=True)
@@ -151,8 +146,7 @@ class BackgroundRuns:
         self._pending = {}
         self._pending_claims = set()
         self._pending_failed = set()
-        self._idempotency_keys = OrderedDict()
-        self._idempotency_secret = secrets.token_bytes(32)
+        self._idempotency_secret = os.getenv("OSINTBEAST_IDEMPOTENCY_SECRET")
         self._retry_wakeup = threading.Event()
         self._retry_stop = threading.Event()
         self._retry_thread = None
@@ -172,33 +166,36 @@ class BackgroundRuns:
         ):
             raise ValueError("Idempotency-Key must contain 1 to 128 visible ASCII characters.")
         query = _TOOLS[tool_name][0](query)
-        key_record = None
+        fingerprint = None
         if idempotency_key is not None:
+            if not self._idempotency_secret:
+                raise RuntimeError("OSINTBEAST_IDEMPOTENCY_SECRET is required.")
+            request_data = json.dumps(
+                [tool_name, query], ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
             fingerprint = hmac.new(
-                self._idempotency_secret, query.encode("utf-8"), hashlib.sha256
-            ).digest()
-            key_record = (idempotency_key, tool_name, fingerprint)
+                self._idempotency_secret.encode("utf-8"), request_data, hashlib.sha256
+            ).hexdigest()
         with self._lock:
             if self._closed:
                 raise RuntimeError("Background run service is closed.")
-            if key_record is not None:
-                existing = self._idempotency_keys.get(idempotency_key)
+            if fingerprint is not None:
+                existing = database.get_idempotent_tool_run(idempotency_key, fingerprint)
                 if existing is not None:
-                    if existing[:2] != key_record[1:]:
-                        raise IdempotencyConflict(
-                            "Idempotency-Key was already used for a different run."
-                        )
-                    return existing[2]
+                    return existing
             if len(self._jobs.keys() | self._pending.keys()) >= self.limits.max_concurrent:
                 raise CapacityError("Background run capacity reached.")
-            run_id = start_tool_run(
-                tool_name, query, sensitive_input=tool_name == "holehe"
-            )
-            if key_record is not None:
-                self._idempotency_keys[idempotency_key] = (
-                    key_record[1], key_record[2], run_id
+            if fingerprint is not None:
+                run_id, created = database.start_idempotent_tool_run(
+                    tool_name, "[redacted]" if tool_name == "holehe" else query,
+                    idempotency_key, fingerprint,
                 )
-                self._prune_keys()
+                if not created:
+                    return run_id
+            else:
+                run_id = start_tool_run(
+                    tool_name, query, sensitive_input=tool_name == "holehe"
+                )
             cancel = threading.Event()
             completed = threading.Event()
             try:
@@ -222,14 +219,6 @@ class BackgroundRuns:
                     del self._pending[run_id]
                 raise
         return run_id
-
-    def _prune_keys(self):
-        limit = max(_MAX_IDEMPOTENCY_KEYS, self.limits.max_concurrent)
-        for key, (_, _, run_id) in list(self._idempotency_keys.items()):
-            if len(self._idempotency_keys) <= limit:
-                break
-            if run_id not in self._jobs and run_id not in self._pending:
-                del self._idempotency_keys[key]
 
     def _schedule_retry(self):
         self._retry_wakeup.set()

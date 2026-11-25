@@ -41,6 +41,7 @@ def mocked_worker(connection, tool_name, query, max_output_bytes, deadline=None)
 @pytest.fixture(autouse=True)
 def run_service(monkeypatch):
     monkeypatch.setattr(background_runs, "_worker", mocked_worker)
+    monkeypatch.setenv("OSINTBEAST_IDEMPOTENCY_SECRET", "test-secret-" + "x" * 32)
     service = background_runs.BackgroundRuns()
     monkeypatch.setattr(web_ui, "BackgroundRuns", lambda: service)
     yield service
@@ -77,6 +78,7 @@ def _request(url, payload=None, headers=None):
 def _server(tmp_path, monkeypatch, runner):
     monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", OPERATOR_TOKEN)
     monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", VIEWER_TOKEN)
+    monkeypatch.setenv("OSINTBEAST_IDEMPOTENCY_SECRET", "test-secret-" + "x" * 32)
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "web.db"))
     monkeypatch.setattr(
         web_ui,
@@ -548,6 +550,15 @@ def test_missing_auth_configuration_and_non_loopback_bind_fail_closed(monkeypatc
         web_ui.create_server("0.0.0.0", 0)
 
 
+@pytest.mark.parametrize("secret", ["", "short", "x" * 31 + "!"])
+def test_server_rejects_missing_or_invalid_idempotency_secret(monkeypatch, secret):
+    monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", OPERATOR_TOKEN)
+    monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", VIEWER_TOKEN)
+    monkeypatch.setenv("OSINTBEAST_IDEMPOTENCY_SECRET", secret)
+    with pytest.raises(RuntimeError, match="OSINTBEAST_IDEMPOTENCY_SECRET"):
+        web_ui.create_server()
+
+
 def test_terminal_tool_error_is_available_for_review(tmp_path, monkeypatch):
     runner = Mock(side_effect=RuntimeError("dependency missing"))
     server, base_url = _server(tmp_path, monkeypatch, runner)
@@ -607,11 +618,17 @@ def test_submission_idempotency_key_returns_existing_run(tmp_path, monkeypatch):
     try:
         status, first = _request(f"{base_url}/api/runs", payload, headers)
         assert status == 202
+        old_service = server.run_service
+        old_service.close()
+        server.run_service = background_runs.BackgroundRuns()
+        restarted_starts = Mock(wraps=server.run_service._supervise)
+        monkeypatch.setattr(server.run_service, "_supervise", restarted_starts)
         status, repeated = _request(f"{base_url}/api/runs", payload, headers)
         assert status == 202
         assert repeated["id"] == first["id"]
         assert len(database.list_tool_runs()) == 1
         assert starts.call_count == 1
+        assert restarted_starts.call_count == 0
 
         status, body = _request(
             f"{base_url}/api/runs",
@@ -624,6 +641,7 @@ def test_submission_idempotency_key_returns_existing_run(tmp_path, monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
+        server.run_service.close()
 
 
 def test_concurrent_servers_keep_their_own_run_services(tmp_path, monkeypatch):
@@ -685,6 +703,7 @@ def test_serve_creates_a_fresh_run_service_each_time(monkeypatch):
     monkeypatch.setattr(database, "setup_database", Mock())
     monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", OPERATOR_TOKEN)
     monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", VIEWER_TOKEN)
+    monkeypatch.setenv("OSINTBEAST_IDEMPOTENCY_SECRET", "test-secret-" + "x" * 32)
 
     web_ui.serve()
     web_ui.serve()
