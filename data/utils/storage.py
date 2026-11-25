@@ -4,12 +4,28 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol
 from sqlalchemy import MetaData, Table, create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine import URL
+
+_UNPERSISTED_RUN_ERROR = "Run outcome could not be persisted."
 
 
 class StorageError(Exception):
     """A backend-neutral storage error for application-level handling."""
 
+
+class IdempotencyConflictError(ValueError):
+    """An idempotency key was reused for a different request."""
+
+
+def _matching_idempotent_run(row, request_hash):
+    if row is None:
+        return None
+    if row[0] != request_hash:
+        raise IdempotencyConflictError(
+            "Idempotency-Key was already used for a different request."
+        )
+    return row[1]
 
 class Storage(Protocol):
     def connect(self): ...
@@ -31,6 +47,15 @@ class Storage(Protocol):
     ) -> list[tuple[Any, ...]]: ...
 
     def start_tool_run(self, tool_name: str, query_text: str) -> int: ...
+
+    def get_idempotent_tool_run(
+        self, idempotency_key: str, request_hash: str
+    ) -> Optional[int]: ...
+
+    def start_idempotent_tool_run(
+        self, tool_name: str, query_text: str, idempotency_key: str,
+        request_hash: str,
+    ) -> tuple[int, bool]: ...
 
     def finish_tool_run(
         self,
@@ -171,6 +196,44 @@ class SQLiteStorage:
             )
             return cursor.lastrowid
 
+    def get_idempotent_tool_run(
+        self, idempotency_key: str, request_hash: str
+    ) -> Optional[int]:
+        with closing(self.connect()) as conn:
+            row = conn.execute(
+                """SELECT requestHash, runID FROM ToolRunRequests
+                   WHERE idempotencyKey = ?""",
+                (idempotency_key,),
+            ).fetchone()
+        return _matching_idempotent_run(row, request_hash)
+
+    def start_idempotent_tool_run(
+        self, tool_name: str, query_text: str, idempotency_key: str,
+        request_hash: str,
+    ) -> tuple[int, bool]:
+        with closing(self.connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                """SELECT requestHash, runID FROM ToolRunRequests
+                   WHERE idempotencyKey = ?""",
+                (idempotency_key,),
+            ).fetchone()
+            existing = _matching_idempotent_run(row, request_hash)
+            if existing is not None:
+                return existing, False
+            cursor = conn.execute(
+                """INSERT INTO ToolRuns (toolName, queryText, status)
+                   VALUES (?, ?, 'running')""",
+                (tool_name, query_text),
+            )
+            run_id = cursor.lastrowid
+            conn.execute(
+                """INSERT INTO ToolRunRequests
+                   (idempotencyKey, requestHash, runID) VALUES (?, ?, ?)""",
+                (idempotency_key, request_hash, run_id),
+            )
+            return run_id, True
+
     def finish_tool_run(
         self,
         run_id: int,
@@ -182,10 +245,19 @@ class SQLiteStorage:
             cursor = conn.execute(
                 """UPDATE ToolRuns SET status = ?, resultText = ?, errorText = ?,
                    finishedAt = CURRENT_TIMESTAMP
-                   WHERE runID = ? AND status = 'running'""",
-                (status, result_text, error_text, run_id),
+                   WHERE runID = ? AND (
+                       status = 'running' OR
+                       (status = 'failed' AND errorText = ?)
+                   )""",
+                (status, result_text, error_text, run_id, _UNPERSISTED_RUN_ERROR),
             )
             if cursor.rowcount != 1:
+                row = conn.execute(
+                    "SELECT status, resultText, errorText FROM ToolRuns WHERE runID = ?",
+                    (run_id,),
+                ).fetchone()
+                if row == (status, result_text, error_text):
+                    return
                 raise ValueError("Run does not exist or is already finished.")
             if status == "success":
                 conn.execute(
@@ -463,6 +535,60 @@ class MySQLStorage:
                 raise StorageError(str(exc)) from exc
             raise
 
+    def get_idempotent_tool_run(
+        self, idempotency_key: str, request_hash: str
+    ) -> Optional[int]:
+        try:
+            with self._get_engine().connect() as connection:
+                row = connection.exec_driver_sql(
+                    """SELECT requestHash, runID FROM ToolRunRequests
+                       WHERE idempotencyKey = %s""",
+                    (idempotency_key,),
+                ).fetchone()
+        except Exception as exc:
+            if exc.__class__.__module__.startswith("sqlalchemy"):
+                raise StorageError(str(exc)) from exc
+            raise
+        return _matching_idempotent_run(row, request_hash)
+
+    def start_idempotent_tool_run(
+        self, tool_name: str, query_text: str, idempotency_key: str,
+        request_hash: str,
+    ) -> tuple[int, bool]:
+        try:
+            with self._get_engine().begin() as connection:
+                row = connection.exec_driver_sql(
+                    """SELECT requestHash, runID FROM ToolRunRequests
+                       WHERE idempotencyKey = %s FOR UPDATE""",
+                    (idempotency_key,),
+                ).fetchone()
+                existing = _matching_idempotent_run(row, request_hash)
+                if existing is not None:
+                    return existing, False
+                result = connection.exec_driver_sql(
+                    """INSERT INTO ToolRuns (toolName, queryText, status)
+                       VALUES (%s, %s, 'running')""",
+                    (tool_name, query_text),
+                )
+                run_id = result.lastrowid
+                connection.exec_driver_sql(
+                    """INSERT INTO ToolRunRequests
+                       (idempotencyKey, requestHash, runID) VALUES (%s, %s, %s)""",
+                    (idempotency_key, request_hash, run_id),
+                )
+                return run_id, True
+        except IntegrityError as exc:
+            existing = self.get_idempotent_tool_run(
+                idempotency_key, request_hash
+            )
+            if existing is not None:
+                return existing, False
+            raise StorageError(str(exc)) from exc
+        except Exception as exc:
+            if exc.__class__.__module__.startswith("sqlalchemy"):
+                raise StorageError(str(exc)) from exc
+            raise
+
     def finish_tool_run(
         self,
         run_id: int,
@@ -475,10 +601,19 @@ class MySQLStorage:
                 result = connection.exec_driver_sql(
                     """UPDATE ToolRuns SET status = %s, resultText = %s,
                        errorText = %s, finishedAt = CURRENT_TIMESTAMP
-                       WHERE runID = %s AND status = 'running'""",
-                    (status, result_text, error_text, run_id),
+                       WHERE runID = %s AND (
+                           status = 'running' OR
+                           (status = 'failed' AND errorText = %s)
+                       )""",
+                    (status, result_text, error_text, run_id, _UNPERSISTED_RUN_ERROR),
                 )
                 if result.rowcount != 1:
+                    row = connection.exec_driver_sql(
+                        "SELECT status, resultText, errorText FROM ToolRuns WHERE runID = %s",
+                        (run_id,),
+                    ).fetchone()
+                    if row == (status, result_text, error_text):
+                        return
                     raise ValueError("Run does not exist or is already finished.")
                 if status == "success":
                     connection.exec_driver_sql(

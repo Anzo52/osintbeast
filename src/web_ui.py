@@ -4,43 +4,21 @@ import hmac
 import ipaddress
 import json
 import os
+import re
+import socket
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
-from background_runs import BackgroundRuns, CapacityError
+from background_runs import (
+    BackgroundRuns, CapacityError, IdempotencyConflict, StartupPersistenceError,
+)
 from data.utils import database
-from helix_integration import run_helix
-from helix_integration import validate_username as validate_helix_username
+from helix_integration import run_helix, validate_username as validate_helix_username
 from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username
 from sherlock_integration import run_sherlock
 from sherlock_integration import validate_username as validate_sherlock_username
 from tool_registry import get_tool_metadata
-
-
-def _configured_tokens():
-    operator = (
-        os.getenv("OSINTBEAST_OPERATOR_TOKEN")
-        or os.getenv("OSINTBEAST_API_TOKEN")
-        or os.getenv("OSINTBEAST_TOKEN")
-        or os.getenv("OSINTBEAST_WEB_TOKEN")
-    )
-    viewer = os.getenv("OSINTBEAST_VIEWER_TOKEN")
-    if not viewer:
-        viewer = operator
-    return {
-        "operator": operator,
-        "viewer": viewer,
-    }
-
-
-def _is_loopback_host(host):
-    if host.lower() == "localhost":
-        return True
-    try:
-        return ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False
 
 
 RUN_SERVICE = BackgroundRuns()
@@ -50,6 +28,62 @@ RUNNABLE_TOOLS = {
     "helix": ("username", validate_helix_username, run_helix),
     "sherlock": ("username", validate_sherlock_username, run_sherlock),
 }
+TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{32,256}\Z")
+IDEMPOTENCY_KEY_PATTERN = re.compile(r"[A-Za-z0-9_-]{16,128}\Z")
+
+
+def _configured_tokens():
+    operator = os.getenv("OSINTBEAST_OPERATOR_TOKEN")
+    viewer = os.getenv("OSINTBEAST_VIEWER_TOKEN")
+    tokens = {"operator": operator, "viewer": viewer}
+    if any(
+        not isinstance(token, str) or not TOKEN_PATTERN.fullmatch(token)
+        for token in tokens.values()
+    ):
+        raise RuntimeError(
+            "Set OSINTBEAST_OPERATOR_TOKEN and OSINTBEAST_VIEWER_TOKEN to "
+            "separate 32-256 character URL-safe tokens."
+        )
+    if hmac.compare_digest(operator.encode("ascii"), viewer.encode("ascii")):
+        raise RuntimeError("Operator and viewer tokens must be different.")
+    return tokens
+
+
+def _resolve_loopback_host(host):
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        if host.lower() != "localhost":
+            raise ValueError("The web UI may only bind to a loopback address.")
+        try:
+            results = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+            addresses = {
+                ipaddress.ip_address(result[4][0].split("%", 1)[0])
+                for result in results
+            }
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                "The web UI may only bind to a loopback address."
+            ) from exc
+        if not addresses or any(not address.is_loopback for address in addresses):
+            raise ValueError("The web UI may only bind to a loopback address.")
+        address = next(
+            (item for item in addresses if item.version == 4),
+            next(iter(addresses)),
+        )
+    if not address.is_loopback:
+        raise ValueError("The web UI may only bind to a loopback address.")
+    return address
+
+
+def _create_http_server(address, port):
+    server_class = ThreadingHTTPServer
+    if address.version == 6:
+        class IPv6ThreadingHTTPServer(ThreadingHTTPServer):
+            address_family = socket.AF_INET6
+
+        server_class = IPv6ThreadingHTTPServer
+    return server_class((str(address), port), WebHandler)
 
 INDEX_HTML = """<!doctype html>
 <html lang="en">
@@ -95,7 +129,6 @@ INDEX_HTML = """<!doctype html>
     const inputLabel = document.querySelector("#input-label");
     const queryInput = document.querySelector("#query");
     const error = document.querySelector("#error");
-
     async function request(url, options) {
       let token = sessionStorage.getItem("osintbeastToken");
       if (!token) token = window.prompt("Enter an OSINT Beast access token:");
@@ -111,7 +144,10 @@ INDEX_HTML = """<!doctype html>
       }
       if (token) sessionStorage.setItem("osintbeastToken", token);
       const body = await response.json();
-      if (!response.ok) throw new Error(body.error || "Request failed.");
+      if (!response.ok) {
+        const run = Number.isSafeInteger(body.id) ? ` Run #${body.id}.` : "";
+        throw new Error((body.error || "Request failed.") + run);
+      }
       return body;
     }
 
@@ -167,7 +203,14 @@ INDEX_HTML = """<!doctype html>
       error.textContent = reason.message;
     }
 
-    toolSelect.addEventListener("change", updateInputLabel);
+    let idempotencyKey = null;
+    toolSelect.addEventListener("change", () => {
+      idempotencyKey = null;
+      updateInputLabel();
+    });
+    queryInput.addEventListener("input", () => {
+      idempotencyKey = null;
+    });
     document.querySelector("#launch").addEventListener("submit", async event => {
       event.preventDefault();
       error.textContent = "";
@@ -176,9 +219,13 @@ INDEX_HTML = """<!doctype html>
       submit.disabled = true;
       message.textContent = "Submitting run…";
       try {
+        idempotencyKey ||= crypto.randomUUID();
         const run = await request("/api/runs", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": idempotencyKey
+          },
           body: JSON.stringify({
             tool: toolSelect.value,
             input: queryInput.value,
@@ -187,6 +234,7 @@ INDEX_HTML = """<!doctype html>
         });
         message.textContent = `Run #${run.id} is ${run.status}.`;
         await loadRun(run.id);
+        idempotencyKey = null;
       } catch (reason) {
         message.textContent = "";
         showError(reason);
@@ -278,23 +326,68 @@ class WebHandler(BaseHTTPRequestHandler):
             and not parsed.password
         )
 
-    def _send(self, status, body, content_type):
+    def _send(self, status, body, content_type, headers=None):
         encoded = body.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(encoded)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
             "connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
         )
         self.end_headers()
-        self.wfile.write(encoded)
+        if self.command != "HEAD":
+            self.wfile.write(encoded)
 
-    def _send_json(self, status, payload):
-        self._send(status, json.dumps(payload, ensure_ascii=False), "application/json; charset=utf-8")
+    def _send_json(self, status, payload, headers=None):
+        self._send(
+            status,
+            json.dumps(payload, ensure_ascii=False),
+            "application/json; charset=utf-8",
+            headers=headers,
+        )
+
+    def _authenticate(self, required_role):
+        try:
+            tokens = _configured_tokens()
+        except RuntimeError as exc:
+            self._send_json(503, {"error": str(exc)})
+            return False
+        authorization = self.headers.get("Authorization", "")
+        scheme, separator, credential = authorization.partition(" ")
+        if (
+            scheme.lower() != "bearer"
+            or not separator
+            or not credential
+            or " " in credential
+        ):
+            self._send_json(
+                401,
+                {"error": "Authentication required."},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            return False
+        supplied = credential.encode("utf-8")
+        if hmac.compare_digest(supplied, tokens["operator"].encode("ascii")):
+            role = "operator"
+        elif hmac.compare_digest(supplied, tokens["viewer"].encode("ascii")):
+            role = "viewer"
+        else:
+            self._send_json(
+                401,
+                {"error": "Invalid credentials."},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            return False
+        if required_role == "operator" and role != "operator":
+            self._send_json(403, {"error": "Operator role required."})
+            return False
+        return True
 
     def _run_payload(self, row, detail=False):
         payload = {
@@ -318,13 +411,14 @@ class WebHandler(BaseHTTPRequestHandler):
         if not self._has_local_host():
             self._send_json(403, {"error": "Use the local interface host."})
             return
+        path = urlsplit(self.path)
+        if path.path == "/":
+            self._send(200, INDEX_HTML, "text/html; charset=utf-8")
+            return
         if not self._authenticate("viewer"):
             return
-        path = urlsplit(self.path)
         try:
-            if path.path == "/":
-                self._send(200, INDEX_HTML, "text/html; charset=utf-8")
-            elif path.path == "/api/tools":
+            if path.path == "/api/tools":
                 tools = []
                 for name, (input_kind, _, _) in RUNNABLE_TOOLS.items():
                     metadata = get_tool_metadata(name)
@@ -405,20 +499,34 @@ class WebHandler(BaseHTTPRequestHandler):
                 return
             input_kind, validator, _ = tool
             query_text = validator(payload.get("input"))
-            run_id = RUN_SERVICE.submit(tool_name, query_text)
+            idempotency_key = self.headers.get("Idempotency-Key", "")
+            if not IDEMPOTENCY_KEY_PATTERN.fullmatch(idempotency_key):
+                self._send_json(400, {"error": "A valid Idempotency-Key is required."})
+                return
+            run_id = RUN_SERVICE.submit(
+                tool_name, query_text, idempotency_key=idempotency_key
+            )
+            row = database.get_tool_run(run_id, redact_sensitive=True)
             self._send_json(202, {
                 "id": run_id,
                 "tool": tool_name,
-                "input": "[redacted]" if tool_name == "holehe" else query_text,
+                "input": row[2],
                 "input_kind": input_kind,
-                "status": "running",
+                "status": row[3],
             })
         except (UnicodeDecodeError, json.JSONDecodeError):
             self._send_json(400, {"error": "Request body must contain valid JSON."})
         except ValueError as exc:
             self._send_json(400, {"error": str(exc)})
+        except IdempotencyConflict as exc:
+            self._send_json(409, {"error": str(exc)})
         except CapacityError:
             self._send_json(503, {"error": "Background run capacity reached. Try again later."})
+        except StartupPersistenceError as exc:
+            self._send_json(503, {
+                "error": "Could not persist the run outcome. Retry status later.",
+                "id": exc.run_id,
+            })
         except (RuntimeError, OSError):
             self._send_json(503, {"error": "The tool run could not be started. Try again later."})
         except database.DATABASE_ERRORS:
@@ -444,16 +552,17 @@ class WebHandler(BaseHTTPRequestHandler):
 
 def create_server(host="127.0.0.1", port=8000):
     """Create an initialized, authenticated web server."""
-    if not _is_loopback_host(host):
-        raise ValueError("The web UI may only bind to a loopback address.")
-    tokens = _configured_tokens()
-    if not tokens["operator"] or not tokens["viewer"]:
-        raise RuntimeError(
-            "Set authentication tokens: OSINTBEAST_OPERATOR_TOKEN and "
-            "OSINTBEAST_VIEWER_TOKEN are required before starting."
-        )
+    address = _resolve_loopback_host(host)
+    _configured_tokens()
     database.setup_database()
-    server = ThreadingHTTPServer((host, port), WebHandler)
+    global RUN_SERVICE
+    service = BackgroundRuns()
+    try:
+        server = _create_http_server(address, port)
+    except Exception:
+        service.close()
+        raise
+    RUN_SERVICE = service
     server.daemon_threads = True
     return server
 
@@ -461,14 +570,17 @@ def create_server(host="127.0.0.1", port=8000):
 def serve(host="127.0.0.1", port=8000):
     """Serve the web UI on loopback by default."""
     server = create_server(host, port)
-    print(f"OSINT Beast web UI: http://{host}:{server.server_port}")
+    address = server.server_address[0]
+    displayed_host = f"[{address}]" if server.address_family == socket.AF_INET6 else address
+    print(f"OSINT Beast web UI: http://{displayed_host}:{server.server_port}")
+    service = RUN_SERVICE
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
-        RUN_SERVICE.close()
         server.server_close()
+        service.close()
 
 
 if __name__ == "__main__":
