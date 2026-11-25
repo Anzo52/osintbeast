@@ -718,6 +718,27 @@ def test_browser_exposes_run_id_when_startup_failure_cannot_be_saved(tmp_path, m
         server.server_close()
 
 
+def test_status_on_another_server_does_not_hide_pending_outcome(tmp_path, monkeypatch):
+    first, first_url = _server(tmp_path, monkeypatch, Mock())
+    second, second_url = _server(tmp_path, monkeypatch, Mock())
+    run_id = database.start_tool_run("sherlock", "alice")
+    first.run_service._pending[run_id] = ("success", "output")
+    try:
+        status, _ = _request(f"{second_url}/api/runs/{run_id}")
+        assert status == 503
+        status, detail = _request(f"{first_url}/api/runs/{run_id}")
+        assert status == 200 and detail["status"] == "success"
+        status, detail = _request(f"{second_url}/api/runs/{run_id}")
+        assert status == 200 and detail["status"] == "success"
+    finally:
+        first.run_service.close()
+        second.run_service.close()
+        first.shutdown()
+        first.server_close()
+        second.shutdown()
+        second.server_close()
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is needed to exercise browser JavaScript")
 def test_browser_pending_key_storage_and_input_race():
     script = web_ui.INDEX_HTML.split('    const pendingKeyName =', 1)[1]
