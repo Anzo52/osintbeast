@@ -127,6 +127,20 @@ def test_setup_database_preserves_existing_data_and_repairs_missing_objects(
     ) == [("idx_services_platform",)]
 
 
+def test_query_database_commits_state_changing_statements(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "query.db"))
+    database.setup_database()
+    database.insert_data("Platforms", {"platform": "before"})
+
+    assert database.query_database(
+        "UPDATE Platforms SET platform = ? WHERE platform = ?",
+        ("after", "before"),
+    ) == []
+    assert database.query_database(
+        "SELECT platform FROM Platforms WHERE platform = ?", ("after",)
+    ) == [("after",)]
+
+
 def test_setup_database_rolls_back_all_schemas_on_sql_error(tmp_path, monkeypatch):
     db_path = tmp_path / "broken.db"
     monkeypatch.setattr(database, "DB_FILE", str(db_path))
