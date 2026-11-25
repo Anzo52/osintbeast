@@ -141,11 +141,11 @@ def execute_tool_run_with_id(
         status, value = _execute_tool_run(
             tool_name, query_text, runner, run_id, sensitive_input=sensitive_input
         )
+        return run_id, status, value
     except KeyboardInterrupt:
         if run_id is not None:
             _mark_run_interrupted(run_id)
         raise
-    return run_id, status, value
 
 
 def _execute_tool_run(
@@ -157,6 +157,19 @@ def _execute_tool_run(
     sensitive_input: bool,
 ) -> tuple[str, str]:
     """Execute and persist a run using an existing run identifier."""
+    return _run_tool_and_persist(
+        tool_name, query_text, runner, run_id, sensitive_input=sensitive_input
+    )
+
+
+def _run_tool_and_persist(
+    tool_name: str,
+    query_text: str,
+    runner: Callable[[str], str],
+    run_id: int,
+    *,
+    sensitive_input: bool,
+) -> tuple[str, str]:
     try:
         if sensitive_input:
             with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
