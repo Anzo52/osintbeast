@@ -206,6 +206,13 @@ schema changes and use a MySQL-compatible client for custom SQL queries.
 Initialization errors are reported in the menu; check the path and permissions
 before retrying.
 
+The `query_database` helper is read-only; use explicit persistence helpers for
+writes. MySQL queries must start with `SELECT` or `WITH`; DDL and transaction
+control statements are rejected before execution. SQLite lock waits and MySQL
+connection, pool, and network waits are bounded to five seconds.
+Web UI shutdown waits at most five seconds for
+background cleanup and reports stalled cleanup rather than waiting indefinitely.
+
 ## Local API
 
 Install the package with `python -m pip install -e .` and any desired tool
@@ -333,6 +340,10 @@ capacity slot reserved while retrying the write independently of status
 requests. Calling `status(run_id)` also retries immediately and raises
 `RuntimeError` if the outcome still cannot be saved. Pending outcomes are lost
 if the application process exits.
+Idempotency keys are retained with their run-history records.
+The browser retains an unacknowledged submission key and a salted input
+fingerprint in session storage across reloads, without storing the raw input;
+it clears the key when the server confirms the submission.
 If starting the supervisor fails and recording that failure also fails,
 `submit` raises `StartupPersistenceError` with a `run_id` attribute; retry
 `status(run_id)` after database access is restored. The browser API includes
