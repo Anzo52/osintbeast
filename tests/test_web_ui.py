@@ -80,6 +80,59 @@ def _server(tmp_path, monkeypatch, runner):
     return server, f"http://127.0.0.1:{server.server_port}"
 
 
+def test_serve_shutdown_marks_active_runs_failed(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "shutdown.db"))
+    database.setup_database()
+    server = Mock(server_port=8000)
+    monkeypatch.setattr(web_ui, "create_server", Mock(return_value=server))
+    launched = []
+
+    def launch_and_interrupt():
+        launched.append(web_ui.RUN_SERVICE.submit("sherlock", "slow"))
+        raise KeyboardInterrupt
+
+    server.serve_forever.side_effect = launch_and_interrupt
+    web_ui.serve()
+    run = database.get_tool_run(launched[0])
+    assert run[3] == "failed"
+    assert run[5] == "Run cancelled."
+    assert run[7] is not None
+    server.server_close.assert_called_once()
+
+
+def test_serve_can_restart_in_the_same_process(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "restart.db"))
+    database.setup_database()
+    server = Mock(server_port=8000)
+    monkeypatch.setattr(web_ui, "create_server", Mock(return_value=server))
+    services, run_ids = [], []
+
+    def launch_and_interrupt():
+        services.append(web_ui.RUN_SERVICE)
+        run_ids.append(web_ui.RUN_SERVICE.submit("sherlock", "slow"))
+        raise KeyboardInterrupt
+
+    server.serve_forever.side_effect = launch_and_interrupt
+    web_ui.serve()
+    web_ui.serve()
+    assert services[0] is not services[1]
+    assert len(set(run_ids)) == 2
+    assert all(database.get_tool_run(run_id)[3] == "failed" for run_id in run_ids)
+    assert server.server_close.call_count == 2
+
+
+def test_serve_closes_socket_even_if_service_cleanup_fails(monkeypatch):
+    server = Mock(server_port=8000)
+    server.serve_forever.side_effect = KeyboardInterrupt
+    service = Mock()
+    service.close.side_effect = RuntimeError("cleanup failed")
+    monkeypatch.setattr(web_ui, "create_server", Mock(return_value=server))
+    monkeypatch.setattr(web_ui, "BackgroundRuns", Mock(return_value=service))
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        web_ui.serve()
+    server.server_close.assert_called_once()
+
+
 def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
     output = '<script>alert("untrusted")</script>'
     server, base_url = _server(tmp_path, monkeypatch, Mock())

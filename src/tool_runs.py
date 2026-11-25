@@ -1,12 +1,46 @@
 import json
 import logging
+import signal
+import threading
 from collections.abc import Callable
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from io import StringIO
 
 import data.utils.database as database
 
 REDACTED = "[redacted]"
+_LOG = logging.getLogger(__name__)
+
+
+@contextmanager
+def _defer_start_interrupt():
+    """Defer Ctrl+C until the committed run ID has reached its caller."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous_handler = signal.getsignal(signal.SIGINT)
+    interrupted = False
+
+    def defer(signum, frame):
+        nonlocal interrupted
+        interrupted = True
+
+    signal.signal(signal.SIGINT, defer)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous_handler)
+        if interrupted:
+            signal.raise_signal(signal.SIGINT)
+
+
+def _mark_run_interrupted(run_id):
+    try:
+        database.finish_tool_run(run_id, "failed", error_text="Tool run interrupted.")
+    except Exception as exc:
+        _LOG.error(
+            "Could not persist interrupted tool run outcome (%s)", type(exc).__name__
+        )
 
 
 class UnexpectedToolError(RuntimeError):
@@ -70,19 +104,25 @@ def execute_tool_run(
     """Persist the run outcome; propagate persistence errors to the caller."""
     if not isinstance(sensitive_input, bool):
         raise TypeError("sensitive_input must be a boolean.")
-    if run_id is None:
-        run_id = start_tool_run(
-            tool_name, query_text, sensitive_input=sensitive_input
-        )
-    elif sensitive_input:
+    if run_id is not None and sensitive_input:
         run = database.get_tool_run(run_id)
         if run is None or run[1:4] != (tool_name, REDACTED, "running"):
             raise ValueError("Sensitive runs require a redacted running record.")
-    if run_id is None:
-        raise RuntimeError("Failed to start tool run.")
-    return _execute_tool_run(
-        tool_name, query_text, runner, run_id, sensitive_input=sensitive_input
-    )
+    try:
+        if run_id is None:
+            with _defer_start_interrupt():
+                run_id = start_tool_run(
+                    tool_name, query_text, sensitive_input=sensitive_input
+                )
+        if run_id is None:
+            raise RuntimeError("Failed to start tool run.")
+        return _execute_tool_run(
+            tool_name, query_text, runner, run_id, sensitive_input=sensitive_input
+        )
+    except KeyboardInterrupt:
+        if run_id is not None:
+            _mark_run_interrupted(run_id)
+        raise
 
 
 def execute_tool_run_with_id(
@@ -90,14 +130,21 @@ def execute_tool_run_with_id(
     *, sensitive_input: bool,
 ) -> tuple[int, str, str]:
     """Execute a run and return its persisted identifier and outcome."""
-    run_id = start_tool_run(
-        tool_name, query_text, sensitive_input=sensitive_input
-    )
-    if run_id is None:
-        raise RuntimeError("Failed to start tool run.")
-    status, value = _execute_tool_run(
-        tool_name, query_text, runner, run_id, sensitive_input=sensitive_input
-    )
+    run_id = None
+    try:
+        with _defer_start_interrupt():
+            run_id = start_tool_run(
+                tool_name, query_text, sensitive_input=sensitive_input
+            )
+        if run_id is None:
+            raise RuntimeError("Failed to start tool run.")
+        status, value = _execute_tool_run(
+            tool_name, query_text, runner, run_id, sensitive_input=sensitive_input
+        )
+    except KeyboardInterrupt:
+        if run_id is not None:
+            _mark_run_interrupted(run_id)
+        raise
     return run_id, status, value
 
 
@@ -123,9 +170,6 @@ def _execute_tool_run(
             output = runner(query_text)
         if not isinstance(output, str):
             raise RuntimeError(f"{tool_name} returned non-text output.")
-    except KeyboardInterrupt:
-        database.finish_tool_run(run_id, "failed", error_text="Tool run interrupted.")
-        raise
     except TimeoutError as exc:
         message = str(exc) or f"{tool_name} exceeded its time limit."
         if sensitive_input:

@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import signal
 import sqlite3
 import stat
 from unittest.mock import Mock
@@ -67,6 +68,73 @@ def test_interrupted_runs_are_recorded(initialized_db, existing_run, sensitive_i
         "SELECT status, resultText, errorText, finishedAt IS NOT NULL FROM ToolRuns"
     ) == [("failed", None, "Tool run interrupted.", 1)]
     assert database.list_tool_results() == []
+
+
+@pytest.mark.parametrize("with_id", [False, True])
+def test_keyboard_interrupt_is_preserved_if_failure_persistence_fails(
+    initialized_db, monkeypatch, caplog, with_id
+):
+    finish = Mock(side_effect=sqlite3.OperationalError("database is locked"))
+    monkeypatch.setattr(database, "finish_tool_run", finish)
+    execute = (
+        tool_runs.execute_tool_run_with_id if with_id else tool_runs.execute_tool_run
+    )
+    with pytest.raises(KeyboardInterrupt, match="stop"):
+        execute(
+            "maigret", "alice", Mock(side_effect=KeyboardInterrupt("stop")),
+            sensitive_input=False,
+        )
+    run_id = database.list_tool_runs()[0][0]
+    finish.assert_called_once_with(
+        run_id, "failed", error_text="Tool run interrupted."
+    )
+    assert "Could not persist interrupted tool run outcome" in caplog.text
+    assert "OperationalError" in caplog.text
+
+
+def test_interruption_during_identity_check_does_not_finish_run(
+    initialized_db, monkeypatch
+):
+    run_id = database.start_tool_run("helix", "[redacted]")
+    monkeypatch.setattr(
+        database, "get_tool_run", Mock(side_effect=KeyboardInterrupt)
+    )
+    finish = Mock()
+    monkeypatch.setattr(database, "finish_tool_run", finish)
+    with pytest.raises(KeyboardInterrupt):
+        tool_runs.execute_tool_run(
+            "holehe", "private@example.com", Mock(), run_id=run_id,
+            sensitive_input=True,
+        )
+    finish.assert_not_called()
+    assert database.query_database("SELECT status FROM ToolRuns") == [("running",)]
+
+
+@pytest.mark.parametrize("with_id", [False, True])
+@pytest.mark.parametrize("sensitive_input", [False, True])
+def test_ctrl_c_after_start_commit_finalizes_new_run(
+    initialized_db, monkeypatch, with_id, sensitive_input
+):
+    start = database.start_tool_run
+    previous_handler = signal.getsignal(signal.SIGINT)
+
+    def interrupted_start(*args):
+        run_id = start(*args)
+        signal.raise_signal(signal.SIGINT)
+        return run_id
+
+    monkeypatch.setattr(database, "start_tool_run", interrupted_start)
+    runner = Mock()
+    execute = (
+        tool_runs.execute_tool_run_with_id if with_id else tool_runs.execute_tool_run
+    )
+    with pytest.raises(KeyboardInterrupt):
+        execute("holehe", "private@example.com", runner, sensitive_input=sensitive_input)
+    runner.assert_not_called()
+    assert signal.getsignal(signal.SIGINT) == previous_handler
+    assert database.query_database(
+        "SELECT status, errorText, finishedAt IS NOT NULL FROM ToolRuns"
+    ) == [("failed", "Tool run interrupted.", 1)]
 
 
 @pytest.mark.parametrize("tool", ["holehe", "maigret", "helix", "sherlock"])

@@ -20,6 +20,7 @@ from sherlock_integration import run_sherlock, validate_username as validate_she
 from tool_runs import redact_sensitive_output, start_tool_run
 
 _LOG = logging.getLogger(__name__)
+_SHUTDOWN_TIMEOUT_SECONDS = 5
 _TOOLS = {
     "holehe": (validate_email, run_holehe),
     "maigret": (validate_maigret, run_maigret),
@@ -192,14 +193,22 @@ class BackgroundRuns:
             return True
 
     def close(self):
-        with self._lock:
-            self._closed = True
+        deadline = time.monotonic() + _SHUTDOWN_TIMEOUT_SECONDS
+        self._closed = True
+        if not self._lock.acquire(timeout=max(0, deadline - time.monotonic())):
+            _LOG.warning("Background run shutdown wait exceeded its time limit")
+            return
+        try:
             jobs = list(self._jobs.values())
             for cancel, _, completed in jobs:
                 if not completed.is_set():
                     cancel.set()
+        finally:
+            self._lock.release()
         for _, thread, _ in jobs:
-            thread.join()
+            thread.join(timeout=max(0, deadline - time.monotonic()))
+            if thread.is_alive():
+                _LOG.warning("Background run shutdown wait exceeded its time limit")
 
     @staticmethod
     def _persist(run_id, status, value):
@@ -213,7 +222,7 @@ class BackgroundRuns:
         receiver = sender = None
         status, value = "failed", "Background worker failed."
         try:
-            if not cancel.is_set():
+            if not cancel.is_set() and not self._closed:
                 receiver, sender = self._context.Pipe(duplex=False)
                 deadline = time.monotonic() + self.limits.timeout_seconds
                 process = self._context.Process(
@@ -224,7 +233,7 @@ class BackgroundRuns:
                 process.start()
                 sender.close()
                 sender = None
-                while not cancel.is_set():
+                while not cancel.is_set() and not self._closed:
                     remaining = deadline - time.monotonic()
                     if receiver.poll(max(0, min(remaining, 0.05))):
                         try:
@@ -237,7 +246,7 @@ class BackgroundRuns:
                             status = {b"S": "success", b"F": "failed", b"T": "timed_out"}[payload[:1]]
                             value = payload[1:].decode("utf-8", errors="replace")
                             with self._lock:
-                                if not cancel.is_set():
+                                if not cancel.is_set() and not self._closed:
                                     completed.set()
                         break
                     if remaining <= 0:
@@ -261,7 +270,7 @@ class BackgroundRuns:
             if sender is not None:
                 sender.close()
             with self._lock:
-                if cancel.is_set() and not completed.is_set():
+                if (cancel.is_set() or self._closed) and not completed.is_set():
                     status, value = "failed", "Run cancelled."
                 try:
                     self._persist(run_id, status, value)

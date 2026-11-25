@@ -459,6 +459,9 @@ def create_server(host="127.0.0.1", port=8000):
 
 def serve(host="127.0.0.1", port=8000):
     """Serve the web UI on loopback by default."""
+    global RUN_SERVICE
+    RUN_SERVICE = BackgroundRuns(RUN_SERVICE.limits)
+    run_service = RUN_SERVICE
     server = create_server(host, port)
     print(f"OSINT Beast web UI: http://{host}:{server.server_port}")
     try:
@@ -466,8 +469,10 @@ def serve(host="127.0.0.1", port=8000):
     except KeyboardInterrupt:
         pass
     finally:
-        server.server_close()
-        RUN_SERVICE.close()
+        try:
+            run_service.close()
+        finally:
+            server.server_close()
 
 
 if __name__ == "__main__":

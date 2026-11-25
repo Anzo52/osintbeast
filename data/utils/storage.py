@@ -6,6 +6,8 @@ from typing import Any, Mapping, Optional, Protocol
 from sqlalchemy import MetaData, Table, create_engine
 from sqlalchemy.engine import URL
 
+_DATABASE_TIMEOUT_SECONDS = 5
+
 
 class StorageError(Exception):
     """A backend-neutral storage error for application-level handling."""
@@ -63,7 +65,7 @@ class SQLiteStorage:
         db_path = Path(self.db_file)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._enforce_private_permissions()
-        conn = sqlite3.connect(self.db_file)
+        conn = sqlite3.connect(self.db_file, timeout=_DATABASE_TIMEOUT_SECONDS)
         self._enforce_private_permissions()
         conn.execute("PRAGMA foreign_keys = ON")
         return conn
@@ -98,7 +100,10 @@ class SQLiteStorage:
         db_path = Path(self.db_file)
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._enforce_private_permissions()
-        engine = create_engine(URL.create("sqlite", database=str(db_path.resolve())))
+        engine = create_engine(
+            URL.create("sqlite", database=str(db_path.resolve())),
+            connect_args={"timeout": _DATABASE_TIMEOUT_SECONDS},
+        )
         try:
             with engine.begin() as connection:
                 connection.exec_driver_sql("PRAGMA foreign_keys = ON")
@@ -117,7 +122,8 @@ class SQLiteStorage:
     def query(
         self, query: str, parameters: tuple[Any, ...] = ()
     ) -> list[tuple[Any, ...]]:
-        with closing(self.connect()) as conn, conn:
+        with closing(self.connect()) as conn:
+            conn.execute("PRAGMA query_only = ON")
             return conn.execute(query, parameters).fetchall()
 
     def save_tool_result(
@@ -241,7 +247,16 @@ class MySQLStorage:
                     "mysql+pymysql://."
                 )
             try:
-                self._engine = create_engine(url, pool_pre_ping=True)
+                self._engine = create_engine(
+                    url,
+                    pool_pre_ping=True,
+                    pool_timeout=_DATABASE_TIMEOUT_SECONDS,
+                    connect_args={
+                        "connect_timeout": _DATABASE_TIMEOUT_SECONDS,
+                        "read_timeout": _DATABASE_TIMEOUT_SECONDS,
+                        "write_timeout": _DATABASE_TIMEOUT_SECONDS,
+                    },
+                )
             except Exception as exc:
                 raise StorageError(f"Unable to initialize MySQL driver: {exc}") from exc
         return self._engine
@@ -384,7 +399,8 @@ class MySQLStorage:
     ) -> list[tuple[Any, ...]]:
         query = self._mysql_placeholders(query, parameters)
         try:
-            with self._get_engine().begin() as connection:
+            with self._get_engine().connect() as connection:
+                connection.exec_driver_sql("START TRANSACTION READ ONLY")
                 return self._normalize_rows(
                     connection.exec_driver_sql(query, parameters).fetchall()
                 )

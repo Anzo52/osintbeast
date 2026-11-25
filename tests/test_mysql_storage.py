@@ -1,5 +1,6 @@
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -119,14 +120,44 @@ def test_mysql_core_operations_use_bound_values_and_preserve_transactional_flow(
     assert any("INSERT INTO ToolResults" in sql for sql, _ in statements)
 
 
-def test_mysql_query_commits_state_changes(mysql_storage):
+def test_mysql_query_uses_a_read_only_transaction_without_committing(mysql_storage):
     storage, engine = mysql_storage
 
-    assert storage.query("INSERT INTO Platforms (platform) VALUES (?)", ("x",)) == [
+    assert storage.query("SELECT platform FROM Platforms WHERE platform = ?", ("x",)) == [
         ("platform",), ("platformID",)
     ]
 
-    assert engine.commits == 1
+    assert engine.commits == 0
+    assert engine.connection.statements == [
+        ("START TRANSACTION READ ONLY", ()),
+        ("SELECT platform FROM Platforms WHERE platform = %s", ("x",)),
+    ]
+
+
+@pytest.mark.parametrize("query", ["UPDATE Platforms SET platform = 'x'", "DELETE FROM Platforms"])
+def test_mysql_query_reports_rejected_writes_without_committing(mysql_storage, query):
+    storage, engine = mysql_storage
+    engine.connection.fail_on = query
+    with pytest.raises(StorageError):
+        storage.query(query)
+    assert engine.commits == 0
+    assert engine.connection.statements[0] == ("START TRANSACTION READ ONLY", ())
+
+
+def test_mysql_engine_configures_bounded_database_waits(monkeypatch):
+    import sqlalchemy
+
+    create_engine = Mock()
+    monkeypatch.setattr(sqlalchemy, "create_engine", create_engine)
+    storage = MySQLStorage(
+        "mysql://osintbeast@localhost/osintbeast", Path(), (), frozenset()
+    )
+    storage._get_engine()
+    assert create_engine.call_args.kwargs == {
+        "pool_pre_ping": True,
+        "pool_timeout": 5,
+        "connect_args": {"connect_timeout": 5, "read_timeout": 5, "write_timeout": 5},
+    }
 
 
 def test_mysql_result_listing_caps_output_in_the_query(mysql_storage):
