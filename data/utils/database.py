@@ -8,7 +8,13 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
-from data.utils.storage import MySQLStorage, SQLiteStorage, Storage, StorageError
+from data.utils.storage import (
+    IdempotencyConflictError as IdempotencyConflictError,
+    MySQLStorage,
+    SQLiteStorage,
+    Storage,
+    StorageError,
+)
 
 
 # Keep source-checkout paths independent of the current working directory.
@@ -369,6 +375,42 @@ def export_tool_runs_json(
 def start_tool_run(tool_name: str, query_text: str):
     """Create a running record before starting an external check."""
     return _get_storage().start_tool_run(tool_name, query_text)
+
+
+def _validate_idempotency_key(idempotency_key: str, request_hash: str) -> None:
+    if (
+        not isinstance(idempotency_key, str)
+        or not 16 <= len(idempotency_key) <= 128
+        or any(char not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-" for char in idempotency_key)
+    ):
+        raise ValueError("Invalid idempotency key.")
+    if (
+        not isinstance(request_hash, str)
+        or len(request_hash) != 64
+        or any(char not in "0123456789abcdef" for char in request_hash)
+    ):
+        raise ValueError("Invalid request hash.")
+
+
+def get_idempotent_tool_run(
+    idempotency_key: str, request_hash: str
+) -> int | None:
+    """Return a previously created run for a matching request key."""
+    _validate_idempotency_key(idempotency_key, request_hash)
+    return _get_storage().get_idempotent_tool_run(idempotency_key, request_hash)
+
+
+def start_idempotent_tool_run(
+    tool_name: str,
+    query_text: str,
+    idempotency_key: str,
+    request_hash: str,
+) -> tuple[int, bool]:
+    """Create one run per key and return its ID and whether it was created."""
+    _validate_idempotency_key(idempotency_key, request_hash)
+    return _get_storage().start_idempotent_tool_run(
+        tool_name, query_text, idempotency_key, request_hash
+    )
 
 
 def finish_tool_run(

@@ -364,7 +364,8 @@ with the same key and input return the existing run, while reusing a key for a
 different run returns HTTP 409. Keys are retained for the lifetime of the
 service.
 
-Configure separate operator and viewer tokens before starting the server:
+Set separate, cryptographically random operator and viewer tokens before
+starting the server:
 
 ```bash
 export OSINTBEAST_OPERATOR_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
@@ -372,12 +373,12 @@ export OSINTBEAST_VIEWER_TOKEN="$(python -c 'import secrets; print(secrets.token
 python -m web_ui
 ```
 
-Send a configured token using HTTP bearer authentication. Operators may launch
-runs and read results; viewers may only read results. Missing, invalid, or
-unauthorized credentials are rejected. The browser prompts for an access token
-and keeps it only in session storage for the current tab. The server refuses
-to start unless both tokens are configured and refuses any bind address outside
-IPv4 or IPv6 loopback. Do not expose the server through a tunnel or reverse
+Tokens must each contain 32–256 URL-safe characters and must differ. Operators
+may launch runs and read results; viewers may only read results. The browser
+prompts for a token and keeps it in session storage for the current tab.
+Launch retries use an idempotency key so the same submitted request returns its
+original run instead of starting another. The server binds only to resolved
+IPv4 or IPv6 loopback addresses. Do not expose it through a tunnel or reverse
 proxy; keep its database and results restricted to authorized local users.
 
 ## Responsible use and privacy
