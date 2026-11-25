@@ -142,7 +142,22 @@ def test_mysql_result_listing_caps_output_in_the_query(mysql_storage):
     ]
     statement, parameters = engine.connection.statements[-1]
     assert "SUBSTR(resultText, 1, %s)" in statement
-    assert parameters == (4, 5, 20)
+    assert parameters == (17, 18, 20)
+
+
+def test_mysql_result_listing_keeps_full_text_within_limit(mysql_storage, monkeypatch):
+    storage, engine = mysql_storage
+    execute = engine.connection.exec_driver_sql
+
+    def execute_with_result(statement, parameters=()):
+        if "SUBSTR(resultText" in statement:
+            return FakeResult([(1, "holehe", "query", "123456789012345", 0, "created")])
+        return execute(statement, parameters)
+
+    monkeypatch.setattr(engine.connection, "exec_driver_sql", execute_with_result)
+    assert storage.list_tool_results(20, max_result_text_chars=17) == [
+        (1, "holehe", "query", "123456789012345", "created")
+    ]
 
 
 def test_mysql_identifier_validation_and_placeholders(mysql_storage):

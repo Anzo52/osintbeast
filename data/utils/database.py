@@ -83,9 +83,11 @@ def redact_sensitive_text(text: str | None, sensitive_value: str) -> str | None:
         if char == " ":
             representations.append(r"\+")
         alternatives.append(f"(?:{'|'.join(representations)})")
+    encoded_token = r"%(?:2[bde]|3[0-9]|4[1-9a-f]|5[0-9af]|6[1-9a-f]|7[0-9a])"
     pattern = re.compile(
-        rf"(?<![A-Za-z0-9_.+-])(?<!\[){''.join(alternatives)}"
-        r"(?![A-Za-z0-9_.+-])(?!\])",
+        rf"(?:(?<=%[0-9a-f]{{2}})|(?<![A-Za-z0-9_.+-]))"
+        rf"(?<!{encoded_token}){''.join(alternatives)}"
+        rf"(?![A-Za-z0-9_+-]|{encoded_token}|\.(?=[A-Za-z0-9_+-]))",
         re.IGNORECASE,
     )
     return pattern.sub("[redacted]", text)

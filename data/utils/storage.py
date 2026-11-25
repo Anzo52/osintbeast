@@ -174,14 +174,16 @@ class SQLiteStorage:
                           CASE WHEN SUBSTR(resultText, ?, 1) <> '' THEN 1 ELSE 0 END,
                           createdAt
                    FROM ToolResults ORDER BY resultID DESC LIMIT ?""",
-                (prefix_length, prefix_length + 1, limit),
+                (max_result_text_chars, max_result_text_chars + 1, limit),
             ).fetchall()
         return [
             (
                 row[0],
                 row[1],
                 row[2],
-                None if row[3] is None else row[3] + (marker if row[4] else ""),
+                None if row[3] is None else (
+                    row[3][:prefix_length] + marker if row[4] else row[3]
+                ),
                 row[5],
             )
             for row in rows
@@ -503,14 +505,16 @@ class MySQLStorage:
                                        THEN 1 ELSE 0 END,
                                   createdAt
                            FROM ToolResults ORDER BY resultID DESC LIMIT %s""",
-                        (prefix_length, prefix_length + 1, limit),
+                        (max_result_text_chars, max_result_text_chars + 1, limit),
                     ).fetchall()
                     rows = [
                         (
                             row[0],
                             row[1],
                             row[2],
-                            None if row[3] is None else row[3] + (marker if row[4] else ""),
+                            None if row[3] is None else (
+                                row[3][:prefix_length] + marker if row[4] else row[3]
+                            ),
                             row[5],
                         )
                         for row in rows

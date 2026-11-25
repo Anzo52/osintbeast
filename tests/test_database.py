@@ -372,12 +372,45 @@ def test_saved_views_redact_legacy_values_without_rewriting_them(
             "found https%3A//example.test/a%2Fb in a response",
             "found [redacted] in a response",
         ),
+        (
+            "alice",
+            "%2Falice%3F alice... [alice] %61lice%26",
+            "%2F[redacted]%3F [redacted]... [[redacted]] [redacted]%26",
+        ),
+        (
+            "alice",
+            "%78alice alice%78 alice.example alice+tag malice",
+            "%78alice alice%78 alice.example alice+tag malice",
+        ),
     ],
 )
 def test_saved_text_redaction_handles_encoding_and_word_boundaries(
     query, text, expected
 ):
     assert database.redact_sensitive_text(text, query) == expected
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        (None, None),
+        ("123456789012345", "123456789012345"),
+        ("12345678901234567", "12345678901234567"),
+        ("123456789012345678", "1234… [truncated]"),
+        ("x" * 1000000, "xxxx… [truncated]"),
+    ],
+)
+def test_redacted_saved_results_are_bounded_without_false_truncation(
+    tmp_path, monkeypatch, result, expected
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "capped-results.db"))
+    database.setup_database()
+    database.save_tool_result("holehe", "private@example.com", result)
+
+    row = database.list_tool_results(
+        max_result_text_chars=17, redact_sensitive=True
+    )[0]
+    assert row[2:4] == ("[redacted]", expected)
 
 
 def test_list_tool_runs_filters_and_uses_stable_cursor_pagination(

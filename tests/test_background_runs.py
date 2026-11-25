@@ -533,6 +533,25 @@ def test_worker_redacts_sensitive_output_and_suppresses_console_output(
     connection.close.assert_called_once()
 
 
+@pytest.mark.parametrize(
+    ("error", "prefix"),
+    [(ValueError, b"F"), (TimeoutError, b"T")],
+)
+def test_worker_redacts_sensitive_failure(monkeypatch, error, prefix):
+    sensitive_value = "person@example.com"
+    if os.name == "posix":
+        monkeypatch.setattr(os, "setsid", lambda: None)
+    runner = Mock(side_effect=error(f"Lookup for {sensitive_value} failed"))
+    monkeypatch.setitem(background_runs._TOOLS, "holehe", (lambda value: value, runner))
+    connection = Mock()
+
+    background_runs._worker(connection, "holehe", sensitive_value, 1024)
+
+    runner.assert_called_once_with(sensitive_value)
+    connection.send_bytes.assert_called_once_with(prefix + b"Lookup for [redacted] failed")
+    connection.close.assert_called_once()
+
+
 def test_holehe_worker_starts_watchdog_and_executes_once(monkeypatch):
     sensitive_value = "person@example.com"
     runner = Mock(return_value={"output": f"Found {sensitive_value}"})
