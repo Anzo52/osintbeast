@@ -1,6 +1,7 @@
 import http.client
 import json
 import sqlite3
+import socket
 import threading
 import time
 import uuid
@@ -41,9 +42,9 @@ def mocked_worker(connection, tool_name, query, max_output_bytes, deadline=None)
 def run_service(monkeypatch):
     monkeypatch.setattr(background_runs, "_worker", mocked_worker)
     service = background_runs.BackgroundRuns()
-    monkeypatch.setattr(web_ui, "RUN_SERVICE", service)
+    monkeypatch.setattr(web_ui, "BackgroundRuns", lambda: service)
     yield service
-    web_ui.RUN_SERVICE.close()
+    service.close()
 
 
 def _request(url, payload=None, headers=None):
@@ -86,6 +87,84 @@ def _server(tmp_path, monkeypatch, runner):
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, f"http://127.0.0.1:{server.server_port}"
+
+
+def test_serve_shutdown_marks_active_runs_failed(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "shutdown.db"))
+    database.setup_database()
+    server = Mock(
+        server_port=8000,
+        server_address=("127.0.0.1", 8000),
+        address_family=socket.AF_INET,
+    )
+    def create_server(*args, **kwargs):
+        server.run_service = background_runs.BackgroundRuns()
+        return server
+
+    monkeypatch.setattr(web_ui, "create_server", Mock(side_effect=create_server))
+    launched = []
+
+    def launch_and_interrupt():
+        launched.append(server.run_service.submit("sherlock", "slow"))
+        raise KeyboardInterrupt
+
+    server.serve_forever.side_effect = launch_and_interrupt
+    web_ui.serve()
+    run = database.get_tool_run(launched[0])
+    assert run[3] == "failed"
+    assert run[5] == "Run cancelled."
+    assert run[7] is not None
+    server.server_close.assert_called_once()
+
+
+def test_serve_can_restart_in_the_same_process(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "restart.db"))
+    database.setup_database()
+    server = Mock(
+        server_port=8000,
+        server_address=("127.0.0.1", 8000),
+        address_family=socket.AF_INET,
+    )
+
+    def create_server(*args, **kwargs):
+        server.run_service = background_runs.BackgroundRuns()
+        return server
+
+    monkeypatch.setattr(web_ui, "create_server", Mock(side_effect=create_server))
+    services, run_ids = [], []
+
+    def launch_and_interrupt():
+        services.append(server.run_service)
+        run_ids.append(server.run_service.submit("sherlock", "slow"))
+        raise KeyboardInterrupt
+
+    server.serve_forever.side_effect = launch_and_interrupt
+    web_ui.serve()
+    web_ui.serve()
+    assert services[0] is not services[1]
+    assert len(set(run_ids)) == 2
+    assert all(database.get_tool_run(run_id)[3] == "failed" for run_id in run_ids)
+    assert server.server_close.call_count == 2
+
+
+def test_serve_closes_socket_even_if_service_cleanup_fails(monkeypatch):
+    server = Mock(
+        server_port=8000,
+        server_address=("127.0.0.1", 8000),
+        address_family=socket.AF_INET,
+    )
+    server.serve_forever.side_effect = KeyboardInterrupt
+    service = Mock()
+    service.close.side_effect = [RuntimeError("cleanup failed"), None]
+
+    def create_server(*args, **kwargs):
+        server.run_service = service
+        return server
+
+    monkeypatch.setattr(web_ui, "create_server", Mock(side_effect=create_server))
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        web_ui.serve()
+    server.server_close.assert_called_once()
 
 
 def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
@@ -144,7 +223,7 @@ def test_shutdown_marks_active_runs_failed(tmp_path, monkeypatch, run_service):
             {"tool": "sherlock", "input": "slow", "authorized": True},
         )
         assert status == 202
-        web_ui.RUN_SERVICE.close()
+        server.run_service.close()
 
         run = database.get_tool_run(launched["id"])
         assert run[3] == "failed"
@@ -521,6 +600,8 @@ def test_unexpected_background_error_is_redacted(tmp_path, monkeypatch, caplog):
 
 def test_submission_idempotency_key_returns_existing_run(tmp_path, monkeypatch):
     server, base_url = _server(tmp_path, monkeypatch, Mock())
+    starts = Mock(wraps=server.run_service._supervise)
+    monkeypatch.setattr(server.run_service, "_supervise", starts)
     payload = {"tool": "sherlock", "input": "alice", "authorized": True}
     headers = {"Idempotency-Key": "retry-this-submission"}
     try:
@@ -530,6 +611,7 @@ def test_submission_idempotency_key_returns_existing_run(tmp_path, monkeypatch):
         assert status == 202
         assert repeated["id"] == first["id"]
         assert len(database.list_tool_runs()) == 1
+        assert starts.call_count == 1
 
         status, body = _request(
             f"{base_url}/api/runs",
@@ -542,6 +624,35 @@ def test_submission_idempotency_key_returns_existing_run(tmp_path, monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_concurrent_servers_keep_their_own_run_services(tmp_path, monkeypatch):
+    real_service = background_runs.BackgroundRuns
+    monkeypatch.setattr(web_ui, "BackgroundRuns", real_service)
+    first, first_url = _server(tmp_path, monkeypatch, Mock())
+    second, second_url = _server(tmp_path, monkeypatch, Mock())
+    try:
+        assert first.run_service is not second.run_service
+        payload = {"tool": "sherlock", "input": "alice", "authorized": True}
+        status, launched = _request(f"{first_url}/api/runs", payload)
+        assert status == 202
+        assert launched["id"] in first.run_service._jobs
+        assert launched["id"] not in second.run_service._jobs
+        assert _request(f"{first_url}/api/runs/{launched['id']}")[0] == 200
+    finally:
+        for server in (first, second):
+            server.shutdown()
+            server.server_close()
+            server.run_service.close()
+
+
+def test_browser_persists_unacknowledged_key_without_storing_input():
+    page = web_ui.INDEX_HTML
+    assert 'sessionStorage.setItem(pendingKeyName, JSON.stringify(pending))' in page
+    assert 'sessionStorage.getItem(pendingKeyName)' in page
+    assert 'crypto.subtle.digest("SHA-256", bytes)' in page
+    assert 'input: queryInput.value' in page
+    assert page.index("clearPendingKey();", page.index('const run = await request("/api/runs"')) < page.index("await loadRun(run.id);")
 
 
 def test_serve_creates_a_fresh_run_service_each_time(monkeypatch):
@@ -595,7 +706,7 @@ def test_browser_capacity_rejection_and_recovery(tmp_path, monkeypatch, run_serv
         assert status == 503
         assert "capacity" in body["error"]
         assert len(database.list_tool_runs()) == 2
-        service = web_ui.RUN_SERVICE
+        service = server.run_service
         assert service.cancel(first["id"])
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -612,7 +723,7 @@ def test_browser_capacity_rejection_and_recovery(tmp_path, monkeypatch, run_serv
 
 def test_browser_exposes_run_id_when_startup_failure_cannot_be_saved(tmp_path, monkeypatch):
     server, base_url = _server(tmp_path, monkeypatch, Mock())
-    run_service = web_ui.RUN_SERVICE
+    run_service = server.run_service
     run_id = database.start_tool_run("sherlock", "alice")
     run_service._pending[run_id] = ("failed", "Could not start background worker.")
     monkeypatch.setattr(

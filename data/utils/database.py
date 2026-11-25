@@ -181,10 +181,10 @@ def insert_data(table: str, data: Mapping[str, Any]) -> None:
 def query_database(
     query: str, parameters: tuple[Any, ...] = ()
 ) -> list[tuple[Any, ...]]:
-    """Execute a SQL query and return its rows.
+    """Execute a read-only SQL query and return its rows.
 
     Web routes should use specific, parameterized repository functions rather
-    than accepting arbitrary SQL.
+    than accepting arbitrary SQL. Use explicit persistence helpers for writes.
     """
     return _get_storage().query(query, parameters)
 

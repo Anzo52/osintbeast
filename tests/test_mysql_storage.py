@@ -1,6 +1,7 @@
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from sqlalchemy import create_engine
@@ -126,14 +127,66 @@ def test_mysql_core_operations_use_bound_values_and_preserve_transactional_flow(
     assert any("INSERT INTO ToolResults" in sql for sql, _ in statements)
 
 
-def test_mysql_query_commits_state_changes(mysql_storage):
+def test_mysql_query_uses_a_read_only_transaction_without_committing(mysql_storage):
     storage, engine = mysql_storage
 
-    assert storage.query("INSERT INTO Platforms (platform) VALUES (?)", ("x",)) == [
+    assert storage.query("SELECT platform FROM Platforms WHERE platform = ?", ("x",)) == [
         ("platform",), ("platformID",)
     ]
 
-    assert engine.commits == 1
+    assert engine.commits == 0
+    assert engine.connection.statements == [
+        ("START TRANSACTION READ ONLY", ()),
+        ("SELECT platform FROM Platforms WHERE platform = %s", ("x",)),
+    ]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "INSERT INTO Platforms (platform) VALUES ('x')",
+        "UPDATE Platforms SET platform = 'x'",
+        "DELETE FROM Platforms",
+        "DROP TABLE Platforms",
+        "ALTER TABLE Platforms ADD COLUMN x INTEGER",
+        "CREATE TABLE x (id INTEGER)",
+        "COMMIT",
+        "SET TRANSACTION READ WRITE",
+        "/*!50000 DROP TABLE Platforms */",
+    ],
+)
+def test_mysql_query_rejects_non_queries_before_execution(mysql_storage, query):
+    storage, engine = mysql_storage
+    with pytest.raises(ValueError, match="SELECT or WITH"):
+        storage.query(query)
+    assert engine.commits == 0
+    assert engine.connection.statements == []
+
+
+def test_mysql_cte_mutation_is_rejected_in_a_read_only_transaction(mysql_storage):
+    storage, engine = mysql_storage
+    query = "WITH target AS (SELECT 1) DELETE FROM Platforms"
+    engine.connection.fail_on = query
+    with pytest.raises(StorageError):
+        storage.query(query)
+    assert engine.connection.statements[0] == ("START TRANSACTION READ ONLY", ())
+    assert engine.commits == 0
+
+
+def test_mysql_engine_configures_bounded_database_waits(monkeypatch):
+    import sqlalchemy
+
+    create_engine = Mock()
+    monkeypatch.setattr(sqlalchemy, "create_engine", create_engine)
+    storage = MySQLStorage(
+        "mysql://osintbeast@localhost/osintbeast", Path(), (), frozenset()
+    )
+    storage._get_engine()
+    assert create_engine.call_args.kwargs == {
+        "pool_pre_ping": True,
+        "pool_timeout": 5,
+        "connect_args": {"connect_timeout": 5, "read_timeout": 5, "write_timeout": 5},
+    }
 
 
 def test_mysql_result_listing_caps_output_in_the_query(mysql_storage):
@@ -265,15 +318,15 @@ def test_mysql_bounded_redaction_enforces_query_limit_independently(
 
 
 @pytest.mark.parametrize(
-    ("statement", "expected"),
+    "statement",
     [
-        ("INSERT INTO items VALUES ('added')", [("original",), ("added",)]),
-        ("UPDATE items SET value = 'updated'", [("updated",)]),
-        ("DELETE FROM items", []),
+        "INSERT INTO items VALUES ('added')",
+        "UPDATE items SET value = 'updated'",
+        "DELETE FROM items",
     ],
 )
-def test_mysql_query_commits_statements_without_rows(
-    mysql_storage, tmp_path, monkeypatch, statement, expected
+def test_mysql_query_rejects_state_changing_statements(
+    mysql_storage, tmp_path, monkeypatch, statement
 ):
     storage, _ = mysql_storage
     engine = create_engine(f"sqlite:///{tmp_path / 'transactions.db'}")
@@ -283,8 +336,9 @@ def test_mysql_query_commits_statements_without_rows(
             connection.exec_driver_sql("CREATE TABLE items (value TEXT)")
             connection.exec_driver_sql("INSERT INTO items VALUES ('original')")
 
-        assert storage.query(statement) == []
-        assert storage.query("SELECT value FROM items ORDER BY rowid") == expected
+        with pytest.raises(ValueError, match="SELECT or WITH"):
+            storage.query(statement)
+        expected = [("original",)]
         with engine.connect() as connection:
             assert connection.exec_driver_sql(
                 "SELECT value FROM items ORDER BY rowid"
