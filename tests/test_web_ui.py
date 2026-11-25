@@ -1,7 +1,9 @@
+import http.client
 import json
 import sqlite3
 import threading
 import time
+import uuid
 from unittest.mock import Mock
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
@@ -13,6 +15,9 @@ import background_runs
 import data.utils.database as database
 import web_ui
 from sherlock_integration import validate_username
+
+OPERATOR_TOKEN = "o" * 40
+VIEWER_TOKEN = "v" * 40
 
 
 def mocked_worker(connection, tool_name, query, max_output_bytes, deadline=None):
@@ -42,14 +47,17 @@ def run_service(monkeypatch):
 
 
 def _request(url, payload=None, headers=None):
-    headers = headers or {}
-    headers = {"Authorization": "Bearer " + "operator-secret", **headers}
+    headers = {
+        "Authorization": "Bearer " + OPERATOR_TOKEN,
+        **(headers or {}),
+    }
     if payload is None:
         request = Request(url, headers=headers)
     else:
         headers = {
             "Content-Type": "application/json",
             "Origin": f"{urlsplit(url).scheme}://{urlsplit(url).netloc}",
+            "Idempotency-Key": uuid.uuid4().hex,
             **headers,
         }
         request = Request(
@@ -66,8 +74,8 @@ def _request(url, payload=None, headers=None):
 
 
 def _server(tmp_path, monkeypatch, runner):
-    monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", "operator-secret")
-    monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", "viewer-secret")
+    monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", OPERATOR_TOKEN)
+    monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", VIEWER_TOKEN)
     monkeypatch.setenv("OSINTBEAST_IDEMPOTENCY_SECRET", "test-secret-" + "x" * 32)
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "web.db"))
     monkeypatch.setattr(
@@ -117,10 +125,7 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
         assert recent[0]["id"] == launched["id"]
         assert recent[0]["status"] == "success"
 
-        page_request = Request(
-            base_url,
-            headers={"Authorization": "Bearer " + "operator-secret"},
-        )
+        page_request = Request(base_url)
         with urlopen(page_request, timeout=2) as response:
             page = response.read().decode()
         assert "Authorization required" in page
@@ -307,35 +312,146 @@ def test_browser_authentication_roles(tmp_path, monkeypatch):
     server, base_url = _server(tmp_path, monkeypatch, runner)
     try:
         status, body = _request(
-            base_url,
-            headers={"Authorization": "Bearer " + "invalid-secret"},
+            f"{base_url}/api/runs",
+            headers={"Authorization": "Bearer " + ("x" * 40)},
         )
         assert status == 401
         assert body["error"] == "Invalid credentials."
 
-        page_request = Request(
-            base_url,
-            headers={"Authorization": "Bearer " + "viewer-secret"},
+        status, body = _request(
+            f"{base_url}/api/runs",
+            headers={
+                "Authorization": "Be" + "arer " + "caf" + chr(233)
+            },
         )
+        assert status == 401
+        assert body["error"] == "Invalid credentials."
+
+        page_request = Request(base_url)
         with urlopen(page_request, timeout=2) as response:
             page = response.read().decode()
         assert "Authorized tool runs" in page
 
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", server.server_port, timeout=2
+        )
+        connection.request("GET", "/api/runs")
+        response = connection.getresponse()
+        assert response.status == 401
+        assert response.getheader("WWW-Authenticate") == "Bearer"
+        response.read()
+        connection.close()
+
         status, body = _request(
             f"{base_url}/api/runs",
             {"tool": "sherlock", "input": "alice", "authorized": True},
-            {"Authorization": "Bearer " + "viewer-secret"},
+            {"Authorization": "Bearer " + VIEWER_TOKEN},
         )
         assert status == 403
         assert body["error"] == "Operator role required."
 
         status, body = _request(
-            base_url,
+            f"{base_url}/api/runs",
             headers={"Authorization": ""},
         )
         assert status == 401
         assert body["error"] == "Authentication required."
         runner.assert_not_called()
+        assert database.query_database("SELECT * FROM ToolRuns") == []
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize(
+    ("operator", "viewer"),
+    [
+        ("", VIEWER_TOKEN),
+        (OPERATOR_TOKEN, ""),
+        ("short", VIEWER_TOKEN),
+        (OPERATOR_TOKEN, "not-valid!"),
+        (OPERATOR_TOKEN, OPERATOR_TOKEN),
+    ],
+)
+def test_invalid_ui_tokens_are_rejected(monkeypatch, operator, viewer):
+    monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", operator)
+    monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", viewer)
+    with pytest.raises(RuntimeError):
+        web_ui._configured_tokens()
+
+
+def test_localhost_resolution_must_only_return_loopback(monkeypatch):
+    monkeypatch.setattr(
+        web_ui.socket,
+        "getaddrinfo",
+        lambda *args, **kwargs: [
+            (web_ui.socket.AF_INET, web_ui.socket.SOCK_STREAM, 6, "", ("203.0.113.1", 0))
+        ],
+    )
+    with pytest.raises(ValueError, match="loopback"):
+        web_ui._resolve_loopback_host("localhost")
+
+
+def test_ipv6_loopback_uses_ipv6_server_socket(monkeypatch):
+    class FakeServer:
+        def __init__(self, address, handler):
+            self.address_family = type(self).address_family
+            self.address = address
+
+    monkeypatch.setattr(web_ui, "ThreadingHTTPServer", FakeServer)
+    server = web_ui._create_http_server(web_ui.ipaddress.ip_address("::1"), 8000)
+    assert server.address_family == web_ui.socket.AF_INET6
+    assert server.address == ("::1", 8000)
+
+
+def test_head_rejection_has_no_body(tmp_path, monkeypatch):
+    server, _ = _server(tmp_path, monkeypatch, Mock())
+    try:
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", server.server_port, timeout=2
+        )
+        connection.request(
+            "HEAD",
+            "/",
+            headers={"Authorization": "Bearer " + OPERATOR_TOKEN},
+        )
+        response = connection.getresponse()
+        assert response.status == 405
+        assert response.read() == b""
+        connection.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_launch_idempotency_returns_existing_run(tmp_path, monkeypatch):
+    server, base_url = _server(tmp_path, monkeypatch, Mock())
+    key = uuid.uuid4().hex
+    payload = {"tool": "sherlock", "input": "alice", "authorized": True}
+    try:
+        status, first = _request(
+            f"{base_url}/api/runs",
+            payload,
+            {"Idempotency-Key": key},
+        )
+        assert status == 202
+        status, retry = _request(
+            f"{base_url}/api/runs",
+            payload,
+            {"Idempotency-Key": key},
+        )
+        assert status == 202
+        assert retry["id"] == first["id"]
+        assert len(database.list_tool_runs()) == 1
+
+        status, body = _request(
+            f"{base_url}/api/runs",
+            {**payload, "input": "bob"},
+            {"Idempotency-Key": key},
+        )
+        assert status == 409
+        assert "different run" in body["error"]
+        assert len(database.list_tool_runs()) == 1
     finally:
         server.shutdown()
         server.server_close()
@@ -344,31 +460,20 @@ def test_browser_authentication_roles(tmp_path, monkeypatch):
 def test_missing_auth_configuration_and_non_loopback_bind_fail_closed(monkeypatch):
     monkeypatch.delenv("OSINTBEAST_OPERATOR_TOKEN", raising=False)
     monkeypatch.delenv("OSINTBEAST_VIEWER_TOKEN", raising=False)
-    monkeypatch.delenv("OSINTBEAST_API_TOKEN", raising=False)
-    monkeypatch.delenv("OSINTBEAST_TOKEN", raising=False)
-    monkeypatch.delenv("OSINTBEAST_WEB_TOKEN", raising=False)
 
-    try:
-        web_ui.serve("127.0.0.1", 8000)
-    except RuntimeError as exc:
-        assert "tokens" in str(exc)
-    else:
-        raise AssertionError("serve() started without authentication configured")
+    with pytest.raises(RuntimeError, match="tokens"):
+        web_ui.create_server("127.0.0.1", 0)
 
-    monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", "operator-secret")
-    monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", "viewer-secret")
-    try:
-        web_ui.serve("0.0.0.0", 8000)
-    except ValueError as exc:
-        assert "loopback" in str(exc)
-    else:
-        raise AssertionError("serve() accepted a non-loopback bind")
+    monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", OPERATOR_TOKEN)
+    monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", VIEWER_TOKEN)
+    with pytest.raises(ValueError, match="loopback"):
+        web_ui.create_server("0.0.0.0", 0)
 
 
 @pytest.mark.parametrize("secret", ["", "short", "x" * 31 + "!"])
 def test_server_rejects_missing_or_invalid_idempotency_secret(monkeypatch, secret):
-    monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", "operator")
-    monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", "viewer")
+    monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", OPERATOR_TOKEN)
+    monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", VIEWER_TOKEN)
     monkeypatch.setenv("OSINTBEAST_IDEMPOTENCY_SECRET", secret)
     with pytest.raises(RuntimeError, match="OSINTBEAST_IDEMPOTENCY_SECRET"):
         web_ui.create_server()
@@ -465,6 +570,8 @@ def test_serve_creates_a_fresh_run_service_each_time(monkeypatch):
 
     class Server:
         server_port = 8000
+        server_address = ("127.0.0.1", server_port)
+        address_family = web_ui.socket.AF_INET
 
         def __init__(self, _address, _handler):
             pass
@@ -478,8 +585,8 @@ def test_serve_creates_a_fresh_run_service_each_time(monkeypatch):
     monkeypatch.setattr(web_ui, "BackgroundRuns", Service)
     monkeypatch.setattr(web_ui, "ThreadingHTTPServer", Server)
     monkeypatch.setattr(database, "setup_database", Mock())
-    monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", "operator")
-    monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", "viewer")
+    monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", OPERATOR_TOKEN)
+    monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", VIEWER_TOKEN)
     monkeypatch.setenv("OSINTBEAST_IDEMPOTENCY_SECRET", "test-secret-" + "x" * 32)
 
     web_ui.serve()

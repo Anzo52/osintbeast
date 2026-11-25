@@ -97,9 +97,11 @@ failed operations print a corrective message and return a nonzero status.
 
 ### Running checks
 
-Select a supported check from the menu. Typed target input is visible in the
-terminal, so be aware of people who can see your screen; checks send it to
-third-party sites. See the
+Select a supported check from the menu. Email and username entry is hidden by
+default. To display targets while typing, start the menu with
+`osintbeast --show-target-input` (or `python src/main.py --show-target-input`).
+Visible input can be seen by others and retained in terminal recordings or
+scrollback; checks send targets to third-party sites. See the
 [running checks guide](doc/wiki/Running-Checks.md) for optional installations,
 tool limits, run history, exports, and privacy details.
 
@@ -362,10 +364,10 @@ the recent-runs view. At most two browser runs can be active at once; additional
 requests receive HTTP 503 until capacity is available. Holehe input is redacted
 in stored records and output. Submissions accept an `Idempotency-Key`; retries
 with the same key and input return the existing run, while reusing a key for a
-different run returns HTTP 409. Keys are retained for the lifetime of the
-service.
+different run returns HTTP 409. Keys persist with their run-history records.
 
-Configure separate operator and viewer tokens before starting the server:
+Set separate, cryptographically random operator and viewer tokens before
+starting the server:
 
 ```bash
 export OSINTBEAST_OPERATOR_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
@@ -383,14 +385,15 @@ Keep this secret private: changing it makes existing idempotency keys conflict
 until their run-history records are removed. Restore it alongside database
 backups to preserve retry behavior.
 
-Send a configured token using HTTP bearer authentication. Operators may launch
-runs and read results; viewers may only read results. Missing, invalid, or
+Send a configured token using HTTP bearer authentication. Tokens must each
+contain 32–256 URL-safe characters and must differ. Operators may launch runs
+and read results; viewers may only read results. Missing, invalid, or
 unauthorized credentials are rejected. The browser prompts for an access token
 and keeps it only in session storage for the current tab. Generate both tokens
-randomly and keep them private; the browser server checks their presence, not
-their entropy. The server refuses to start unless the tokens and idempotency
-secret are configured and refuses any bind address outside
-IPv4 or IPv6 loopback. Do not expose the server through a tunnel or reverse
+randomly and keep them private; format validation cannot establish entropy.
+The server refuses to start unless the tokens and idempotency secret are
+configured and binds only to resolved IPv4 or IPv6 loopback addresses. Do not
+expose it through a tunnel or reverse
 proxy; keep its database and results restricted to authorized local users.
 
 ## Responsible use and privacy

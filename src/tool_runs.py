@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 from collections.abc import Callable
@@ -57,6 +58,32 @@ def start_tool_run(
         raise TypeError("sensitive_input must be a boolean.")
     stored_query = REDACTED if sensitive_input else query_text
     return database.start_tool_run(tool_name, stored_query)
+
+
+def start_idempotent_tool_run(
+    tool_name: str,
+    query_text: str,
+    idempotency_key: str,
+    *,
+    sensitive_input: bool,
+) -> tuple[int, bool]:
+    """Create or return the run associated with one launch request."""
+    if not isinstance(sensitive_input, bool):
+        raise TypeError("sensitive_input must be a boolean.")
+    stored_query = REDACTED if sensitive_input else query_text
+    return database.start_idempotent_tool_run(
+        tool_name,
+        stored_query,
+        idempotency_key,
+        idempotent_request_hash(tool_name, query_text),
+    )
+
+
+def idempotent_request_hash(tool_name: str, query_text: str) -> str:
+    request_data = json.dumps(
+        [tool_name, query_text], ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(request_data).hexdigest()
 
 
 def execute_tool_run(

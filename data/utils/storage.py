@@ -5,6 +5,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping, Optional, Protocol
 from sqlalchemy import MetaData, Table, create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine import URL
 
 _UNPERSISTED_RUN_ERROR = "Run outcome could not be persisted."
@@ -14,7 +15,7 @@ class StorageError(Exception):
     """A backend-neutral storage error for application-level handling."""
 
 
-class IdempotencyConflict(RuntimeError):
+class IdempotencyConflict(RuntimeError, ValueError):
     """An idempotency key was reused for a different submission."""
 
 
@@ -26,6 +27,9 @@ def _matching_run(row, request_hash):
             "Idempotency-Key was already used for a different run."
         )
     return row[1]
+
+
+IdempotencyConflictError = IdempotencyConflict
 
 
 class Storage(Protocol):
@@ -546,7 +550,7 @@ class MySQLStorage:
             try:
                 with self._get_engine().begin() as connection:
                     row = connection.exec_driver_sql(
-                        "SELECT requestHash, runID FROM ToolRunRequests WHERE idempotencyKey = %s",
+                        "SELECT requestHash, runID FROM ToolRunRequests WHERE idempotencyKey = %s FOR UPDATE",
                         (key,),
                     ).fetchone()
                     existing = _matching_run(row, request_hash)
@@ -571,6 +575,10 @@ class MySQLStorage:
                 code = original.args[0] if original and original.args else None
                 if code in (1062, 1205, 1213) and attempt < 2:
                     continue
+                if isinstance(exc, IntegrityError):
+                    existing = self.get_idempotent_tool_run(key, request_hash)
+                    if existing is not None:
+                        return existing, False
                 raise StorageError(str(exc)) from exc
 
     def finish_tool_run(
