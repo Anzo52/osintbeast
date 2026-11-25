@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+from sqlalchemy import create_engine
 
 import data.utils.database as database
 from data.utils.storage import MySQLStorage, StorageError
@@ -95,6 +96,11 @@ def test_mysql_initialization_executes_both_idempotent_schema_files(mysql_storag
         for statement in statements
     ) == 2
     assert any("CREATE TABLE IF NOT EXISTS ToolRuns" in statement for statement in statements)
+    assert any(
+        "idempotencyKey VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin"
+        in statement
+        for statement in statements
+    )
 
 
 def test_mysql_core_operations_use_bound_values_and_preserve_transactional_flow(
@@ -191,6 +197,36 @@ def test_mysql_result_listing_caps_output_in_the_query(mysql_storage):
     statement, parameters = engine.connection.statements[-1]
     assert "SUBSTR(resultText, 1, %s)" in statement
     assert parameters == (4, 5, 20)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "INSERT INTO items VALUES ('added')",
+        "UPDATE items SET value = 'updated'",
+        "DELETE FROM items",
+    ],
+)
+def test_mysql_query_rejects_state_changing_statements(
+    mysql_storage, tmp_path, monkeypatch, statement
+):
+    storage, _ = mysql_storage
+    engine = create_engine(f"sqlite:///{tmp_path / 'transactions.db'}")
+    monkeypatch.setattr(storage, "_get_engine", lambda: engine)
+    try:
+        with engine.begin() as connection:
+            connection.exec_driver_sql("CREATE TABLE items (value TEXT)")
+            connection.exec_driver_sql("INSERT INTO items VALUES ('original')")
+
+        with pytest.raises(ValueError, match="SELECT or WITH"):
+            storage.query(statement)
+        expected = [("original",)]
+        with engine.connect() as connection:
+            assert connection.exec_driver_sql(
+                "SELECT value FROM items ORDER BY rowid"
+            ).fetchall() == expected
+    finally:
+        engine.dispose()
 
 
 def test_mysql_identifier_validation_and_placeholders(mysql_storage):
