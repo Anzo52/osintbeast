@@ -480,6 +480,33 @@ def test_finish_tool_run_rejects_invalid_terminal_states(
     ) == [("running", None, None, None)]
 
 
+def test_finish_tool_run_is_idempotent_for_committed_completion(initialized_db):
+    run_id = database.start_tool_run("maigret", "user")
+
+    database.finish_tool_run(run_id, "success", result_text="output")
+    database.finish_tool_run(run_id, "success", result_text="output")
+
+    assert database.get_tool_run(run_id)[3:6] == ("success", "output", None)
+    assert len(database.list_tool_results()) == 1
+
+
+def test_finish_tool_run_replaces_stale_reconciliation(initialized_db):
+    run_id = database.start_tool_run("maigret", "user")
+    with database.connect_db() as conn:
+        conn.execute(
+            "UPDATE ToolRuns SET startedAt = datetime('now', '-11 minutes') "
+            "WHERE runID = ?",
+            (run_id,),
+        )
+
+    assert database.reconcile_stale_tool_runs() == 1
+    database.finish_tool_run(run_id, "success", result_text="output")
+    database.finish_tool_run(run_id, "success", result_text="output")
+
+    assert database.get_tool_run(run_id)[3:6] == ("success", "output", None)
+    assert len(database.list_tool_results()) == 1
+
+
 @pytest.mark.parametrize(
     ("function", "target", "value", "query_text", "result", "tool"),
     [
