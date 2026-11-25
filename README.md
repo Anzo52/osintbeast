@@ -204,8 +204,10 @@ Initialization errors are reported in the menu; check the path and permissions
 before retrying.
 
 The `query_database` helper is read-only; use explicit persistence helpers for
-writes. SQLite lock waits and MySQL connection, pool, and network waits are
-bounded to five seconds. Web UI shutdown waits at most five seconds for
+writes. MySQL queries must start with `SELECT` or `WITH`; DDL and transaction
+control statements are rejected before execution. SQLite lock waits and MySQL
+connection, pool, and network waits are bounded to five seconds.
+Web UI shutdown waits at most five seconds for
 background cleanup and reports stalled cleanup rather than waiting indefinitely.
 
 ## Local API

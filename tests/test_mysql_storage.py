@@ -134,14 +134,36 @@ def test_mysql_query_uses_a_read_only_transaction_without_committing(mysql_stora
     ]
 
 
-@pytest.mark.parametrize("query", ["UPDATE Platforms SET platform = 'x'", "DELETE FROM Platforms"])
-def test_mysql_query_reports_rejected_writes_without_committing(mysql_storage, query):
+@pytest.mark.parametrize(
+    "query",
+    [
+        "INSERT INTO Platforms (platform) VALUES ('x')",
+        "UPDATE Platforms SET platform = 'x'",
+        "DELETE FROM Platforms",
+        "DROP TABLE Platforms",
+        "ALTER TABLE Platforms ADD COLUMN x INTEGER",
+        "CREATE TABLE x (id INTEGER)",
+        "COMMIT",
+        "SET TRANSACTION READ WRITE",
+        "/*!50000 DROP TABLE Platforms */",
+    ],
+)
+def test_mysql_query_rejects_non_queries_before_execution(mysql_storage, query):
     storage, engine = mysql_storage
+    with pytest.raises(ValueError, match="SELECT or WITH"):
+        storage.query(query)
+    assert engine.commits == 0
+    assert engine.connection.statements == []
+
+
+def test_mysql_cte_mutation_is_rejected_in_a_read_only_transaction(mysql_storage):
+    storage, engine = mysql_storage
+    query = "WITH target AS (SELECT 1) DELETE FROM Platforms"
     engine.connection.fail_on = query
     with pytest.raises(StorageError):
         storage.query(query)
-    assert engine.commits == 0
     assert engine.connection.statements[0] == ("START TRANSACTION READ ONLY", ())
+    assert engine.commits == 0
 
 
 def test_mysql_engine_configures_bounded_database_waits(monkeypatch):

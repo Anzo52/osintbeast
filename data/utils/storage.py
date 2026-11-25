@@ -1,3 +1,4 @@
+import re
 import sqlite3
 from contextlib import closing
 from datetime import date, datetime
@@ -397,6 +398,9 @@ class MySQLStorage:
     def query(
         self, query: str, parameters: tuple[Any, ...] = ()
     ) -> list[tuple[Any, ...]]:
+        # MySQL DDL implicitly commits, even inside a read-only transaction.
+        if not re.match(r"\s*(SELECT|WITH)\b", query, re.IGNORECASE):
+            raise ValueError("MySQL queries must be SELECT or WITH statements.")
         query = self._mysql_placeholders(query, parameters)
         try:
             with self._get_engine().connect() as connection:
