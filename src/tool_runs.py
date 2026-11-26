@@ -35,15 +35,6 @@ def _defer_start_interrupt():
             signal.raise_signal(signal.SIGINT)
 
 
-def _mark_run_interrupted(run_id):
-    try:
-        database.finish_tool_run(run_id, "failed", error_text="Tool run interrupted.")
-    except Exception as exc:
-        _LOG.error(
-            "Could not persist interrupted tool run outcome (%s)", type(exc).__name__
-        )
-
-
 class UnexpectedToolError(RuntimeError):
     """A sanitized unexpected failure from a sensitive tool run."""
 
@@ -129,26 +120,29 @@ def execute_tool_run(
     sensitive_input: bool,
 ) -> tuple[str, str]:
     """Persist the run outcome; propagate persistence errors to the caller."""
-    if not isinstance(sensitive_input, bool):
-        raise TypeError("sensitive_input must be a boolean.")
-    if run_id is not None and sensitive_input:
-        run = database.get_tool_run(run_id)
-        if run is None or run[1:4] != (tool_name, REDACTED, "running"):
-            raise ValueError("Sensitive runs require a redacted running record.")
+    validated_run_id = None
     try:
+        if not isinstance(sensitive_input, bool):
+            raise TypeError("sensitive_input must be a boolean.")
         if run_id is None:
             with _defer_start_interrupt():
                 run_id = start_tool_run(
                     tool_name, query_text, sensitive_input=sensitive_input
                 )
+                validated_run_id = run_id
+        elif sensitive_input:
+            run = database.get_tool_run(run_id)
+            if run is None or run[1:4] != (tool_name, REDACTED, "running"):
+                raise ValueError("Sensitive runs require a redacted running record.")
         if run_id is None:
             raise RuntimeError("Failed to start tool run.")
+        validated_run_id = run_id
         return _execute_tool_run(
             tool_name, query_text, runner, run_id, sensitive_input=sensitive_input
         )
     except KeyboardInterrupt:
-        if run_id is not None:
-            _mark_run_interrupted(run_id)
+        if validated_run_id is not None:
+            _mark_run_interrupted(validated_run_id)
         raise
 
 
@@ -173,6 +167,21 @@ def execute_tool_run_with_id(
         if run_id is not None:
             _mark_run_interrupted(run_id)
         raise
+
+
+def _mark_run_interrupted(run_id: int) -> None:
+    try:
+        database.finish_tool_run(
+            run_id, "failed", error_text="Tool run interrupted."
+        )
+    except BaseException as exc:
+        try:
+            _LOG.error(
+                "Could not persist interrupted tool run %s (%s)",
+                run_id, type(exc).__name__,
+            )
+        except BaseException:
+            pass
 
 
 def _execute_tool_run(

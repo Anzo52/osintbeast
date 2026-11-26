@@ -1,4 +1,3 @@
-import re
 import sqlite3
 from contextlib import closing
 from datetime import date, datetime
@@ -154,6 +153,13 @@ class SQLiteStorage:
     ) -> list[tuple[Any, ...]]:
         with closing(self.connect()) as conn:
             conn.execute("PRAGMA query_only = ON")
+            conn.set_authorizer(
+                lambda action, _arg1, _arg2, _database, _source: (
+                    sqlite3.SQLITE_DENY
+                    if action in (sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH)
+                    else sqlite3.SQLITE_OK
+                )
+            )
             return conn.execute(query, parameters).fetchall()
 
     def save_tool_result(
@@ -408,7 +414,93 @@ class MySQLStorage:
         return self._get_engine().raw_connection()
 
     @staticmethod
-    def _mysql_placeholders(query: str, parameters: tuple[Any, ...]) -> str:
+    def _validate_query(query: str, sql_modes: frozenset[str]) -> None:
+        index = 0
+        seen_select = False
+        previous = None
+        first_word = None
+        terminated = False
+        while index < len(query):
+            char = query[index]
+            following = query[index + 1] if index + 1 < len(query) else ""
+            if char.isspace():
+                index += 1
+            elif char == "#" or (
+                char == "-" and following == "-" and index + 2 < len(query)
+                and (
+                    query[index + 2].isspace()
+                    or ord(query[index + 2]) < 32
+                    or ord(query[index + 2]) == 127
+                )
+            ):
+                index += 1
+                while index < len(query) and query[index] not in "\r\n":
+                    index += 1
+            elif char == "/" and following == "*":
+                if query[index + 2:index + 3] == "!" or (
+                    query[index + 2:index + 4].upper() == "M!"
+                ):
+                    raise ValueError("Executable SQL comments are not allowed")
+                end = query.find("*/", index + 2)
+                if end == -1:
+                    raise ValueError("Unterminated SQL comment")
+                index = end + 2
+            elif char in ("'", '"', "`"):
+                if first_word is None or terminated:
+                    raise ValueError("MySQL queries must be SELECT or WITH statements")
+                quote = char
+                backslash_escapes = (
+                    "NO_BACKSLASH_ESCAPES" not in sql_modes
+                    and quote != "`"
+                    and not (quote == '"' and "ANSI_QUOTES" in sql_modes)
+                )
+                index += 1
+                while index < len(query):
+                    if backslash_escapes and query[index] == "\\":
+                        index += 2
+                    elif query[index] == quote:
+                        index += 1
+                        if index < len(query) and query[index] == quote:
+                            index += 1
+                        else:
+                            break
+                    else:
+                        index += 1
+                else:
+                    raise ValueError("Unterminated SQL quote")
+                previous = None
+            elif char.isalnum() or char in "_$":
+                if terminated:
+                    raise ValueError("Multiple SQL statements are not allowed")
+                start = index
+                index += 1
+                while index < len(query) and (
+                    query[index].isalnum() or query[index] in "_$"
+                ):
+                    index += 1
+                word = query[start:index].upper()
+                if first_word is None:
+                    first_word = word
+                    if word not in ("SELECT", "WITH"):
+                        raise ValueError("MySQL queries must be SELECT or WITH statements")
+                if seen_select and previous == "INTO" and word in ("OUTFILE", "DUMPFILE"):
+                    raise ValueError("SELECT INTO OUTFILE or DUMPFILE is not allowed")
+                seen_select = seen_select or word == "SELECT"
+                previous = word
+            else:
+                if first_word is None or terminated:
+                    raise ValueError("MySQL queries must be SELECT or WITH statements")
+                if char == ";":
+                    terminated = True
+                previous = None
+                index += 1
+        if first_word is None:
+            raise ValueError("MySQL queries must be SELECT or WITH statements")
+
+    @staticmethod
+    def _mysql_placeholders(
+        query: str, parameters: tuple[Any, ...], sql_modes: frozenset[str] = frozenset()
+    ) -> str:
         if not parameters:
             return query
 
@@ -424,7 +516,7 @@ class MySQLStorage:
             following = query[index + 1] if index + 1 < len(query) else ""
             if line_comment:
                 converted.append(char)
-                line_comment = char != "\n"
+                line_comment = char not in "\r\n"
             elif block_comment:
                 converted.append(char)
                 if char == "*" and following == "/":
@@ -435,13 +527,22 @@ class MySQLStorage:
                 converted.append(char)
                 if escaped:
                     escaped = False
-                elif char == "\\":
+                elif (
+                    char == "\\" and "NO_BACKSLASH_ESCAPES" not in sql_modes
+                    and quote != "`"
+                    and not (quote == '"' and "ANSI_QUOTES" in sql_modes)
+                ):
                     escaped = True
                 elif char == quote:
                     quote = None
             elif char == "#" or (
                 char == "-" and following == "-" and
-                (index + 2 == len(query) or query[index + 2].isspace())
+                (
+                    index + 2 == len(query)
+                    or query[index + 2].isspace()
+                    or ord(query[index + 2]) < 32
+                    or ord(query[index + 2]) == 127
+                )
             ):
                 converted.append(char)
                 if char == "-":
@@ -540,12 +641,14 @@ class MySQLStorage:
     def query(
         self, query: str, parameters: tuple[Any, ...] = ()
     ) -> list[tuple[Any, ...]]:
-        # MySQL DDL implicitly commits, even inside a read-only transaction.
-        if not re.match(r"\s*(SELECT|WITH)\b", query, re.IGNORECASE):
-            raise ValueError("MySQL queries must be SELECT or WITH statements.")
-        query = self._mysql_placeholders(query, parameters)
         try:
             with self._get_engine().connect() as connection:
+                sql_mode = connection.exec_driver_sql(
+                    "SELECT @@SESSION.sql_mode"
+                ).scalar_one()
+                sql_modes = frozenset(mode.strip().upper() for mode in sql_mode.split(","))
+                self._validate_query(query, sql_modes)
+                query = self._mysql_placeholders(query, parameters, sql_modes)
                 connection.exec_driver_sql("START TRANSACTION READ ONLY")
                 result = connection.exec_driver_sql(query, parameters)
                 if not getattr(result, "returns_rows", True):

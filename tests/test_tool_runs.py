@@ -51,6 +51,71 @@ def test_failed_runs_are_recorded(initialized_db, tool, error, status):
     assert database.list_tool_results() == []
 
 
+@pytest.mark.parametrize("with_id", [False, True])
+@pytest.mark.parametrize(
+    "cleanup_error", [sqlite3.OperationalError("private detail"), KeyboardInterrupt("second")]
+)
+def test_keyboard_interrupt_is_preserved_if_failure_persistence_fails(
+    initialized_db, monkeypatch, caplog, with_id, cleanup_error
+):
+    original = KeyboardInterrupt("stop")
+    monkeypatch.setattr(
+        database,
+        "finish_tool_run",
+        Mock(side_effect=cleanup_error),
+    )
+
+    execute = (
+        tool_runs.execute_tool_run_with_id if with_id else tool_runs.execute_tool_run
+    )
+    with pytest.raises(KeyboardInterrupt) as raised:
+        execute("maigret", "test", Mock(side_effect=original), sensitive_input=False)
+
+    assert raised.value is original
+    run_id = database.list_tool_runs()[0][0]
+    database.finish_tool_run.assert_called_once_with(
+        run_id, "failed", error_text="Tool run interrupted."
+    )
+    assert f"Could not persist interrupted tool run {run_id}" in caplog.text
+    assert "private detail" not in caplog.text
+    assert "second" not in caplog.text
+
+
+def test_logging_failure_does_not_replace_original_interrupt(initialized_db, monkeypatch):
+    original = KeyboardInterrupt("stop")
+    monkeypatch.setattr(database, "finish_tool_run", Mock(side_effect=KeyboardInterrupt()))
+    monkeypatch.setattr(tool_runs._LOG, "error", Mock(side_effect=KeyboardInterrupt()))
+
+    with pytest.raises(KeyboardInterrupt) as raised:
+        tool_runs.execute_tool_run(
+            "maigret", "test", Mock(side_effect=original), sensitive_input=False
+        )
+
+    assert raised.value is original
+    tool_runs._LOG.error.assert_called_once()
+
+
+def test_interrupt_during_sensitive_run_validation_does_not_mark_run(
+    initialized_db, monkeypatch
+):
+    run_id = database.start_tool_run("holehe", "private input")
+    original = KeyboardInterrupt("stop")
+    monkeypatch.setattr(database, "get_tool_run", Mock(side_effect=original))
+    finish = Mock()
+    monkeypatch.setattr(database, "finish_tool_run", finish)
+    runner = Mock()
+
+    with pytest.raises(KeyboardInterrupt) as raised:
+        tool_runs.execute_tool_run(
+            "holehe", "private input", runner, run_id=run_id, sensitive_input=True
+        )
+
+    assert raised.value is original
+    finish.assert_not_called()
+    runner.assert_not_called()
+    assert database.query_database("SELECT status FROM ToolRuns") == [("running",)]
+
+
 def test_keyboard_interrupt_during_result_redaction_marks_run_failed(
     initialized_db, monkeypatch
 ):
@@ -108,7 +173,7 @@ def test_interrupted_runs_are_recorded(initialized_db, existing_run, sensitive_i
 
 
 @pytest.mark.parametrize("with_id", [False, True])
-def test_keyboard_interrupt_is_preserved_if_failure_persistence_fails(
+def test_keyboard_interrupt_logs_failure_persistence_error(
     initialized_db, monkeypatch, caplog, with_id
 ):
     finish = Mock(side_effect=sqlite3.OperationalError("database is locked"))
@@ -125,7 +190,7 @@ def test_keyboard_interrupt_is_preserved_if_failure_persistence_fails(
     finish.assert_called_once_with(
         run_id, "failed", error_text="Tool run interrupted."
     )
-    assert "Could not persist interrupted tool run outcome" in caplog.text
+    assert f"Could not persist interrupted tool run {run_id}" in caplog.text
     assert "OperationalError" in caplog.text
 
 

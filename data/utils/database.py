@@ -253,7 +253,7 @@ def query_database(
     """Execute a read-only SQL query and return its rows.
 
     Web routes should use specific, parameterized repository functions rather
-    than accepting arbitrary SQL. Use explicit persistence helpers for writes.
+    than accepting arbitrary SQL. Use insert_data or a transaction for writes.
     """
     return _get_storage().query(query, parameters)
 

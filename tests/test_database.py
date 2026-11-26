@@ -127,6 +127,56 @@ def test_setup_database_preserves_existing_data_and_repairs_missing_objects(
     ) == [("idx_services_platform",)]
 
 
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "INSERT INTO Platforms VALUES ('added')",
+        "UPDATE Platforms SET platform = 'updated'",
+        "DELETE FROM Platforms",
+        "CREATE TABLE other (value TEXT)",
+        "WITH target AS (SELECT 1) DELETE FROM Platforms",
+    ],
+)
+def test_query_database_rejects_sqlite_writes(monkeypatch, statement):
+    uri = "file:read_only_query_test?mode=memory&cache=shared"
+    anchor = sqlite3.connect(uri, uri=True)
+    try:
+        anchor.execute("CREATE TABLE Platforms (platform TEXT)")
+        anchor.execute("INSERT INTO Platforms VALUES ('original')")
+        anchor.commit()
+        storage = database.SQLiteStorage("", Path(), (), frozenset())
+        monkeypatch.setattr(storage, "connect", lambda: sqlite3.connect(uri, uri=True))
+        monkeypatch.setattr(database, "_get_storage", lambda: storage)
+
+        assert database.query_database(
+            "SELECT platform FROM Platforms WHERE platform = ?", ("original",)
+        ) == [("original",)]
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            database.query_database(statement)
+        assert anchor.execute("SELECT platform FROM Platforms").fetchall() == [
+            ("original",)
+        ]
+    finally:
+        anchor.close()
+
+
+def test_query_database_rejects_sqlite_attach(monkeypatch):
+    uri = "file:read_only_attach_test?mode=memory&cache=shared"
+    anchor = sqlite3.connect(uri, uri=True)
+    try:
+        anchor.execute("PRAGMA query_only = ON")
+        anchor.execute("ATTACH DATABASE ':memory:' AS other")
+        assert any(row[1] == "other" for row in anchor.execute("PRAGMA database_list"))
+
+        storage = database.SQLiteStorage("", Path(), (), frozenset())
+        monkeypatch.setattr(storage, "connect", lambda: sqlite3.connect(uri, uri=True))
+        monkeypatch.setattr(database, "_get_storage", lambda: storage)
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+            database.query_database("ATTACH DATABASE ':memory:' AS other")
+    finally:
+        anchor.close()
+
+
 def test_query_database_rejects_state_changing_statements(tmp_path, monkeypatch):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "query.db"))
     database.setup_database()
