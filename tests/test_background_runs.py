@@ -276,9 +276,11 @@ def test_cancelled_worker_continues_to_occupy_capacity_until_stopped(
     stop = background_runs._stop_process
 
     def stalled_stop(process):
+        assert process.is_alive()
         entered.set()
         assert release.wait(5)
         stop(process)
+        assert not process.is_alive()
 
     monkeypatch.setattr(background_runs, "_stop_process", stalled_stop)
     run_id = service.submit("maigret", "user")
@@ -1271,6 +1273,84 @@ def test_spool_file_remains_after_database_persistence_failure(service, monkeypa
     )
     with pytest.raises(sqlite3.OperationalError, match="unavailable"):
         service._persist_spool_file(path)
+    assert path.exists()
+
+
+def create_retried_background_run():
+    now = background_runs._now_ms()
+    old_owner, new_owner = "d" * 32, "e" * 32
+    run_id, created, old_attempt = database.create_background_run(
+        "maigret", "user", owner_token=old_owner,
+        lease_expires_at=now - 1,
+    )
+    assert created and old_attempt == 1
+    assert database.recover_expired_background_run(
+        run_id, old_owner, old_attempt, now, True
+    )
+    new_attempt = database.claim_background_run(
+        run_id, new_owner, now + 60_000
+    )
+    assert new_attempt == old_attempt + 1
+    return run_id, old_owner, old_attempt, new_owner, new_attempt, now
+
+
+def test_obsolete_spool_is_removed_after_newer_attempt_claim(service, monkeypatch):
+    service.close()
+    run_id, owner, attempt, new_owner, new_attempt, _ = (
+        create_retried_background_run()
+    )
+    path = background_runs._write_spooled_outcome(
+        service._spool_dir, run_id, attempt, owner, "success", "old result"
+    )
+    finish = Mock(wraps=database.finish_background_run)
+    monkeypatch.setattr(database, "finish_background_run", finish)
+
+    assert not service._process_spooled_outcomes()
+
+    assert not path.exists()
+    assert database.get_background_run_state(run_id)[:3] == (
+        "running", new_attempt, new_owner
+    )
+    finish.assert_not_called()
+
+
+def test_obsolete_spool_is_removed_after_newer_attempt_is_terminal(service, monkeypatch):
+    service.close()
+    run_id, owner, attempt, new_owner, new_attempt, _ = (
+        create_retried_background_run()
+    )
+    assert database.finish_background_run(
+        run_id, new_owner, new_attempt, "success", result_text="new result"
+    )
+    path = background_runs._write_spooled_outcome(
+        service._spool_dir, run_id, attempt, owner, "success", "old result"
+    )
+    finish = Mock(wraps=database.finish_background_run)
+    monkeypatch.setattr(database, "finish_background_run", finish)
+
+    assert not service._process_spooled_outcomes()
+
+    assert not path.exists()
+    assert database.get_tool_run(run_id)[3:5] == ("success", "new result")
+    finish.assert_not_called()
+
+
+def test_spool_is_retained_when_database_state_is_unavailable(service, monkeypatch):
+    service.close()
+    owner = "f" * 32
+    run_id, _, attempt = database.create_background_run(
+        "maigret", "user", owner_token=owner,
+        lease_expires_at=background_runs._now_ms() + 60_000,
+    )
+    path = background_runs._write_spooled_outcome(
+        service._spool_dir, run_id, attempt, owner, "success", "pending"
+    )
+    monkeypatch.setattr(
+        database, "get_background_run_state",
+        Mock(side_effect=sqlite3.OperationalError("database unavailable")),
+    )
+
+    assert service._process_spooled_outcomes()
     assert path.exists()
 
 

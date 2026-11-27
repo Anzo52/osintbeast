@@ -556,6 +556,11 @@ class BackgroundRuns:
             record, identity = self._read_spool(path)
         except FileNotFoundError:
             return True
+        disposition = self._spool_outcome_disposition(record)
+        if disposition == "obsolete":
+            return self._remove_obsolete_spool_file(path, record, identity)
+        if disposition != "replayable":
+            return False
         persisted = database.finish_background_run(
             record["run_id"],
             record["owner_token"],
@@ -565,6 +570,11 @@ class BackgroundRuns:
             error_text=record["value"] if record["status"] != "success" else None,
         )
         if not persisted:
+            disposition = self._spool_outcome_disposition(record)
+            if disposition == "obsolete":
+                return self._remove_obsolete_spool_file(path, record, identity)
+            if disposition != "replayable":
+                return False
             state = database.get_background_run_state(record["run_id"])
             if state is None or state[0] not in {
                 "success", "failed", "timed_out", "cancelled", "indeterminate",
@@ -582,6 +592,10 @@ class BackgroundRuns:
                 row[4] if state[0] == "success" else row[5],
             ) != (record["status"], record["value"]):
                 return False
+        self._unlink_spool_file(path, identity)
+        return True
+
+    def _unlink_spool_file(self, path, identity):
         directory_fd = os.open(
             self._spool_dir,
             os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
@@ -598,6 +612,17 @@ class BackgroundRuns:
             os.unlink(path.name, dir_fd=directory_fd)
         finally:
             os.close(directory_fd)
+
+    def _remove_obsolete_spool_file(self, path, record, identity):
+        try:
+            current_record, current_identity = self._read_spool(path)
+        except FileNotFoundError:
+            return True
+        if current_identity != identity or current_record != record:
+            return False
+        if self._spool_outcome_disposition(current_record) != "obsolete":
+            return False
+        self._unlink_spool_file(path, identity)
         return True
 
     def _process_spooled_outcomes(self, run_id=None):
@@ -607,9 +632,6 @@ class BackgroundRuns:
             if run_id is not None and not path.name.startswith(f"run-{run_id}-"):
                 continue
             try:
-                record, _ = self._read_spool(path)
-                if not self._spool_outcome_is_replayable(record):
-                    continue
                 self._persist_spool_file(path)
             except FileNotFoundError:
                 continue
@@ -626,28 +648,40 @@ class BackgroundRuns:
                 persistence_error = persistence_error or exc
         return persistence_error is not None
 
-    def _spool_outcome_is_replayable(self, record):
+    def _spool_outcome_disposition(self, record):
         state = database.get_background_run_state(record["run_id"])
         if state is None:
-            return False
+            return "unknown"
+        if state[1] > record["attempt"]:
+            return "obsolete"
+        if state[1] != record["attempt"]:
+            return "unknown"
         if state[0] == "running":
             return (
-                state[1] == record["attempt"]
-                and state[2] == record["owner_token"]
+                "replayable"
+                if state[2] == record["owner_token"]
+                else "unknown"
             )
         if state[0] not in {
             "success", "failed", "timed_out", "cancelled", "indeterminate",
-        } or state[1] != record["attempt"]:
-            return False
+        }:
+            return "unknown"
         row = database.get_tool_run(record["run_id"])
         if row is None:
-            return False
+            return "unknown"
         if state[0] == "cancelled":
-            return row[3:6] == ("failed", None, "Run cancelled.")
-        return (
+            return (
+                "replayable"
+                if row[3:6] == ("failed", None, "Run cancelled.")
+                else "unknown"
+            )
+        return "replayable" if (
             state[0],
             row[4] if state[0] == "success" else row[5],
-        ) == (record["status"], record["value"])
+        ) == (record["status"], record["value"]) else "unknown"
+
+    def _spool_outcome_is_replayable(self, record):
+        return self._spool_outcome_disposition(record) == "replayable"
 
     def _has_retryable_spooled_outcomes(self):
         for path in self._spool_dir.glob("run-*.json"):
