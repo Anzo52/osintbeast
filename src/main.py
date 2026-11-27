@@ -293,7 +293,7 @@ def export_selected_runs():
             run_ids, include_sensitive=include_sensitive
         )
         _write_export_file(output_path, content)
-    except (OSError, ValueError, *database.DATABASE_ERRORS) as exc:
+    except (OSError, RuntimeError, ValueError, *database.DATABASE_ERRORS) as exc:
         print(f"Could not export runs: {exc}")
         return
     print(f"Exported {len(run_ids)} run(s) to {output_path}.")
