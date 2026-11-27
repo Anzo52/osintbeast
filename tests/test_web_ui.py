@@ -79,6 +79,40 @@ def _request(url, payload=None, headers=None):
         return response.code, json.loads(response.read())
 
 
+def _wait_for_terminal_run(url):
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        status, detail = _request(url)
+        if status == 503:
+            time.sleep(0.01)
+            continue
+        assert status == 200, (status, detail)
+        if detail["status"] != "running":
+            return detail
+        time.sleep(0.01)
+    pytest.fail("Run did not reach a terminal state")
+
+
+def test_polling_retries_pending_outcome(monkeypatch):
+    request = Mock(side_effect=[
+        (503, {"error": "Could not persist the run outcome. Try again later."}),
+        (200, {"status": "running"}),
+        (200, {"status": "failed", "error": "dependency missing"}),
+    ])
+    monkeypatch.setattr(__name__ + "._request", request)
+
+    assert _wait_for_terminal_run("http://localhost/api/runs/1") == {
+        "status": "failed", "error": "dependency missing",
+    }
+    assert request.call_count == 3
+
+
+def test_polling_rejects_unexpected_http_errors(monkeypatch):
+    monkeypatch.setattr(__name__ + "._request", Mock(return_value=(404, {"error": "Run not found."})))
+    with pytest.raises(AssertionError, match="404"):
+        _wait_for_terminal_run("http://localhost/api/runs/1")
+
+
 def _server(tmp_path, monkeypatch, runner):
     monkeypatch.setenv("OSINTBEAST_OPERATOR_TOKEN", OPERATOR_TOKEN)
     monkeypatch.setenv("OSINTBEAST_VIEWER_TOKEN", VIEWER_TOKEN)
@@ -188,14 +222,7 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
         assert status == 200
         assert running["status"] == "running"
         assert running["input"] == "[redacted]"
-        deadline = time.monotonic() + 2
-        while time.monotonic() < deadline:
-            status, detail = _request(f"{base_url}/api/runs/{launched['id']}")
-            if status == 200 and detail["status"] != "running":
-                break
-            time.sleep(0.01)
-
-        assert status == 200
+        detail = _wait_for_terminal_run(f"{base_url}/api/runs/{launched['id']}")
         assert detail["status"] == "success"
         assert detail["input"] == "[redacted]"
         assert detail["result"] == f"[redacted]: {output}"
@@ -319,14 +346,7 @@ def test_holehe_email_is_redacted_in_web_ui_history(tmp_path, monkeypatch):
             {"tool": "holehe", "input": sensitive_value, "authorized": True},
         )
         assert status == 202
-        deadline = time.monotonic() + 2
-        while time.monotonic() < deadline:
-            status, detail = _request(f"{base_url}/api/runs/{launched['id']}")
-            if detail["status"] != "running":
-                break
-            time.sleep(0.01)
-
-        assert status == 200
+        detail = _wait_for_terminal_run(f"{base_url}/api/runs/{launched['id']}")
         assert detail["input"] == "[redacted]"
         assert detail["result"] == "Found [redacted]"
         assert database.query_database(
@@ -566,14 +586,7 @@ def test_terminal_tool_error_is_available_for_review(tmp_path, monkeypatch):
         )
         assert status == 202
 
-        deadline = time.monotonic() + 2
-        while time.monotonic() < deadline:
-            status, detail = _request(f"{base_url}/api/runs/{launched['id']}")
-            if detail["status"] != "running":
-                break
-            time.sleep(0.01)
-
-        assert status == 200
+        detail = _wait_for_terminal_run(f"{base_url}/api/runs/{launched['id']}")
         assert detail["status"] == "failed"
         assert detail["error"] == "dependency missing"
         assert detail["result"] is None
@@ -591,12 +604,7 @@ def test_unexpected_background_error_is_redacted(tmp_path, monkeypatch, caplog):
             {"tool": "sherlock", "input": "unexpected", "authorized": True},
         )
         assert status == 202
-        deadline = time.monotonic() + 2
-        while time.monotonic() < deadline:
-            _, detail = _request(f"{base_url}/api/runs/{launched['id']}")
-            if detail["status"] != "running":
-                break
-            time.sleep(0.01)
+        detail = _wait_for_terminal_run(f"{base_url}/api/runs/{launched['id']}")
         assert detail["status"] == "failed"
         assert detail["input"] == "[redacted]"
         assert detail["error"] == "sherlock failed unexpectedly (Exception)."
