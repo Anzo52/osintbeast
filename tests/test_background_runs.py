@@ -701,6 +701,46 @@ def test_cancellation_during_poll_is_not_replaced_by_a_later_result(service, mon
     receiver.recv_bytes.assert_not_called()
 
 
+@pytest.mark.parametrize("eof", [False, True])
+def test_observed_worker_termination_wins_cancellation_race(service, monkeypatch, eof):
+    owner = "e" * 32
+    run_id, _, attempt = database.create_background_run(
+        "maigret", "user", owner_token=owner,
+        lease_expires_at=background_runs._now_ms() + 60_000,
+    )
+    monkeypatch.setattr(service._context, "Event", threading.Event)
+    cancel, completed, outcome_detected = (
+        threading.Event(), threading.Event(), threading.Event()
+    )
+    service._jobs[run_id] = (
+        cancel, Mock(), completed, owner, attempt, outcome_detected
+    )
+    receiver, sender, process = Mock(), Mock(), Mock(pid=1)
+    receiver.poll.return_value = True
+
+    def receive(_limit):
+        assert not service.cancel(run_id)
+        if eof:
+            raise EOFError
+        return b"invalid worker payload"
+
+    receiver.recv_bytes.side_effect = receive
+    monkeypatch.setattr(service._context, "Pipe", lambda **_kwargs: (receiver, sender))
+    monkeypatch.setattr(service._context, "Process", lambda **_kwargs: process)
+    monkeypatch.setattr(background_runs, "_stop_process", lambda _process: None)
+
+    service._supervise(
+        run_id, "maigret", "user", cancel, completed, owner, attempt,
+        background_runs._now_ms() + 60_000, outcome_detected,
+    )
+
+    assert outcome_detected.is_set()
+    assert database.get_tool_run(run_id)[3:6] == (
+        "indeterminate", None,
+        "Worker outcome is unknown after process termination.",
+    )
+
+
 def test_persistence_failure_retries_durable_outcome_without_status(service, monkeypatch):
     finish = database.finish_background_run
     attempts = 0

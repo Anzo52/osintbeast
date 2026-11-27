@@ -353,6 +353,10 @@ class BackgroundRuns:
         active_jobs = sum(not job[2].is_set() for job in self._jobs.values())
         return active_jobs + len(self._launching) + len(self._reservations)
 
+    def _mark_outcome_detected(self, event):
+        with self._lock:
+            event.set()
+
     def _launch(
         self, run_id, tool_name, query, *, reservation=None, owner_token=None,
         attempt=None, lease_expires_at=None,
@@ -906,6 +910,7 @@ class BackgroundRuns:
                     if cancel.is_set() or self._closed:
                         break
                     if ready:
+                        self._mark_outcome_detected(outcome_detected)
                         try:
                             received = receiver.recv_bytes(
                                 self.limits.max_output_bytes + 1
@@ -916,11 +921,9 @@ class BackgroundRuns:
                                     "timed_out",
                                     "Background run exceeded its time limit.",
                                 )
-                                outcome_detected.set()
                         except OSError:
                             status, value = "failed", "Background worker failed."
                             payload_received = True
-                            outcome_detected.set()
                             if timed_out.is_set() or time.monotonic() >= deadline:
                                 status, value = (
                                     "timed_out",
@@ -935,29 +938,28 @@ class BackgroundRuns:
                                     "timed_out",
                                     "Background run exceeded its time limit.",
                                 )
-                                outcome_detected.set()
+                                self._mark_outcome_detected(outcome_detected)
                             elif received and received[:1] in (b"S", b"F", b"T"):
                                 payload_received = True
                                 status = {
                                     b"S": "success", b"F": "failed", b"T": "timed_out"
                                 }[received[:1]]
                                 value = received[1:].decode("utf-8", errors="replace")
-                                outcome_detected.set()
                         break
                     if not process.is_alive():
+                        self._mark_outcome_detected(outcome_detected)
                         if timed_out.is_set() or time.monotonic() >= deadline:
                             status, value = (
                                 "timed_out",
                                 "Background run exceeded its time limit.",
                             )
-                            outcome_detected.set()
                         break
                     if remaining <= 0:
+                        self._mark_outcome_detected(outcome_detected)
                         status, value = (
                             "timed_out",
                             "Background run exceeded its time limit.",
                         )
-                        outcome_detected.set()
                         break
         except Exception:
             _LOG.exception("Background worker could not be supervised")
@@ -1000,7 +1002,7 @@ class BackgroundRuns:
                     status, value = (
                         "timed_out", "Background run exceeded its time limit."
                     )
-                    outcome_detected.set()
+                    self._mark_outcome_detected(outcome_detected)
                 elif worker_started and not payload_received:
                     if path.exists():
                         try:
@@ -1012,14 +1014,13 @@ class BackgroundRuns:
                         ) == (attempt, owner_token):
                             status, value = record["status"], record["value"]
                             spool_contains_outcome = True
-                            outcome_detected.set()
                         else:
                             status = "indeterminate"
                             value = "Worker outcome is unknown after process termination."
                     else:
                         status = "indeterminate"
                         value = "Worker outcome is unknown after process termination."
-                    outcome_detected.set()
+                    self._mark_outcome_detected(outcome_detected)
                 elif state is not None and state[0] != "running" and not cancelled:
                     ownership_lost = True
                 if ownership_lost:
