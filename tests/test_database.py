@@ -3,6 +3,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -760,6 +761,49 @@ def test_list_tool_runs_filters_and_uses_stable_cursor_pagination(
     assert database.list_tool_runs(
         tool_name="holehe' OR 1=1 --"
     ) == []
+
+
+def test_background_run_status_filters_and_exports_use_execution_state(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "run-states.db"))
+    database.setup_database()
+    now = int(time.time() * 1000)
+    owner = "a" * 32
+
+    cancelled, _, _ = database.create_background_run(
+        "maigret", "cancelled", owner_token=owner,
+        lease_expires_at=now + 60_000,
+    )
+    assert database.cancel_background_run(cancelled)
+    assert [row[0] for row in database.list_tool_runs(status="failed")] == [
+        cancelled
+    ]
+    assert database.list_tool_runs(status="cancelled") == []
+
+    queued, _, _ = database.create_background_run(
+        "maigret", "queued", owner_token="b" * 32,
+        lease_expires_at=now - 1,
+    )
+    assert database.recover_expired_background_run(
+        queued, "b" * 32, 1, now, True
+    )
+    indeterminate, _, _ = database.create_background_run(
+        "maigret", "indeterminate", owner_token="c" * 32,
+        lease_expires_at=now - 1,
+    )
+    assert database.recover_expired_background_run(
+        indeterminate, "c" * 32, 1, now, False
+    )
+
+    exported = {
+        row["run_id"]: row
+        for row in json.loads(
+            database.export_tool_runs_json([queued, indeterminate])
+        )
+    }
+    assert exported[queued]["status"] == "queued"
+    assert exported[indeterminate]["status"] == "indeterminate"
 
 
 def test_export_tool_runs_json_redacts_unless_given_boolean_consent(

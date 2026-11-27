@@ -391,10 +391,13 @@ def list_tool_runs(
                       ) END, startedAt, finishedAt, errorText
                FROM ToolRuns
                WHERE (? IS NULL OR toolName = ?)
-                 AND (? IS NULL OR COALESCE(
+                 AND (? IS NULL OR CASE WHEN (
+                     SELECT state FROM ToolRunExecutions
+                     WHERE runID = ToolRuns.runID
+                 ) = 'cancelled' THEN 'failed' ELSE COALESCE(
                      (SELECT state FROM ToolRunExecutions
                       WHERE runID = ToolRuns.runID), ToolRuns.status
-                 ) = ?)
+                 ) END = ?)
                ORDER BY ToolRuns.runID DESC LIMIT ? OFFSET ?"""
         )
         parameters = (tool_name, tool_name, status, status, limit, offset)
@@ -412,10 +415,13 @@ def list_tool_runs(
                FROM ToolRuns
                WHERE ToolRuns.runID < ?
                  AND (? IS NULL OR toolName = ?)
-                 AND (? IS NULL OR COALESCE(
+                 AND (? IS NULL OR CASE WHEN (
+                     SELECT state FROM ToolRunExecutions
+                     WHERE runID = ToolRuns.runID
+                 ) = 'cancelled' THEN 'failed' ELSE COALESCE(
                      (SELECT state FROM ToolRunExecutions
                       WHERE runID = ToolRuns.runID), ToolRuns.status
-                 ) = ?)
+                 ) END = ?)
                ORDER BY ToolRuns.runID DESC LIMIT ?"""
         )
         parameters = (cursor, tool_name, tool_name, status, status, limit)
@@ -537,8 +543,15 @@ def export_tool_runs_json(
 
     placeholders = ", ".join("?" for _ in run_ids)
     rows = _get_storage().query(
-        f"""SELECT runID, toolName, queryText, status, startedAt, finishedAt,
-                   resultText, errorText
+        f"""SELECT ToolRuns.runID, toolName, queryText,
+                   CASE WHEN (
+                       SELECT state FROM ToolRunExecutions
+                       WHERE runID = ToolRuns.runID
+                   ) = 'cancelled' THEN 'failed'
+                   ELSE COALESCE(
+                       (SELECT state FROM ToolRunExecutions
+                        WHERE runID = ToolRuns.runID), ToolRuns.status
+                   ) END, startedAt, finishedAt, resultText, errorText
             FROM ToolRuns WHERE runID IN ({placeholders})""",
         tuple(run_ids),
     )
@@ -649,6 +662,15 @@ def list_background_runs_for_recovery(now: int | None = None) -> list[tuple[Any,
     return _get_storage().list_background_runs_for_recovery(recovery_time)
 
 
+def recover_legacy_background_run(run_id: int, now: int | None = None) -> bool:
+    recovery_time = int(time.time() * 1000) if now is None else now
+    if not isinstance(recovery_time, int) or isinstance(recovery_time, bool):
+        raise ValueError("Recovery time must be an integer.")
+    return _get_storage().recover_legacy_background_run(
+        _validate_run_id(run_id), recovery_time
+    )
+
+
 def finish_background_run(
     run_id: int, owner_token: str, attempt: int, status: str,
     result_text: str | None = None, error_text: str | None = None,
@@ -658,7 +680,7 @@ def finish_background_run(
         raise ValueError("Invalid background run owner token.")
     if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
         raise ValueError("Invalid background run attempt.")
-    if status not in {"success", "failed", "timed_out"}:
+    if status not in {"success", "failed", "timed_out", "indeterminate"}:
         raise ValueError(f"Invalid terminal background run status: {status}")
     if (status == "success" and (result_text is None or error_text is not None)) or (
         status != "success" and (error_text is None or result_text is not None)

@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 _UNPERSISTED_RUN_ERROR = "Run outcome could not be persisted."
 _INDETERMINATE_RUN_ERROR = "Worker outcome is unknown after process termination."
 _DATABASE_TIMEOUT_SECONDS = 5
+_LEGACY_RUN_RECOVERY_AGE_MS = 600_000
 
 
 class StorageError(Exception):
@@ -76,6 +77,8 @@ class Storage(Protocol):
     def get_background_run_state(self, run_id: int) -> tuple[Any, ...] | None: ...
 
     def list_background_runs_for_recovery(self, now: int) -> list[tuple[Any, ...]]: ...
+
+    def recover_legacy_background_run(self, run_id: int, now: int) -> bool: ...
 
     def finish_background_run(
         self, run_id: int, owner_token: str, attempt: int, status: str,
@@ -406,16 +409,47 @@ class SQLiteStorage:
     def list_background_runs_for_recovery(self, now: int) -> list[tuple[Any, ...]]:
         with closing(self.connect()) as conn:
             return conn.execute(
-                """SELECT runID, state, attempt, ownerToken, leaseExpiresAt,
-                          toolName, queryText
-                   FROM ToolRunExecutions
-                   JOIN ToolRuns USING (runID)
-                   WHERE (state = 'queued'
-                          AND CAST(strftime('%s', startedAt) AS INTEGER) * 1000 <= ? - 30000)
-                      OR (state = 'running' AND leaseExpiresAt <= ?)
+                """SELECT ToolRuns.runID,
+                          COALESCE(ToolRunExecutions.state, 'legacy'),
+                          COALESCE(ToolRunExecutions.attempt, 0),
+                          ToolRunExecutions.ownerToken,
+                          ToolRunExecutions.leaseExpiresAt,
+                          ToolRuns.toolName, ToolRuns.queryText
+                   FROM ToolRuns LEFT JOIN ToolRunExecutions USING (runID)
+                   WHERE (ToolRunExecutions.state = 'queued'
+                          AND CAST(strftime('%s', ToolRuns.startedAt) AS INTEGER) * 1000 <= ? - 30000)
+                      OR (ToolRunExecutions.state = 'running'
+                          AND ToolRunExecutions.leaseExpiresAt <= ?)
+                      OR (ToolRunExecutions.runID IS NULL
+                          AND ToolRuns.status = 'running'
+                          AND CAST(strftime('%s', ToolRuns.startedAt) AS INTEGER) * 1000
+                              <= ? - ?)
                    ORDER BY runID""",
-                (now, now),
+                (now, now, now, _LEGACY_RUN_RECOVERY_AGE_MS),
             ).fetchall()
+
+    def recover_legacy_background_run(self, run_id: int, now: int) -> bool:
+        with closing(self.connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.execute(
+                """INSERT OR IGNORE INTO ToolRunExecutions (runID, state)
+                   SELECT ToolRuns.runID, 'indeterminate'
+                   FROM ToolRuns LEFT JOIN ToolRunExecutions USING (runID)
+                   WHERE ToolRuns.runID = ? AND ToolRuns.status = 'running'
+                     AND ToolRunExecutions.runID IS NULL
+                     AND CAST(strftime('%s', ToolRuns.startedAt) AS INTEGER) * 1000
+                         <= ? - ?""",
+                (run_id, now, _LEGACY_RUN_RECOVERY_AGE_MS),
+            )
+            if cursor.rowcount != 1:
+                return False
+            conn.execute(
+                """UPDATE ToolRuns SET status = 'failed', resultText = NULL,
+                   errorText = ?, finishedAt = CURRENT_TIMESTAMP
+                   WHERE runID = ? AND status = 'running'""",
+                (_INDETERMINATE_RUN_ERROR, run_id),
+            )
+            return True
 
     def finish_background_run(
         self, run_id: int, owner_token: str, attempt: int, status: str,
@@ -1202,15 +1236,51 @@ class MySQLStorage:
         try:
             with self._get_engine().connect() as connection:
                 return connection.exec_driver_sql(
-                    """SELECT runID, state, attempt, ownerToken, leaseExpiresAt,
-                              toolName, queryText
-                       FROM ToolRunExecutions
-                       JOIN ToolRuns USING (runID)
-                       WHERE (state = 'queued' AND UNIX_TIMESTAMP(startedAt) * 1000 <= %s - 30000)
-                          OR (state = 'running' AND leaseExpiresAt <= %s)
+                    """SELECT ToolRuns.runID,
+                              COALESCE(ToolRunExecutions.state, 'legacy'),
+                              COALESCE(ToolRunExecutions.attempt, 0),
+                              ToolRunExecutions.ownerToken,
+                              ToolRunExecutions.leaseExpiresAt,
+                              ToolRuns.toolName, ToolRuns.queryText
+                       FROM ToolRuns LEFT JOIN ToolRunExecutions USING (runID)
+                       WHERE (ToolRunExecutions.state = 'queued'
+                              AND UNIX_TIMESTAMP(ToolRuns.startedAt) * 1000 <= %s - 30000)
+                          OR (ToolRunExecutions.state = 'running'
+                              AND ToolRunExecutions.leaseExpiresAt <= %s)
+                          OR (ToolRunExecutions.runID IS NULL
+                              AND ToolRuns.status = 'running'
+                              AND UNIX_TIMESTAMP(ToolRuns.startedAt) * 1000
+                                  <= %s - %s)
                        ORDER BY runID""",
-                    (now, now),
+                    (now, now, now, _LEGACY_RUN_RECOVERY_AGE_MS),
                 ).fetchall()
+        except Exception as exc:
+            if exc.__class__.__module__.startswith("sqlalchemy"):
+                raise StorageError(str(exc)) from exc
+            raise
+
+    def recover_legacy_background_run(self, run_id: int, now: int) -> bool:
+        try:
+            with self._get_engine().begin() as connection:
+                result = connection.exec_driver_sql(
+                    """INSERT IGNORE INTO ToolRunExecutions (runID, state)
+                       SELECT ToolRuns.runID, 'indeterminate'
+                       FROM ToolRuns LEFT JOIN ToolRunExecutions USING (runID)
+                       WHERE ToolRuns.runID = %s AND ToolRuns.status = 'running'
+                         AND ToolRunExecutions.runID IS NULL
+                         AND UNIX_TIMESTAMP(ToolRuns.startedAt) * 1000
+                             <= %s - %s""",
+                    (run_id, now, _LEGACY_RUN_RECOVERY_AGE_MS),
+                )
+                if result.rowcount != 1:
+                    return False
+                connection.exec_driver_sql(
+                    """UPDATE ToolRuns SET status = 'failed', resultText = NULL,
+                       errorText = %s, finishedAt = CURRENT_TIMESTAMP
+                       WHERE runID = %s AND status = 'running'""",
+                    (_INDETERMINATE_RUN_ERROR, run_id),
+                )
+                return True
         except Exception as exc:
             if exc.__class__.__module__.startswith("sqlalchemy"):
                 raise StorageError(str(exc)) from exc

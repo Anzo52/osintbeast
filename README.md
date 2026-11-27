@@ -46,6 +46,15 @@ See the [development roadmap](#development-roadmap) for broader planned work.
 
 The runtime and development dependency ranges are declared in `pyproject.toml`. Direct dependencies use bounded ranges to limit unexpected major-version changes; this is a compatibility policy, not a fully locked, hash-verified environment.
 
+## Deployment scope
+
+OSINT Beast targets Linux-only, single-host deployments, with Debian-based
+Linux as the primary environment. Windows deployment and multi-host/distributed
+coordination are not supported. Durable background runs require the database
+and spool directory to reside on the same host and use local storage with
+atomic rename, durable fsync, and restrictive permissions. Windows setup
+commands below are for local CLI use, not a supported deployment target.
+
 ## Getting started
 
 ```bash
@@ -340,14 +349,20 @@ cancellation and returns whether the transition won; the execution record
 stores `cancelled`, while the legacy `ToolRuns.status` projection remains
 `failed` for schema compatibility.
 
+OSINT Beast background runs currently target Linux-only, single-host
+deployments, with Debian-based Linux as the primary environment. The database
+and outcome spool must be on the same host. Windows deployments and
+multi-host/distributed coordination are not supported.
+
 Configure `RunLimits(max_concurrent=2, timeout_seconds=300,
 max_query_chars=254, max_output_bytes=1000000)` when constructing the service.
 Execution occurs in child processes, which are stopped on timeout or
 cancellation; each worker also monitors its deadline and parent process so it
-exits if the service process dies. On POSIX, the worker's process group is
-killed as well; on Windows, the watchdog stops only the worker. Tool failures
-and unexpected worker exits are recorded as failures. Call `close()` during
-orderly application shutdown.
+exits if the service process dies. The worker's process group is killed as
+well. Definitive tool failures are recorded as failures; when a worker
+terminates without producing a durable outcome, its result is unknown and the
+run is recorded as `indeterminate`. Call `close()` during orderly application
+shutdown.
 
 The lifecycle is `queued -> running -> success|failed|timed_out|cancelled`,
 with `indeterminate` for an execution whose outcome cannot be established.
@@ -364,16 +379,19 @@ completion. If the database is unavailable, the file remains for retries with
 increasing backoff (up to 30 seconds) and is replayed after restart. Files are
 mode 0600 in a mode 0700 directory. By default, they are stored beside the
 configured database path in `osintbeast-run-spool`; set
-`OSINTBEAST_RUN_SPOOL_DIR` to use another durable location. Multi-host
-deployments must use a shared filesystem that provides atomic rename,
-visibility across hosts, durable fsync, and restrictive permissions under the
-service identity. A worker outcome that was never durably spooled cannot be
-reconstructed from volatile memory. Ordinary input can be executed again
-after lease expiry; this is at-least-once execution, not outcome recovery.
-Sensitive Holehe queries are not persisted in plaintext or encrypted: if their
-worker dies before spooling an outcome, the run is marked `indeterminate`
-rather than rerun with unknown input. A same-key retry returns that existing
-run; it does not silently authorize a new execution.
+`OSINTBEAST_RUN_SPOOL_DIR` to use another durable location on the same host.
+The database and spool must use local storage that provides atomic rename,
+durable fsync, and restrictive permissions under the service identity. A
+worker outcome that was never durably spooled cannot be reconstructed from
+volatile memory. Ordinary input can be executed again after lease expiry; this
+is at-least-once execution, not outcome recovery. Sensitive Holehe queries are
+not persisted in plaintext or encrypted: if their worker dies before spooling
+an outcome, the run is marked `indeterminate` rather than rerun with unknown
+input. A same-key retry returns that existing run; it does not silently
+authorize a new execution.
+If `status()` detects a matching durable outcome but cannot persist it, it
+raises a persistence error rather than returning a stale `running` result; the
+web API reports this condition as HTTP 503 and retains the spool file.
 
 Background idempotency uses `ToolRunIdempotency`, separate from synchronous
 `ToolRunRequests`. A unique SHA-256 key hash and input fingerprint bind each
@@ -394,14 +412,14 @@ starting the supervisor fails and recording that failure also fails,
 failure outcome is retained in the durable spool and retried after database
 access returns. The browser API includes that ID in its 503 response.
 
-These limits apply per service instance, not across web server processes or
-hosts. Use a single application process or an external coordinator to enforce
-a deployment-wide limit. The durable run state and outcome spool recover
-accepted work, but do not provide distributed capacity limiting. A web
-interface must enforce authentication, authorization, CSRF protection as
-appropriate, and access controls on run records before exposing these methods.
-Tool output is limited when returned to the parent; tools may still consume
-additional memory internally while producing it.
+Concurrency limits apply per service instance and are not coordinated across
+multiple application processes. Run one application process on the deployment
+host to enforce the configured limit. Background state and spool recovery are
+not a multi-host distributed coordination mechanism. A web interface must
+enforce authentication, authorization, CSRF protection as appropriate, and
+access controls on run records before exposing these methods. Tool output is
+limited when returned to the parent; tools may still consume additional memory
+internally while producing it.
 
 ## Browser interface
 

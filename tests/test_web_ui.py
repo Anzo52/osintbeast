@@ -191,7 +191,7 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
             status, detail = _request(f"{base_url}/api/runs/{launched['id']}")
-            if detail["status"] != "running":
+            if status == 200 and detail["status"] != "running":
                 break
             time.sleep(0.01)
 
@@ -291,7 +291,7 @@ def test_pending_completion_recovers_after_persistence_failure(
         assert any(run_service._spool_dir.glob(f"run-{launched['id']}-*.json"))
 
         status, _ = _request(f"{base_url}/api/runs/{launched['id']}")
-        assert status == 200
+        assert status == 503
         monkeypatch.setattr(database, "finish_background_run", finish)
         status, detail = _request(f"{base_url}/api/runs/{launched['id']}")
         assert status == 200
@@ -660,6 +660,9 @@ def test_browser_persists_unacknowledged_key_without_storing_input():
     assert 'sessionStorage.getItem(pendingKeyName)' in page
     assert 'crypto.subtle.digest("SHA-256", bytes)' in page
     assert 'const submittedInput = queryInput.value;' in page
+    pending = page.split("pending = {", 1)[1].split("\n          };", 1)[0]
+    assert all(field in pending for field in ("key:", "tool:", "fingerprint:"))
+    assert "input:" not in pending
     assert page.index("clearPendingKey();", page.index('const run = await request("/api/runs"')) < page.index("await loadRun(run.id);")
 
 
@@ -719,10 +722,9 @@ def test_browser_capacity_rejection_and_recovery(tmp_path, monkeypatch, run_serv
         service = server.run_service
         assert service.cancel(first["id"])
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            if service.status(first["id"])["status"] != "running":
-                break
+        while time.monotonic() < deadline and first["id"] in service._jobs:
             time.sleep(0.01)
+        assert first["id"] not in service._jobs
         status, third = _request(f"{base_url}/api/runs", payload)
         assert status == 202
         assert third["id"] not in (first["id"], second["id"])
