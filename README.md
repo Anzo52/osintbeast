@@ -336,11 +336,11 @@ status and saved output from `GET /api/runs/<run_id>` and
 web server. The browser interface below uses one instance. Initialize
 the database first and create one service per application
 process. `submit(tool_name, query)` validates the input, records a run and
-returns its integer ID without waiting for tool execution; `status(run_id)`
 returns the persisted record (or `None`), and `cancel(run_id)` requests
 cancellation and returns whether the run was active. Poll status for the
-terminal outcome. Cancellation is recorded as `failed` with the error
-`Run cancelled.` for compatibility with existing databases.
+terminal outcome. Background cancellation is reported as `cancelled`; legacy
+`ToolRuns.status` remains `failed` internally for compatibility with existing
+database constraints.
 
 Configure `RunLimits(max_concurrent=2, timeout_seconds=300,
 max_query_chars=254, max_output_bytes=1000000)` when constructing the service.
@@ -351,26 +351,41 @@ parent process so it exits if the parent dies. On POSIX, the worker's process
 group is killed as well; on Windows, this watchdog stops only the worker.
 Tool failures and unexpected worker exits are recorded as failures. Call
 `close()` during orderly application shutdown.
-If saving an outcome fails, the service retains it in memory and keeps its
-capacity slot reserved while retrying the write independently of status
-requests. Calling `status(run_id)` also retries immediately and raises
-`RuntimeError` if the outcome still cannot be saved. Pending outcomes are lost
-if the application process exits.
-Idempotency keys for active runs are retained; completed-run keys are kept
-up to 1024 entries (or the configured concurrency limit), after which the
-oldest completed keys are evicted. Retrying an evicted key creates a new run.
-The browser retains an unacknowledged submission key and a salted input
-fingerprint in session storage across reloads, without storing the raw input;
-it clears the key when the server confirms the submission.
+Each run follows `queued -> running -> success|failed|timed_out|cancelled`.
+Expired executions without a durable outcome become `indeterminate`; this is
+an explicit unknown result, not a successful result or an automatic rerun.
+Database transitions are conditional and fenced by an attempt number and
+owner token, so late workers and cancellation cannot overwrite a terminal
+outcome. Recovery is safe to run on multiple instances.
+
+Workers atomically write and fsync a private outcome file before reporting
+completion. If the database is unavailable, the file remains for bounded
+exponential-backoff retries and is replayed after restart. By default, files
+are stored beside the configured database path in
+`osintbeast-run-spool`; set `OSINTBEAST_RUN_SPOOL_DIR` to use another durable
+location. Multi-host deployments must point every instance at the same durable
+shared spool. If the worker exits before recording an outcome, no result can
+be reconstructed; after its lease expires, the run is marked `indeterminate`
+and the same idempotency key continues to refer to that run.
+
+Background idempotency uses a separate `ToolRunIdempotency` table with a
+unique SHA-256 key hash and a keyed input fingerprint. The key association and
+queued run are inserted in one transaction, so SQLite serialization and
+MySQL's unique constraint resolve concurrent submissions across instances.
+The existing `ToolRunRequests` path remains separate for synchronous request
+idempotency. Background keys are retained durably rather than evicted. The
+browser keeps only a pending key, tool name, and salted input fingerprint in
+session storage; it captures submitted values before hashing, clears the key
+when the form changes, and retains it after an unacknowledged request.
 If starting the supervisor fails and recording that failure also fails,
-`submit` raises `StartupPersistenceError` with a `run_id` attribute; retry
-`status(run_id)` after database access is restored. The browser API includes
-that ID in its 503 response.
+`submit` raises `StartupPersistenceError` with a `run_id` attribute; its
+failure outcome is retained in the durable spool and retried after database
+access returns. The browser API includes that ID in its 503 response.
 
 These limits apply per service instance, not across web server processes or
 hosts. Use a single application process or an external coordinator to enforce
-a deployment-wide limit. An abrupt application crash can leave `running`
-records behind; this in-process service is not a durable job queue. A web
+a deployment-wide limit. The durable run state and outcome spool recover
+accepted work, but do not provide distributed capacity limiting. A web
 interface must enforce authentication, authorization, CSRF protection as
 appropriate, and access controls on run records before exposing these methods.
 Tool output is limited when returned to the parent; tools may still consume

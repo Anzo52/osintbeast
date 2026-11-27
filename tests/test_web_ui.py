@@ -1,7 +1,7 @@
 import http.client
 import json
-import sqlite3
 import socket
+import sqlite3
 import threading
 import time
 import uuid
@@ -13,15 +13,18 @@ from urllib.request import Request, urlopen
 import pytest
 
 import background_runs
-import data.utils.database as database
 import web_ui
+from data.utils import database
 from sherlock_integration import validate_username
 
 OPERATOR_TOKEN = "o" * 40
 VIEWER_TOKEN = "v" * 40
 
 
-def mocked_worker(connection, tool_name, query, max_output_bytes, deadline=None):
+def mocked_worker(
+    connection, tool_name, query, max_output_bytes, deadline=None,
+    timed_out=None, spool_context=None,
+):
     if query == "slow":
         time.sleep(10)
     elif query == "alice":
@@ -39,7 +42,9 @@ def mocked_worker(connection, tool_name, query, max_output_bytes, deadline=None)
 
 
 @pytest.fixture(autouse=True)
-def run_service(monkeypatch):
+def run_service(monkeypatch, tmp_path):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "web.db"))
+    database.setup_database()
     monkeypatch.setattr(background_runs, "_worker", mocked_worker)
     service = background_runs.BackgroundRuns()
     monkeypatch.setattr(web_ui, "BackgroundRuns", lambda: service)
@@ -651,7 +656,7 @@ def test_browser_persists_unacknowledged_key_without_storing_input():
     assert 'sessionStorage.setItem(pendingKeyName, JSON.stringify(pending))' in page
     assert 'sessionStorage.getItem(pendingKeyName)' in page
     assert 'crypto.subtle.digest("SHA-256", bytes)' in page
-    assert 'input: queryInput.value' in page
+    assert 'const submittedInput = queryInput.value;' in page
     assert page.index("clearPendingKey();", page.index('const run = await request("/api/runs"')) < page.index("await loadRun(run.id);")
 
 

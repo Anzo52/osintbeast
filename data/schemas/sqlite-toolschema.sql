@@ -46,6 +46,31 @@ CREATE TABLE IF NOT EXISTS ToolRuns (
 CREATE INDEX IF NOT EXISTS idx_toolruns_tool_started
     ON ToolRuns (toolName, startedAt);
 
+CREATE TABLE IF NOT EXISTS ToolRunIdempotency (
+    keyHash TEXT PRIMARY KEY,
+    toolName TEXT NOT NULL,
+    inputFingerprint TEXT NOT NULL,
+    runID INTEGER NOT NULL UNIQUE,
+    FOREIGN KEY (runID) REFERENCES ToolRuns (runID)
+);
+
+CREATE TABLE IF NOT EXISTS ToolRunExecutions (
+    runID INTEGER PRIMARY KEY,
+    state TEXT NOT NULL CHECK (
+        state IN (
+            'queued', 'running', 'success', 'failed', 'timed_out',
+            'cancelled', 'indeterminate'
+        )
+    ),
+    attempt INTEGER NOT NULL DEFAULT 0,
+    ownerToken TEXT,
+    leaseExpiresAt INTEGER,
+    FOREIGN KEY (runID) REFERENCES ToolRuns (runID)
+);
+
+CREATE INDEX IF NOT EXISTS idx_toolrunexecutions_recovery
+    ON ToolRunExecutions (state, leaseExpiresAt);
+
 CREATE TABLE IF NOT EXISTS ToolRunRequests (
     idempotencyKey TEXT PRIMARY KEY,
     requestHash TEXT NOT NULL,

@@ -9,10 +9,13 @@ from unittest.mock import Mock
 import pytest
 
 import background_runs
-import data.utils.database as database
+from data.utils import database
 
 
-def mocked_worker(connection, tool_name, query, max_output_bytes, deadline=None):
+def mocked_worker(
+    connection, tool_name, query, max_output_bytes, deadline=None,
+    timed_out=None, spool_context=None,
+):
     if query == "crash":
         os._exit(1)
     if query == "slow":
@@ -35,9 +38,14 @@ def unredacted_sensitive_runner(query):
     return {"output": text}
 
 
-def sensitive_worker(connection, tool_name, query, max_output_bytes, deadline=None):
+def sensitive_worker(
+    connection, tool_name, query, max_output_bytes, deadline=None,
+    timed_out=None, spool_context=None,
+):
     background_runs._TOOLS["holehe"] = (lambda value: value, unredacted_sensitive_runner)
-    background_runs._worker(connection, tool_name, query, max_output_bytes, deadline)
+    background_runs._worker(
+        connection, tool_name, query, max_output_bytes, deadline, timed_out, spool_context
+    )
 
 
 def blocked_runner(query):
@@ -769,3 +777,59 @@ def test_holehe_worker_starts_watchdog_and_executes_once(monkeypatch):
 def test_invalid_limits(kwargs):
     with pytest.raises(ValueError):
         background_runs.RunLimits(**kwargs)
+
+
+def test_spooled_outcome_replays_after_database_restart(service, monkeypatch):
+    run_id = database.start_tool_run("maigret", "user")
+    database.ensure_background_run(run_id)
+    owner = "a" * 32
+    attempt = database.claim_background_run(
+        run_id, owner, int(background_runs._WALL_TIME() + 60)
+    )
+    assert attempt == 1
+    path = background_runs._write_spooled_outcome(
+        service._spool_dir, run_id, attempt, owner, "success", "durable output"
+    )
+
+    finish = database.finish_tool_run
+    monkeypatch.setattr(
+        database,
+        "finish_tool_run",
+        Mock(side_effect=sqlite3.OperationalError("database unavailable")),
+    )
+    assert not service._persist_spool_file(path)
+
+    monkeypatch.setattr(database, "finish_tool_run", finish)
+    assert service._persist_spool_file(path)
+    assert database.get_tool_run(run_id)[3] == "success"
+    assert not path.exists()
+
+
+def test_expired_worker_lease_is_marked_indeterminate(service):
+    run_id = database.start_tool_run("maigret", "user")
+    database.ensure_background_run(run_id)
+    owner = "b" * 32
+    attempt = database.claim_background_run(run_id, owner, int(background_runs._WALL_TIME() - 1))
+    assert attempt == 1
+
+    service._recover_run(run_id)
+
+    row = database.get_tool_run(run_id)
+    assert row[3] == "indeterminate"
+    assert row[5] == "Worker outcome is unknown after process termination."
+    assert database.get_background_run_state(run_id)[0] == "indeterminate"
+
+
+def test_multiple_recovery_attempts_are_idempotent(service):
+    run_id = database.start_tool_run("maigret", "user")
+    database.ensure_background_run(run_id)
+    owner = "c" * 32
+    attempt = database.claim_background_run(run_id, owner, int(background_runs._WALL_TIME() - 1))
+    assert attempt == 1
+
+    assert database.mark_background_run_indeterminate(
+        run_id, owner, attempt, int(background_runs._WALL_TIME())
+    )
+    assert not database.mark_background_run_indeterminate(
+        run_id, owner, attempt, int(background_runs._WALL_TIME())
+    )

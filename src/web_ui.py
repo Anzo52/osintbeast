@@ -10,16 +10,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 from background_runs import (
-    BackgroundRuns, CapacityError, IdempotencyConflict, StartupPersistenceError,
+    BackgroundRuns,
+    CapacityError,
+    IdempotencyConflict,
+    StartupPersistenceError,
 )
 from data.utils import database
-from helix_integration import run_helix, validate_username as validate_helix_username
+from helix_integration import run_helix
+from helix_integration import validate_username as validate_helix_username
 from holehe_integration import run_holehe, validate_email
 from maigret_integration import run_maigret, validate_username
 from sherlock_integration import run_sherlock
 from sherlock_integration import validate_username as validate_sherlock_username
 from tool_registry import get_tool_metadata
-
 
 RUNNABLE_TOOLS = {
     "holehe": ("email", validate_email, lambda value: run_holehe(value)["output"]),
@@ -195,7 +198,8 @@ INDEX_HTML = """<!doctype html>
         (run.finished_at ? ` · finished ${run.finished_at}` : "");
       document.querySelector("#detail-output").textContent = run.result || run.error || "";
       await loadRuns();
-      if (run.status === "running") setTimeout(() => loadRun(id).catch(showError), 1500);
+      if (run.status === "running" || run.status === "queued")
+        setTimeout(() => loadRun(id).catch(showError), 1500);
     }
 
     function showError(reason) {
@@ -212,13 +216,18 @@ INDEX_HTML = """<!doctype html>
       return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
     }
     toolSelect.addEventListener("change", () => {
+      clearPendingKey();
       updateInputLabel();
     });
+    queryInput.addEventListener("input", clearPendingKey);
     document.querySelector("#launch").addEventListener("submit", async event => {
       event.preventDefault();
       error.textContent = "";
       const message = document.querySelector("#message");
       const submit = document.querySelector("#submit");
+      const submittedTool = toolSelect.value;
+      const submittedInput = queryInput.value;
+      const authorized = document.querySelector("#authorized").checked;
       submit.disabled = true;
       message.textContent = "Submitting run…";
       try {
@@ -229,13 +238,17 @@ INDEX_HTML = """<!doctype html>
           pending = null;
         }
         let idempotencyKey = pending?.key;
-        if (!idempotencyKey || pending.tool !== toolSelect.value ||
-            pending.fingerprint !== await submissionFingerprint(idempotencyKey, toolSelect.value, queryInput.value)) {
+        if (!idempotencyKey || pending.tool !== submittedTool ||
+            pending.fingerprint !== await submissionFingerprint(
+              idempotencyKey, submittedTool, submittedInput
+            )) {
           idempotencyKey = crypto.randomUUID();
           pending = {
             key: idempotencyKey,
-            tool: toolSelect.value,
-            fingerprint: await submissionFingerprint(idempotencyKey, toolSelect.value, queryInput.value)
+            tool: submittedTool,
+            fingerprint: await submissionFingerprint(
+              idempotencyKey, submittedTool, submittedInput
+            )
           };
           sessionStorage.setItem(pendingKeyName, JSON.stringify(pending));
         }
@@ -246,9 +259,9 @@ INDEX_HTML = """<!doctype html>
             "Idempotency-Key": idempotencyKey
           },
           body: JSON.stringify({
-            tool: toolSelect.value,
-            input: queryInput.value,
-            authorized: document.querySelector("#authorized").checked
+            tool: submittedTool,
+            input: submittedInput,
+            authorized
           })
         });
         clearPendingKey();
