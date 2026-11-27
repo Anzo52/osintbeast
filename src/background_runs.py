@@ -527,10 +527,18 @@ class BackgroundRuns:
         )
         if not persisted:
             state = database.get_background_run_state(record["run_id"])
-            if state is None or state[0] not in {"success", "failed", "timed_out"}:
+            if state is None or state[0] not in {
+                "success", "failed", "timed_out", "cancelled",
+            }:
                 return False
             row = database.get_tool_run(record["run_id"])
-            if row is None or (
+            if state[0] == "cancelled":
+                if (
+                    state[1] != record["attempt"] or row is None
+                    or row[3:6] != ("failed", None, "Run cancelled.")
+                ):
+                    return False
+            elif row is None or (
                 state[0],
                 row[4] if state[0] == "success" else row[5],
             ) != (record["status"], record["value"]):

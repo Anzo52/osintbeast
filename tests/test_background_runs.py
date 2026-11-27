@@ -83,6 +83,21 @@ def blocked_worker(
     time.sleep(30)
 
 
+def cancellation_race_worker(
+    connection, tool_name, query, max_output_bytes, deadline=None,
+    timed_out=None, spool_context=None,
+):
+    directory = Path(spool_context[0])
+    (directory / "worker-ready").touch()
+    while not (directory / "write-outcome").exists():
+        time.sleep(0.01)
+    background_runs._write_spooled_outcome(
+        *spool_context, "success", "late worker outcome"
+    )
+    (directory / "outcome-written").touch()
+    time.sleep(30)
+
+
 def blocked_runner(query):
     time.sleep(10)
     return query
@@ -220,6 +235,56 @@ def test_close_cancels_active_work_and_rejects_new_work(service):
     assert service.status(run_id)["errorText"] == "Run cancelled."
     with pytest.raises(RuntimeError, match="closed"):
         service.submit("maigret", "user")
+
+
+@pytest.mark.parametrize("shutdown", [False, True])
+@pytest.mark.parametrize("spool_during_cancel", [False, True])
+def test_active_cancellation_reconciles_supervisor_and_worker_spools(
+    service, monkeypatch, shutdown, spool_during_cancel
+):
+    monkeypatch.setattr(background_runs, "_worker", cancellation_race_worker)
+    service.limits = background_runs.RunLimits(
+        max_concurrent=1, timeout_seconds=15, max_output_bytes=100
+    )
+    original_cancel = database.cancel_background_run
+
+    def wait_for_file(path):
+        deadline = time.monotonic() + 8
+        while not path.exists():
+            if time.monotonic() >= deadline:
+                pytest.fail(f"Timed out waiting for {path.name}")
+            time.sleep(0.01)
+
+    def cancel_with_worker_race(run_id):
+        cancelled = original_cancel(run_id)
+        if cancelled and spool_during_cancel:
+            (service._spool_dir / "write-outcome").touch()
+            wait_for_file(service._spool_dir / "outcome-written")
+        return cancelled
+
+    original_stop = background_runs._stop_process
+
+    def stop_after_worker_race(process):
+        if spool_during_cancel:
+            wait_for_file(service._spool_dir / "outcome-written")
+        original_stop(process)
+
+    monkeypatch.setattr(database, "cancel_background_run", cancel_with_worker_race)
+    monkeypatch.setattr(background_runs, "_stop_process", stop_after_worker_race)
+    run_id = service.submit("maigret", "user")
+    wait_for_file(service._spool_dir / "worker-ready")
+    with service._lock:
+        supervisor = service._jobs[run_id][1]
+    if shutdown:
+        service.close()
+    else:
+        assert service.cancel(run_id)
+    supervisor.join(8)
+    assert not supervisor.is_alive()
+    assert database.get_background_run_state(run_id)[0] == "cancelled"
+    assert database.get_tool_run(run_id)[3:6] == ("failed", None, "Run cancelled.")
+    assert database.list_tool_results() == []
+    assert list(service._spool_dir.glob(f"run-{run_id}-*.json")) == []
 
 
 def test_close_is_bounded_when_final_persistence_stalls(service, monkeypatch, caplog):
@@ -960,3 +1025,73 @@ def test_spool_file_remains_after_database_persistence_failure(service, monkeypa
     with pytest.raises(sqlite3.OperationalError, match="unavailable"):
         service._persist_spool_file(path)
     assert path.exists()
+
+
+@pytest.mark.parametrize("status", ["success", "failed", "timed_out"])
+def test_late_spooled_outcome_after_cancellation_is_reconciled(service, status):
+    service.close()
+    owner = "a" * 32
+    run_id, _, attempt = database.create_background_run(
+        "maigret", "user", owner_token=owner,
+        lease_expires_at=background_runs._now_ms() + 60_000,
+    )
+    assert database.cancel_background_run(run_id)
+    path = background_runs._write_spooled_outcome(
+        service._spool_dir, run_id, attempt, owner, status, "late outcome"
+    )
+
+    assert service._persist_spool_file(path)
+    assert not path.exists()
+    assert database.get_tool_run(run_id)[3:6] == ("failed", None, "Run cancelled.")
+    assert database.list_tool_results() == []
+
+
+@pytest.mark.parametrize("mismatch", ["attempt", "error", "terminal"])
+def test_mismatched_spool_is_not_deleted(service, mismatch):
+    service.close()
+    owner = "b" * 32
+    run_id, _, attempt = database.create_background_run(
+        "maigret", "user", owner_token=owner,
+        lease_expires_at=background_runs._now_ms() + 60_000,
+    )
+    if mismatch == "terminal":
+        assert database.finish_background_run(
+            run_id, owner, attempt, "failed", error_text="different failure"
+        )
+    else:
+        assert database.cancel_background_run(run_id)
+    if mismatch == "error":
+        with database.connect_db() as connection:
+            connection.execute(
+                "UPDATE ToolRuns SET errorText = ? WHERE runID = ?",
+                ("different error", run_id),
+            )
+            connection.commit()
+    path = background_runs._write_spooled_outcome(
+        service._spool_dir, run_id, attempt + (mismatch == "attempt"),
+        owner, "success", "late outcome",
+    )
+
+    assert not service._persist_spool_file(path)
+    assert path.exists()
+    assert database.list_tool_results() == []
+
+
+def test_retry_processing_does_not_repeat_reconciled_cancellation(service, monkeypatch):
+    service.close()
+    owner = "c" * 32
+    run_id, _, attempt = database.create_background_run(
+        "maigret", "user", owner_token=owner,
+        lease_expires_at=background_runs._now_ms() + 60_000,
+    )
+    assert database.cancel_background_run(run_id)
+    path = background_runs._write_spooled_outcome(
+        service._spool_dir, run_id, attempt, owner, "failed", "late failure"
+    )
+    finish = Mock(wraps=database.finish_background_run)
+    monkeypatch.setattr(database, "finish_background_run", finish)
+
+    assert not service._process_spooled_outcomes()
+    assert not path.exists()
+    assert not service._process_spooled_outcomes()
+    assert finish.call_count == 1
