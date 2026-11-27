@@ -47,6 +47,36 @@ CREATE TABLE IF NOT EXISTS ToolRuns (
         CHECK (status IN ('running', 'success', 'failed', 'timed_out'))
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS ToolRunIdempotency (
+    keyHash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    toolName VARCHAR(255) NOT NULL,
+    inputFingerprint CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    runID INT NOT NULL,
+    PRIMARY KEY (keyHash),
+    UNIQUE KEY uq_toolrun_idempotency_run (runID),
+    CONSTRAINT fk_toolrun_idempotency_run
+        FOREIGN KEY (runID) REFERENCES ToolRuns (runID)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS ToolRunExecutions (
+    runID INT NOT NULL,
+    state VARCHAR(16) NOT NULL,
+    attempt INT NOT NULL DEFAULT 0,
+    ownerToken CHAR(32) CHARACTER SET ascii COLLATE ascii_bin DEFAULT NULL,
+    leaseExpiresAt BIGINT DEFAULT NULL,
+    PRIMARY KEY (runID),
+    KEY idx_toolrunexecutions_recovery (state, leaseExpiresAt),
+    CONSTRAINT fk_toolrunexecutions_toolrun
+        FOREIGN KEY (runID) REFERENCES ToolRuns (runID),
+    CONSTRAINT chk_toolrunexecutions_state
+        CHECK (
+            state IN (
+                'queued', 'running', 'success', 'failed', 'timed_out',
+                'cancelled', 'indeterminate'
+            )
+        )
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS ToolRunRequests (
     idempotencyKey VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
     requestHash CHAR(64) NOT NULL,

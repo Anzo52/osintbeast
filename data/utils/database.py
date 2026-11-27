@@ -3,6 +3,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 from collections.abc import Mapping
 from importlib.resources import files
 from pathlib import Path
@@ -10,6 +11,8 @@ from typing import Any
 
 from data.utils.storage import (
     IdempotencyConflictError as IdempotencyConflictError,
+)
+from data.utils.storage import (
     MySQLStorage,
     SQLiteStorage,
     Storage,
@@ -362,7 +365,10 @@ def list_tool_runs(
         raise ValueError("tool_name must be a non-empty string")
     if status is not None and (
         not isinstance(status, str)
-        or status not in {"running", "success", "failed", "timed_out"}
+        or status not in {
+            "queued", "running", "success", "failed", "timed_out",
+            "cancelled", "indeterminate",
+        }
     ):
         raise ValueError("Invalid run status")
     if before_run_id is not None:
@@ -374,23 +380,49 @@ def list_tool_runs(
 
     if cursor is None:
         query = (
-            """SELECT runID, toolName, queryText, status, startedAt, finishedAt,
-                      errorText
+            """SELECT ToolRuns.runID, toolName, queryText,
+                      CASE WHEN (
+                          SELECT state FROM ToolRunExecutions
+                          WHERE runID = ToolRuns.runID
+                      ) = 'cancelled' THEN 'failed'
+                      ELSE COALESCE(
+                          (SELECT state FROM ToolRunExecutions
+                           WHERE runID = ToolRuns.runID), ToolRuns.status
+                      ) END, startedAt, finishedAt, errorText
                FROM ToolRuns
                WHERE (? IS NULL OR toolName = ?)
-                 AND (? IS NULL OR status = ?)
-               ORDER BY runID DESC LIMIT ? OFFSET ?"""
+                 AND (? IS NULL OR CASE WHEN (
+                     SELECT state FROM ToolRunExecutions
+                     WHERE runID = ToolRuns.runID
+                 ) = 'cancelled' THEN 'failed' ELSE COALESCE(
+                     (SELECT state FROM ToolRunExecutions
+                      WHERE runID = ToolRuns.runID), ToolRuns.status
+                 ) END = ?)
+               ORDER BY ToolRuns.runID DESC LIMIT ? OFFSET ?"""
         )
         parameters = (tool_name, tool_name, status, status, limit, offset)
     else:
         query = (
-            """SELECT runID, toolName, queryText, status, startedAt, finishedAt,
-                      errorText
+            """SELECT ToolRuns.runID, toolName, queryText,
+                      CASE WHEN (
+                          SELECT state FROM ToolRunExecutions
+                          WHERE runID = ToolRuns.runID
+                      ) = 'cancelled' THEN 'failed'
+                      ELSE COALESCE(
+                          (SELECT state FROM ToolRunExecutions
+                           WHERE runID = ToolRuns.runID), ToolRuns.status
+                      ) END, startedAt, finishedAt, errorText
                FROM ToolRuns
-               WHERE runID < ?
+               WHERE ToolRuns.runID < ?
                  AND (? IS NULL OR toolName = ?)
-                 AND (? IS NULL OR status = ?)
-               ORDER BY runID DESC LIMIT ?"""
+                 AND (? IS NULL OR CASE WHEN (
+                     SELECT state FROM ToolRunExecutions
+                     WHERE runID = ToolRuns.runID
+                 ) = 'cancelled' THEN 'failed' ELSE COALESCE(
+                     (SELECT state FROM ToolRunExecutions
+                      WHERE runID = ToolRuns.runID), ToolRuns.status
+                 ) END = ?)
+               ORDER BY ToolRuns.runID DESC LIMIT ?"""
         )
         parameters = (cursor, tool_name, tool_name, status, status, limit)
     rows = _get_storage().query(query, parameters)
@@ -427,9 +459,16 @@ def get_tool_run(
     """Return a run and its persisted result or error, if it exists."""
     run_id = _validate_run_id(run_id)
     rows = _get_storage().query(
-        """SELECT runID, toolName, queryText, status, resultText, errorText,
-                  startedAt, finishedAt
-           FROM ToolRuns WHERE runID = ?""",
+        """SELECT ToolRuns.runID, toolName, queryText,
+                  CASE WHEN (
+                      SELECT state FROM ToolRunExecutions
+                      WHERE runID = ToolRuns.runID
+                  ) = 'cancelled' THEN 'failed'
+                  ELSE COALESCE(
+                      (SELECT state FROM ToolRunExecutions
+                       WHERE runID = ToolRuns.runID), ToolRuns.status
+                  ) END, resultText, errorText, startedAt, finishedAt
+           FROM ToolRuns WHERE ToolRuns.runID = ?""",
         (run_id,),
     )
     if not rows:
@@ -504,8 +543,15 @@ def export_tool_runs_json(
 
     placeholders = ", ".join("?" for _ in run_ids)
     rows = _get_storage().query(
-        f"""SELECT runID, toolName, queryText, status, startedAt, finishedAt,
-                   resultText, errorText
+        f"""SELECT ToolRuns.runID, toolName, queryText,
+                   CASE WHEN (
+                       SELECT state FROM ToolRunExecutions
+                       WHERE runID = ToolRuns.runID
+                   ) = 'cancelled' THEN 'failed'
+                   ELSE COALESCE(
+                       (SELECT state FROM ToolRunExecutions
+                        WHERE runID = ToolRuns.runID), ToolRuns.status
+                   ) END, startedAt, finishedAt, resultText, errorText
             FROM ToolRuns WHERE runID IN ({placeholders})""",
         tuple(run_ids),
     )
@@ -541,6 +587,145 @@ def start_tool_run(tool_name: str, query_text: str):
     """Create a running record before starting an external check."""
     return _get_storage().start_tool_run(tool_name, query_text)
 
+def ensure_background_run(run_id: int) -> None:
+    _get_storage().ensure_background_run(_validate_run_id(run_id))
+
+def create_background_run(
+    tool_name: str, query_text: str, key_hash: str | None = None,
+    input_fingerprint: str | None = None, owner_token: str | None = None,
+    lease_expires_at: int | None = None,
+) -> tuple[int, bool, int | None]:
+    """Create one background execution and its optional durable idempotency key."""
+    if (key_hash is None) != (input_fingerprint is None):
+        raise ValueError("Idempotency key and input fingerprint must be supplied together.")
+    if owner_token is None or not re.fullmatch(r"[0-9a-f]{32}", owner_token):
+        raise ValueError("Invalid background run owner token.")
+    if not isinstance(lease_expires_at, int) or isinstance(lease_expires_at, bool):
+        raise ValueError("Invalid background run lease.")
+    for value, label in (
+        (key_hash, "idempotency key hash"),
+        (input_fingerprint, "input fingerprint"),
+    ):
+        if value is not None and (
+            not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+        ):
+            raise ValueError(f"Invalid {label}.")
+    return _get_storage().create_background_run(
+        tool_name, query_text, key_hash, input_fingerprint,
+        owner_token, lease_expires_at,
+    )
+
+def get_background_run_by_key(key_hash: str) -> tuple[Any, ...] | None:
+    if not isinstance(key_hash, str) or not re.fullmatch(r"[0-9a-f]{64}", key_hash):
+        raise ValueError("Invalid idempotency key hash.")
+    rows = _get_storage().query(
+        """SELECT runID, toolName, inputFingerprint
+           FROM ToolRunIdempotency WHERE keyHash = ?""",
+        (key_hash,),
+    )
+    return rows[0] if rows else None
+
+
+def claim_background_run(
+    run_id: int, owner_token: str, lease_expires_at: int
+) -> int | None:
+    run_id = _validate_run_id(run_id)
+    if not isinstance(owner_token, str) or not re.fullmatch(r"[0-9a-f]{32}", owner_token):
+        raise ValueError("Invalid background run owner token.")
+    if not isinstance(lease_expires_at, int) or isinstance(lease_expires_at, bool):
+        raise ValueError("Invalid background run lease.")
+    return _get_storage().claim_background_run(run_id, owner_token, lease_expires_at)
+
+def renew_background_run(
+    run_id: int, owner_token: str, attempt: int, now: int, lease_expires_at: int
+) -> bool:
+    run_id = _validate_run_id(run_id)
+    if not isinstance(owner_token, str) or not re.fullmatch(r"[0-9a-f]{32}", owner_token):
+        raise ValueError("Invalid background run owner token.")
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+        raise ValueError("Invalid background run attempt.")
+    if any(not isinstance(value, int) or isinstance(value, bool) for value in (now, lease_expires_at)):
+        raise ValueError("Invalid background run lease.")
+    return _get_storage().renew_background_run(
+        run_id, owner_token, attempt, now, lease_expires_at
+    )
+
+
+def get_background_run_state(run_id: int) -> tuple[Any, ...] | None:
+    return _get_storage().get_background_run_state(_validate_run_id(run_id))
+
+
+def list_background_runs_for_recovery(now: int | None = None) -> list[tuple[Any, ...]]:
+    recovery_time = int(time.time() * 1000) if now is None else now
+    if not isinstance(recovery_time, int) or isinstance(recovery_time, bool):
+        raise ValueError("Recovery time must be an integer.")
+    return _get_storage().list_background_runs_for_recovery(recovery_time)
+
+
+def recover_legacy_background_run(run_id: int, now: int | None = None) -> bool:
+    recovery_time = int(time.time() * 1000) if now is None else now
+    if not isinstance(recovery_time, int) or isinstance(recovery_time, bool):
+        raise ValueError("Recovery time must be an integer.")
+    return _get_storage().recover_legacy_background_run(
+        _validate_run_id(run_id), recovery_time
+    )
+
+
+def finish_background_run(
+    run_id: int, owner_token: str, attempt: int, status: str,
+    result_text: str | None = None, error_text: str | None = None,
+) -> bool:
+    run_id = _validate_run_id(run_id)
+    if not isinstance(owner_token, str) or not re.fullmatch(r"[0-9a-f]{32}", owner_token):
+        raise ValueError("Invalid background run owner token.")
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+        raise ValueError("Invalid background run attempt.")
+    if status not in {"success", "failed", "timed_out", "indeterminate"}:
+        raise ValueError(f"Invalid terminal background run status: {status}")
+    if (status == "success" and (result_text is None or error_text is not None)) or (
+        status != "success" and (error_text is None or result_text is not None)
+    ):
+        raise ValueError("Success requires a result; failures require an error.")
+    return _get_storage().finish_background_run(
+        run_id, owner_token, attempt, status, result_text, error_text
+    )
+
+
+def cancel_background_run(run_id: int) -> bool:
+    return _get_storage().cancel_background_run(_validate_run_id(run_id))
+
+def abandon_queued_background_run(run_id: int, now: int) -> bool:
+    return _get_storage().abandon_queued_background_run(_validate_run_id(run_id), now)
+
+
+def mark_background_run_indeterminate(
+    run_id: int, owner_token: str, attempt: int, now: int | None = None
+) -> bool:
+    run_id = _validate_run_id(run_id)
+    if not isinstance(owner_token, str) or not re.fullmatch(r"[0-9a-f]{32}", owner_token):
+        raise ValueError("Invalid background run owner token.")
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+        raise ValueError("Invalid background run attempt.")
+    recovery_time = int(time.time() * 1000) if now is None else now
+    return _get_storage().mark_background_run_indeterminate(
+        run_id, owner_token, attempt, recovery_time
+    )
+
+def recover_expired_background_run(
+    run_id: int, owner_token: str, attempt: int, now: int, can_retry: bool
+) -> bool:
+    run_id = _validate_run_id(run_id)
+    if not isinstance(owner_token, str) or not re.fullmatch(r"[0-9a-f]{32}", owner_token):
+        raise ValueError("Invalid background run owner token.")
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+        raise ValueError("Invalid background run attempt.")
+    if not isinstance(now, int) or isinstance(now, bool):
+        raise ValueError("Invalid background run recovery time.")
+    if not isinstance(can_retry, bool):
+        raise ValueError("Invalid background run recovery policy.")
+    return _get_storage().recover_expired_background_run(
+        run_id, owner_token, attempt, now, can_retry
+    )
 
 def _validate_idempotency_key(idempotency_key: str, request_hash: str) -> None:
     if (
@@ -597,8 +782,16 @@ def get_tool_run_status(run_id: int) -> dict[str, Any] | None:
     """Return non-sensitive status fields for one run."""
     run_id = _validate_run_id(run_id)
     rows = _get_storage().query(
-        """SELECT runID, toolName, status, startedAt, finishedAt
-           FROM ToolRuns WHERE runID = ?""",
+        """SELECT ToolRuns.runID, toolName,
+                  CASE WHEN (
+                      SELECT state FROM ToolRunExecutions
+                      WHERE runID = ToolRuns.runID
+                  ) = 'cancelled' THEN 'failed'
+                  ELSE COALESCE(
+                      (SELECT state FROM ToolRunExecutions
+                       WHERE runID = ToolRuns.runID), ToolRuns.status
+                  ) END, startedAt, finishedAt
+           FROM ToolRuns WHERE ToolRuns.runID = ?""",
         (run_id,),
     )
     if not rows:

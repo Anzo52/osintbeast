@@ -1,7 +1,7 @@
 import http.client
 import json
-import sqlite3
 import socket
+import sqlite3
 import threading
 import time
 import uuid
@@ -13,15 +13,18 @@ from urllib.request import Request, urlopen
 import pytest
 
 import background_runs
-import data.utils.database as database
 import web_ui
+from data.utils import database
 from sherlock_integration import validate_username
 
 OPERATOR_TOKEN = "o" * 40
 VIEWER_TOKEN = "v" * 40
 
 
-def mocked_worker(connection, tool_name, query, max_output_bytes, deadline=None):
+def mocked_worker(
+    connection, tool_name, query, max_output_bytes, deadline=None,
+    timed_out=None, spool_context=None,
+):
     if query == "slow":
         time.sleep(10)
     elif query == "alice":
@@ -39,7 +42,9 @@ def mocked_worker(connection, tool_name, query, max_output_bytes, deadline=None)
 
 
 @pytest.fixture(autouse=True)
-def run_service(monkeypatch):
+def run_service(monkeypatch, tmp_path):
+    monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "web.db"))
+    database.setup_database()
     monkeypatch.setattr(background_runs, "_worker", mocked_worker)
     service = background_runs.BackgroundRuns()
     monkeypatch.setattr(web_ui, "BackgroundRuns", lambda: service)
@@ -186,7 +191,7 @@ def test_authorized_run_and_persisted_result_review(tmp_path, monkeypatch):
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
             status, detail = _request(f"{base_url}/api/runs/{launched['id']}")
-            if detail["status"] != "running":
+            if status == 200 and detail["status"] != "running":
                 break
             time.sleep(0.01)
 
@@ -265,10 +270,10 @@ def test_pending_completion_recovers_after_persistence_failure(
     tmp_path, monkeypatch, caplog
 ):
     server, base_url = _server(tmp_path, monkeypatch, Mock(return_value="output"))
-    finish = database.finish_tool_run
+    finish = database.finish_background_run
     monkeypatch.setattr(
         database,
-        "finish_tool_run",
+        "finish_background_run",
         Mock(side_effect=sqlite3.OperationalError("database unavailable")),
     )
     try:
@@ -277,20 +282,23 @@ def test_pending_completion_recovers_after_persistence_failure(
             {"tool": "sherlock", "input": "other", "authorized": True},
         )
         assert status == 202
+        run_service = server.run_service
         deadline = time.monotonic() + 2
-        while time.monotonic() < deadline and not caplog.records:
+        while time.monotonic() < deadline:
+            if any(run_service._spool_dir.glob(f"run-{launched['id']}-*.json")):
+                break
             time.sleep(0.01)
-        assert "Could not persist background run outcome" in caplog.text
+        assert any(run_service._spool_dir.glob(f"run-{launched['id']}-*.json"))
 
         status, _ = _request(f"{base_url}/api/runs/{launched['id']}")
         assert status == 503
-        monkeypatch.setattr(database, "finish_tool_run", finish)
+        monkeypatch.setattr(database, "finish_background_run", finish)
         status, detail = _request(f"{base_url}/api/runs/{launched['id']}")
         assert status == 200
         assert detail["status"] == "success"
         assert detail["result"] == "output"
     finally:
-        monkeypatch.setattr(database, "finish_tool_run", finish)
+        monkeypatch.setattr(database, "finish_background_run", finish)
         server.shutdown()
         server.server_close()
 
@@ -651,7 +659,10 @@ def test_browser_persists_unacknowledged_key_without_storing_input():
     assert 'sessionStorage.setItem(pendingKeyName, JSON.stringify(pending))' in page
     assert 'sessionStorage.getItem(pendingKeyName)' in page
     assert 'crypto.subtle.digest("SHA-256", bytes)' in page
-    assert 'input: queryInput.value' in page
+    assert 'const submittedInput = queryInput.value;' in page
+    pending = page.split("pending = {", 1)[1].split("\n          };", 1)[0]
+    assert all(field in pending for field in ("key:", "tool:", "fingerprint:"))
+    assert "input:" not in pending
     assert page.index("clearPendingKey();", page.index('const run = await request("/api/runs"')) < page.index("await loadRun(run.id);")
 
 
@@ -711,10 +722,9 @@ def test_browser_capacity_rejection_and_recovery(tmp_path, monkeypatch, run_serv
         service = server.run_service
         assert service.cancel(first["id"])
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            if service.status(first["id"])["status"] != "running":
-                break
+        while time.monotonic() < deadline and first["id"] in service._jobs:
             time.sleep(0.01)
+        assert first["id"] not in service._jobs
         status, third = _request(f"{base_url}/api/runs", payload)
         assert status == 202
         assert third["id"] not in (first["id"], second["id"])
@@ -727,7 +737,7 @@ def test_browser_exposes_run_id_when_startup_failure_cannot_be_saved(tmp_path, m
     server, base_url = _server(tmp_path, monkeypatch, Mock())
     run_service = server.run_service
     run_id = database.start_tool_run("sherlock", "alice")
-    run_service._pending[run_id] = ("failed", "Could not start background worker.")
+    database.ensure_background_run(run_id)
     monkeypatch.setattr(
         run_service, "submit", Mock(side_effect=background_runs.StartupPersistenceError(run_id))
     )
@@ -738,9 +748,6 @@ def test_browser_exposes_run_id_when_startup_failure_cannot_be_saved(tmp_path, m
         )
         assert status == 503
         assert body["id"] == run_id
-        status, detail = _request(f"{base_url}/api/runs/{run_id}")
-        assert status == 200
-        assert detail["error"] == "Could not start background worker."
     finally:
         server.shutdown()
         server.server_close()

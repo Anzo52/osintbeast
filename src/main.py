@@ -324,7 +324,8 @@ def run_history_menu():
         elif choice == 1:
             tool_value = input("Tool name (blank for any): ").strip()
             status_value = input(
-                "Status (running, success, failed, timed_out; blank for any): "
+                "Status (queued, running, success, failed, timed_out, "
+                "indeterminate; blank for any): "
             ).strip()
             runs = show_run_history(tool_value or None, status_value or None)
             if runs is not None:

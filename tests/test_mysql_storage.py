@@ -7,19 +7,22 @@ from unittest.mock import Mock
 import pytest
 from sqlalchemy import create_engine
 
-import data.utils.database as database
+from data.utils import database
 from data.utils.storage import MySQLStorage, StorageError
 
 
 class FakeResult:
     lastrowid = 41
-    rowcount = 1
 
-    def __init__(self, rows=None):
+    def __init__(self, rows=None, rowcount=1):
         self.rows = rows or [("platform",), ("platformID",)]
+        self.rowcount = rowcount
 
     def fetchall(self):
         return self.rows
+
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
 
     def scalar_one(self):
         return self.rows[0][0]
@@ -32,11 +35,41 @@ class FakeConnection:
         self.read_only = False
         self.platforms = ["original"]
         self.sql_mode = ""
+        self.execution_state = "running"
+        self.execution_owner = "a" * 32
+        self.execution_attempt = 1
+        self.result_text = None
+        self.error_text = None
+        self.result_insertions = 0
 
     def exec_driver_sql(self, statement, parameters=()):
         self.statements.append((statement, parameters))
         if self.fail_on and self.fail_on in statement:
             raise FakeSQLAlchemyError("database unavailable")
+        if "UPDATE ToolRunExecutions" in statement and "SET state = %s" in statement:
+            status, _, owner_token, attempt = parameters
+            if (
+                self.execution_state == "running"
+                and self.execution_owner == owner_token
+                and self.execution_attempt == attempt
+            ):
+                self.execution_state = status
+                self.execution_owner = None
+                return FakeResult(rowcount=1)
+            return FakeResult(rowcount=0)
+        if "SELECT state FROM ToolRunExecutions" in statement:
+            return FakeResult([(self.execution_state,)])
+        if statement.startswith("SELECT resultText, errorText FROM ToolRuns"):
+            return FakeResult([(self.result_text, self.error_text)])
+        if statement.startswith("UPDATE ToolRuns SET status = %s"):
+            if len(parameters) == 4:
+                _, self.result_text, self.error_text, _ = parameters
+            return FakeResult()
+        if statement.startswith("INSERT INTO ToolResults"):
+            self.result_insertions += 1
+            return FakeResult()
+        if "SET leaseExpiresAt = %s" in statement:
+            return FakeResult(rowcount=1)
         if statement == "SELECT @@SESSION.sql_mode":
             return FakeResult([(self.sql_mode,)])
         if statement == "START TRANSACTION READ ONLY":
@@ -62,6 +95,7 @@ class FakeEngine:
         self.connection = FakeConnection()
         self.transaction_errors = []
         self.commits = 0
+        self.commit_error_after_commit = None
 
     def begin(self):
         return self.connection_context(commit=True)
@@ -81,6 +115,10 @@ class FakeEngine:
                     engine.transaction_errors.append(exc_value)
                 elif commit:
                     engine.commits += 1
+                    if engine.commit_error_after_commit is not None:
+                        error = engine.commit_error_after_commit
+                        engine.commit_error_after_commit = None
+                        raise error
                 engine.connection.read_only = False
                 return False
 
@@ -141,6 +179,44 @@ def test_mysql_core_operations_use_bound_values_and_preserve_transactional_flow(
         for sql, params in statements
     )
     assert any("INSERT INTO ToolResults" in sql for sql, _ in statements)
+
+
+def test_mysql_background_lease_updates_are_owner_and_expiry_fenced(mysql_storage):
+    storage, engine = mysql_storage
+    assert storage.renew_background_run(
+        41, "a" * 32, 3, 10_000, 20_000
+    )
+    statement, parameters = engine.connection.statements[-1]
+    assert "state = 'running'" in statement
+    assert "ownerToken = %s AND attempt = %s" in statement
+    assert "leaseExpiresAt > %s AND leaseExpiresAt < %s" in statement
+    assert parameters == (20_000, 41, "a" * 32, 3, 10_000, 20_000)
+
+    assert storage.recover_expired_background_run(
+        41, "a" * 32, 3, 15_000, True
+    )
+    statement, parameters = engine.connection.statements[-1]
+    assert "SET state = 'queued'" in statement
+    assert "ownerToken = %s AND attempt = %s" in statement
+    assert parameters == (41, "a" * 32, 3, 15_000)
+
+
+def test_mysql_background_result_retry_after_lost_commit_ack_is_idempotent(
+    mysql_storage,
+):
+    storage, engine = mysql_storage
+    engine.commit_error_after_commit = FakeSQLAlchemyError("commit acknowledgement lost")
+
+    with pytest.raises(StorageError, match="acknowledgement lost"):
+        storage.finish_background_run(
+            41, "a" * 32, 1, "success", "durable result", None
+        )
+    assert storage.finish_background_run(
+        41, "a" * 32, 1, "success", "durable result", None
+    )
+
+    assert engine.connection.result_insertions == 1
+    assert engine.connection.result_text == "durable result"
 
 
 def test_mysql_query_uses_a_read_only_transaction(mysql_storage):
