@@ -332,53 +332,65 @@ status and saved output from `GET /api/runs/<run_id>` and
 
 ### Background run service
 
-`background_runs.BackgroundRuns` is a shared service for web handlers, not a
-web server. The browser interface below uses one instance. Initialize
-the database first and create one service per application
-process. `submit(tool_name, query)` validates the input, records a run and
-returns the persisted record (or `None`), and `cancel(run_id)` requests
-cancellation and returns whether the run was active. Poll status for the
-terminal outcome. Background cancellation is reported as `cancelled`; legacy
-`ToolRuns.status` remains `failed` internally for compatibility with existing
-database constraints.
+`background_runs.BackgroundRuns` is a service for web handlers, not a web
+server. Initialize the database first and create one service per application
+process. `submit(tool_name, query, idempotency_key=None)` validates and
+persists a run, then returns its integer run ID. `cancel(run_id)` requests
+cancellation and returns whether the transition won; the execution record
+stores `cancelled`, while the legacy `ToolRuns.status` projection remains
+`failed` for schema compatibility.
 
 Configure `RunLimits(max_concurrent=2, timeout_seconds=300,
 max_query_chars=254, max_output_bytes=1000000)` when constructing the service.
-There is no waiting queue: `CapacityError` explicitly rejects submissions when
-all slots are occupied. Execution occurs in child processes, which are stopped
-on timeout or cancellation; each worker also monitors its deadline and its
-parent process so it exits if the parent dies. On POSIX, the worker's process
-group is killed as well; on Windows, this watchdog stops only the worker.
-Tool failures and unexpected worker exits are recorded as failures. Call
-`close()` during orderly application shutdown.
-Each run follows `queued -> running -> success|failed|timed_out|cancelled`.
-Expired executions without a durable outcome become `indeterminate`; this is
-an explicit unknown result, not a successful result or an automatic rerun.
-Database transitions are conditional and fenced by an attempt number and
-owner token, so late workers and cancellation cannot overwrite a terminal
-outcome. Recovery is safe to run on multiple instances.
+Execution occurs in child processes, which are stopped on timeout or
+cancellation; each worker also monitors its deadline and parent process so it
+exits if the service process dies. On POSIX, the worker's process group is
+killed as well; on Windows, the watchdog stops only the worker. Tool failures
+and unexpected worker exits are recorded as failures. Call `close()` during
+orderly application shutdown.
+
+The lifecycle is `queued -> running -> success|failed|timed_out|cancelled`,
+with `indeterminate` for an execution whose outcome cannot be established.
+An expired ordinary run can transition atomically back to `queued` and be
+claimed as a higher-numbered attempt. A run with redacted sensitive input
+cannot be relaunched from its database record; if no durable outcome exists,
+it becomes `indeterminate`. Leases are renewed only by the current
+run/attempt/owner while the run is still active. Recovery and terminal writes
+use conditional database updates, so concurrent recovery is arbitrated by the
+database and stale workers cannot overwrite a newer attempt or terminal state.
 
 Workers atomically write and fsync a private outcome file before reporting
-completion. If the database is unavailable, the file remains for bounded
-exponential-backoff retries and is replayed after restart. By default, files
-are stored beside the configured database path in
-`osintbeast-run-spool`; set `OSINTBEAST_RUN_SPOOL_DIR` to use another durable
-location. Multi-host deployments must point every instance at the same durable
-shared spool. If the worker exits before recording an outcome, no result can
-be reconstructed; after its lease expires, the run is marked `indeterminate`
-and the same idempotency key continues to refer to that run.
+completion. If the database is unavailable, the file remains for retries with
+increasing backoff (up to 30 seconds) and is replayed after restart. Files are
+mode 0600 in a mode 0700 directory. By default, they are stored beside the
+configured database path in `osintbeast-run-spool`; set
+`OSINTBEAST_RUN_SPOOL_DIR` to use another durable location. Multi-host
+deployments must use a shared filesystem that provides atomic rename,
+visibility across hosts, durable fsync, and restrictive permissions under the
+service identity. A worker outcome that was never durably spooled cannot be
+reconstructed from volatile memory. Ordinary input can be executed again
+after lease expiry; this is at-least-once execution, not outcome recovery.
+Sensitive Holehe queries are not persisted in plaintext or encrypted: if their
+worker dies before spooling an outcome, the run is marked `indeterminate`
+rather than rerun with unknown input. A same-key retry returns that existing
+run; it does not silently authorize a new execution.
 
-Background idempotency uses a separate `ToolRunIdempotency` table with a
-unique SHA-256 key hash and a keyed input fingerprint. The key association and
-queued run are inserted in one transaction, so SQLite serialization and
-MySQL's unique constraint resolve concurrent submissions across instances.
-The existing `ToolRunRequests` path remains separate for synchronous request
-idempotency. Background keys are retained durably rather than evicted. The
-browser keeps only a pending key, tool name, and salted input fingerprint in
+Background idempotency uses `ToolRunIdempotency`, separate from synchronous
+`ToolRunRequests`. A unique SHA-256 key hash and input fingerprint bind each
+background key to one tool and normalized input. The key association, run, and
+initial execution ownership are committed in one transaction; SQLite
+serialization and MySQL uniqueness resolve concurrent submissions across
+instances. Keys are retained durably. A successful background transition and
+its `ToolResults` insertion share one transaction; retries recognize the
+committed state and do not insert another result. Thus submission is
+idempotent per key/input and result persistence is idempotent, but execution
+may happen more than once after lease recovery and is not exactly-once.
+
+The browser keeps a pending key, tool name, and salted input fingerprint in
 session storage; it captures submitted values before hashing, clears the key
-when the form changes, and retains it after an unacknowledged request.
-If starting the supervisor fails and recording that failure also fails,
-`submit` raises `StartupPersistenceError` with a `run_id` attribute; its
+when the form changes, and retains it after an unacknowledged request. If
+starting the supervisor fails and recording that failure also fails,
+`submit` raises `StartupPersistenceError` with a `run_id` attribute; the
 failure outcome is retained in the durable spool and retried after database
 access returns. The browser API includes that ID in its 503 response.
 

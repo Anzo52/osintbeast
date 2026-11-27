@@ -8,8 +8,10 @@ import math
 import multiprocessing
 import multiprocessing.connection
 import os
+import re
 import secrets
 import signal
+import stat
 import tempfile
 import threading
 import time
@@ -31,6 +33,8 @@ from tool_runs import redact_sensitive_output
 _LOG = logging.getLogger(__name__)
 _SHUTDOWN_TIMEOUT_SECONDS = 5
 _LEASE_GRACE_SECONDS = 30
+_LEASE_RENEW_INTERVAL_SECONDS = 5
+_SPOOL_FILENAME = re.compile(r"run-([1-9][0-9]*)-([1-9][0-9]*)-([0-9a-f]{32})\.json\Z")
 _WALL_TIME = time.time
 _TOOLS = {
     "holehe": (validate_email, run_holehe),
@@ -47,10 +51,12 @@ class CapacityError(RuntimeError):
 class StartupPersistenceError(RuntimeError):
     """A startup failure could not be recorded; run_id can be used to retry."""
 
-    def __init__(self, run_id, startup_error=None):
+    def __init__(self, run_id, startup_error=None, persistence_error=None):
         message = "Could not persist background run startup failure."
         if startup_error is not None:
             message += f" {startup_error}"
+        if persistence_error is not None:
+            message += f" Persistence also failed: {persistence_error}"
         super().__init__(message)
         self.run_id = run_id
 
@@ -90,12 +96,23 @@ def _watch_parent(parent_sentinel, deadline, timed_out):
 
 
 def _write_spooled_outcome(spool_dir, run_id, attempt, owner_token, status, value):
+    if (
+        not isinstance(run_id, int) or isinstance(run_id, bool)
+        or not 1 <= run_id <= database.SQLITE_MAX_INTEGER
+        or not isinstance(attempt, int) or isinstance(attempt, bool)
+        or not 1 <= attempt <= (1 << 31) - 1
+        or not isinstance(owner_token, str)
+        or not re.fullmatch(r"[0-9a-f]{32}", owner_token)
+        or not isinstance(status, str)
+        or status not in {"success", "failed", "timed_out"}
+        or not isinstance(value, str)
+    ):
+        raise ValueError("Invalid background outcome spool record.")
     directory = Path(spool_dir)
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    try:
-        directory.chmod(0o700)
-    except OSError:
-        _LOG.exception("Could not restrict background outcome spool permissions")
+    if directory.is_symlink() or not directory.is_dir():
+        raise OSError("Background outcome spool must be a real directory.")
+    directory.chmod(0o700)
     filename = f"run-{run_id}-{attempt}-{owner_token}.json"
     destination = directory / filename
     descriptor, temporary = tempfile.mkstemp(prefix=".outcome-", dir=directory)
@@ -202,6 +219,19 @@ def _stop_process(process):
     process.join()
 
 
+def _now_ms():
+    return int(_WALL_TIME() * 1000)
+
+
+def _unique_json_object(pairs):
+    record = {}
+    for key, value in pairs:
+        if key in record:
+            raise ValueError(f"Duplicate key in background outcome spool: {key}")
+        record[key] = value
+    return record
+
+
 class BackgroundRuns:
     """A per-process service backed by durable run state and outcome files."""
 
@@ -209,6 +239,7 @@ class BackgroundRuns:
         self.limits = limits
         self._context = multiprocessing.get_context("spawn")
         self._lock = threading.Lock()
+        self._idempotency_lock = threading.Lock()
         self._jobs = {}
         self._launching = set()
         self._reservations = 0
@@ -217,12 +248,13 @@ class BackgroundRuns:
                 "OSINTBEAST_RUN_SPOOL_DIR",
                 str(Path(database.DB_FILE).resolve().parent / "osintbeast-run-spool"),
             )
-        ).expanduser().resolve()
+        ).expanduser().absolute()
         self._spool_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        try:
-            self._spool_dir.chmod(0o700)
-        except OSError:
-            _LOG.exception("Could not restrict background outcome spool permissions")
+        if self._spool_dir.is_symlink() or not self._spool_dir.is_dir():
+            raise OSError("Background outcome spool must be a real directory.")
+        self._spool_dir.chmod(0o700)
+        if os.name == "posix" and stat.S_IMODE(self._spool_dir.stat().st_mode) != 0o700:
+            raise OSError("Could not restrict background outcome spool permissions.")
         self._retry_wakeup = threading.Event()
         self._retry_stop = threading.Event()
         self._retry_thread = None
@@ -231,6 +263,14 @@ class BackgroundRuns:
         self._schedule_retry()
 
     def submit(
+        self, tool_name: str, query: str, idempotency_key: str | None = None
+    ) -> int:
+        if idempotency_key is None:
+            return self._submit(tool_name, query, idempotency_key)
+        with self._idempotency_lock:
+            return self._submit(tool_name, query, idempotency_key)
+
+    def _submit(
         self, tool_name: str, query: str, idempotency_key: str | None = None
     ) -> int:
         if not isinstance(tool_name, str) or tool_name not in _TOOLS:
@@ -274,47 +314,65 @@ class BackgroundRuns:
                 raise CapacityError("Background run capacity reached.")
             self._reservations += 1
         try:
+            owner_token = secrets.token_hex(16)
+            lease_expires_at = _now_ms() + int(
+                (self.limits.timeout_seconds + _LEASE_GRACE_SECONDS) * 1000
+            )
             try:
-                run_id, created = database.create_background_run(
+                run_id, created, attempt = database.create_background_run(
                     tool_name,
                     "[redacted]" if tool_name == "holehe" else query,
                     key_hash,
                     fingerprint,
+                    owner_token,
+                    lease_expires_at,
                 )
             except database.IdempotencyConflictError as exc:
                 raise IdempotencyConflict(str(exc)) from exc
             if not created:
                 self._recover_run(run_id, query=query)
                 return run_id
-            self._launch(run_id, tool_name, query, reserved=True)
+            self._launch(
+                run_id, tool_name, query, reserved=True, owner_token=owner_token,
+                attempt=attempt, lease_expires_at=lease_expires_at,
+            )
             return run_id
         finally:
             with self._lock:
                 self._reservations -= 1
 
     def _active_count(self):
-        return len(self._jobs) + len(self._launching) + self._reservations
+        active_jobs = sum(not job[2].is_set() for job in self._jobs.values())
+        return active_jobs + len(self._launching) + self._reservations
 
-    def _launch(self, run_id, tool_name, query, *, reserved=False):
+    def _launch(
+        self, run_id, tool_name, query, *, reserved=False, owner_token=None,
+        attempt=None, lease_expires_at=None,
+    ):
         with self._lock:
             if self._closed or run_id in self._jobs or run_id in self._launching:
                 return False
             if not reserved and self._active_count() >= self.limits.max_concurrent:
                 return False
             self._launching.add(run_id)
-        owner_token = secrets.token_hex(16)
-        attempt = None
         try:
-            lease = int(_WALL_TIME() + self.limits.timeout_seconds + _LEASE_GRACE_SECONDS)
-            attempt = database.claim_background_run(run_id, owner_token, lease)
             if attempt is None:
-                return False
+                owner_token = secrets.token_hex(16)
+                lease_expires_at = _now_ms() + int(
+                    (self.limits.timeout_seconds + _LEASE_GRACE_SECONDS) * 1000
+                )
+                attempt = database.claim_background_run(
+                    run_id, owner_token, lease_expires_at
+                )
+                if attempt is None:
+                    return False
             cancel = threading.Event()
             completed = threading.Event()
             try:
                 thread = threading.Thread(
                     target=self._supervise,
-                    args=(run_id, tool_name, query, cancel, completed, owner_token, attempt),
+                    args=(run_id, tool_name, query, cancel, completed, owner_token,
+                          attempt, lease_expires_at),
                     name=f"tool-run-{run_id}",
                     daemon=True,
                 )
@@ -352,7 +410,7 @@ class BackgroundRuns:
                 run_id, owner_token, attempt, status, error_text=value
             )
             if persisted:
-                path.unlink(missing_ok=True)
+                self._persist_spool_file(path)
             else:
                 self._schedule_retry()
         except Exception as persistence_error:
@@ -360,8 +418,8 @@ class BackgroundRuns:
             self._schedule_retry()
             if isinstance(startup_error, Exception):
                 raise StartupPersistenceError(
-                    run_id, startup_error
-                ) from persistence_error
+                    run_id, startup_error, persistence_error
+                ) from startup_error
         if isinstance(startup_error, BaseException) and not isinstance(
             startup_error, Exception
         ):
@@ -373,9 +431,9 @@ class BackgroundRuns:
 
     def _schedule_retry(self):
         with self._lock:
+            self._retry_wakeup.set()
             if self._retry_thread is not None and self._retry_thread.is_alive():
                 return
-            self._retry_wakeup.set()
             try:
                 thread = threading.Thread(
                     target=self._retry_pending,
@@ -389,29 +447,75 @@ class BackgroundRuns:
                 _LOG.exception("Could not start background recovery worker")
 
     def _read_spool(self, path):
+        match = _SPOOL_FILENAME.fullmatch(path.name)
+        if match is None:
+            raise ValueError(f"Invalid background outcome filename: {path.name}")
+        filename_run_id, filename_attempt = int(match[1]), int(match[2])
+        filename_owner = match[3]
+        directory_fd = os.open(
+            self._spool_dir,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
         try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-            if (
-                not isinstance(record, dict)
-                or not isinstance(record.get("run_id"), int)
-                or not isinstance(record.get("attempt"), int)
-                or not isinstance(record.get("owner_token"), str)
-                or not isinstance(record.get("value"), str)
-                or record.get("status") not in {"success", "failed", "timed_out"}
-                or record["attempt"] < 1
-                or not len(record["owner_token"]) == 32
-            ):
-                raise ValueError("Invalid background outcome spool record.")
-            return record
-        except FileNotFoundError:
-            return None
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
-            _LOG.exception("Could not read background outcome spool file %s", path)
-            raise
+            descriptor = os.open(
+                path.name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+            try:
+                details = os.fstat(descriptor)
+                path_details = os.stat(
+                    path.name, dir_fd=directory_fd, follow_symlinks=False
+                )
+                if not stat.S_ISREG(details.st_mode):
+                    raise ValueError("Background outcome spool entry is not a regular file.")
+                if (
+                    not stat.S_ISREG(path_details.st_mode)
+                    or (details.st_dev, details.st_ino)
+                    != (path_details.st_dev, path_details.st_ino)
+                ):
+                    raise ValueError("Background outcome spool entry changed while opening.")
+                if os.name == "posix" and stat.S_IMODE(details.st_mode) & 0o077:
+                    raise ValueError("Background outcome spool file permissions are too broad.")
+                if details.st_size > self.limits.max_output_bytes * 6 + 4096:
+                    raise ValueError("Background outcome spool file is too large.")
+                with os.fdopen(descriptor, "r", encoding="utf-8") as stream:
+                    descriptor = -1
+                    record = json.load(stream, object_pairs_hook=_unique_json_object)
+                    identity = (details.st_dev, details.st_ino)
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+        finally:
+            os.close(directory_fd)
+        if (
+            not isinstance(record, dict)
+            or set(record) != {"run_id", "attempt", "owner_token", "status", "value"}
+            or isinstance(record.get("run_id"), bool)
+            or not isinstance(record.get("run_id"), int)
+            or isinstance(record.get("attempt"), bool)
+            or not isinstance(record.get("attempt"), int)
+            or not isinstance(record.get("owner_token"), str)
+            or not re.fullmatch(r"[0-9a-f]{32}", record["owner_token"])
+            or not isinstance(record.get("value"), str)
+            or not isinstance(record.get("status"), str)
+            or record["status"] not in {"success", "failed", "timed_out"}
+            or not 1 <= record["run_id"] <= database.SQLITE_MAX_INTEGER
+            or not 1 <= record["attempt"] <= (1 << 31) - 1
+            or len(record["value"].encode("utf-8")) > self.limits.max_output_bytes
+            or (
+                record["run_id"],
+                record["attempt"],
+                record["owner_token"],
+            ) != (filename_run_id, filename_attempt, filename_owner)
+        ):
+            raise ValueError("Invalid or mismatched background outcome spool record.")
+        return record, identity
 
     def _persist_spool_file(self, path):
-        record = self._read_spool(path)
-        if record is None:
+        try:
+            record, identity = self._read_spool(path)
+        except FileNotFoundError:
             return True
         persisted = database.finish_background_run(
             record["run_id"],
@@ -423,29 +527,52 @@ class BackgroundRuns:
         )
         if not persisted:
             state = database.get_background_run_state(record["run_id"])
-            if state is not None and (
-                state[0] in {"queued", "running"}
-                and state[1:3] == (record["attempt"], record["owner_token"])
-            ):
+            if state is None or state[0] not in {"success", "failed", "timed_out"}:
                 return False
-        path.unlink(missing_ok=True)
+            row = database.get_tool_run(record["run_id"])
+            if row is None or (
+                state[0],
+                row[4] if state[0] == "success" else row[5],
+            ) != (record["status"], record["value"]):
+                return False
+        directory_fd = os.open(
+            self._spool_dir,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+        try:
+            try:
+                current = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return True
+            if not stat.S_ISREG(current.st_mode):
+                raise ValueError("Refusing to delete a non-regular spool entry.")
+            if (current.st_dev, current.st_ino) != identity:
+                raise ValueError("Refusing to delete a replaced spool outcome.")
+            os.unlink(path.name, dir_fd=directory_fd)
+        finally:
+            os.close(directory_fd)
         return True
 
     def _process_spooled_outcomes(self, run_id=None):
         paths = sorted(self._spool_dir.glob("run-*.json"))
+        persistence_error = None
         for path in paths:
             if run_id is not None and not path.name.startswith(f"run-{run_id}-"):
                 continue
             try:
-                if not self._persist_spool_file(path):
-                    raise RuntimeError("Could not persist background run outcome.")
-            except Exception:
+                self._persist_spool_file(path)
+            except ValueError:
+                _LOG.warning(
+                    "Rejected invalid background outcome spool %s", path.name,
+                    exc_info=True,
+                )
+            except Exception as exc:
                 _LOG.warning(
                     "Could not retry persistence for background outcome %s", path.name,
                     exc_info=True,
                 )
-                self._schedule_retry()
-                raise
+                persistence_error = persistence_error or exc
+        return persistence_error is not None
 
     def _recover_run(self, run_id, *, query=None):
         self._process_spooled_outcomes(run_id)
@@ -458,19 +585,27 @@ class BackgroundRuns:
                 self._launch(run_id, row[1], query)
         elif (
             state[0] == "running" and state[3] is not None
-            and state[3] <= int(_WALL_TIME())
+            and state[3] <= _now_ms()
         ):
             self._recover_expired_run(run_id, state)
 
     def _recover_expired_run(self, run_id, state):
-        self._process_spooled_outcomes(run_id)
+        if self._process_spooled_outcomes(run_id):
+            return
         current = database.get_background_run_state(run_id)
         if current is None or current[0] != "running":
             return
-        if current[3] is not None and current[3] <= int(_WALL_TIME()):
-            database.mark_background_run_indeterminate(
-                run_id, current[2], current[1], int(_WALL_TIME())
+        if current[3] is not None and current[3] <= _now_ms():
+            row = database.get_tool_run(run_id)
+            if row is None:
+                return
+            can_retry = row[1] != "holehe" and row[2] != "[redacted]"
+            changed = database.recover_expired_background_run(
+                run_id, current[2], current[1], _now_ms(), can_retry
             )
+            if changed and can_retry:
+                if not self._launch(run_id, row[1], row[2]):
+                    self._schedule_retry()
 
     def _recover(self):
         self._process_spooled_outcomes()
@@ -478,8 +613,9 @@ class BackgroundRuns:
             run_id, state, attempt, owner_token, _lease, tool_name, query = row
             if state == "queued":
                 if query == "[redacted]":
-                    database.abandon_queued_background_run(run_id, int(_WALL_TIME()))
-                elif not self._launch(run_id, tool_name, query):
+                    database.abandon_queued_background_run(run_id, _now_ms())
+                    continue
+                if not self._launch(run_id, tool_name, query):
                     self._schedule_retry()
             else:
                 self._recover_expired_run(
@@ -505,7 +641,8 @@ class BackgroundRuns:
             job = self._jobs.get(run_id)
             if job is not None and job[2].is_set():
                 return False
-        self._process_spooled_outcomes(run_id)
+        if self._process_spooled_outcomes(run_id):
+            return False
         if not database.cancel_background_run(run_id):
             return False
         with self._lock:
@@ -522,7 +659,6 @@ class BackgroundRuns:
             jobs = list(self._jobs.items())
         for run_id, job in jobs:
             try:
-                self._process_spooled_outcomes(run_id)
                 cancelled = (
                     not job[2].is_set() and database.cancel_background_run(run_id)
                 )
@@ -551,23 +687,30 @@ class BackgroundRuns:
 
     def _supervise(
         self, run_id, tool_name, query, cancel, completed,
-        owner_token=None, attempt=None,
+        owner_token=None, attempt=None, lease_expires_at=None,
     ):
         process = None
         receiver = sender = None
         timed_out = self._context.Event()
         status, value = "failed", "Background worker failed."
         payload_received = False
+        ownership_lost = False
         if owner_token is None:
             owner_token = secrets.token_hex(16)
             database.ensure_background_run(run_id)
+            lease_expires_at = _now_ms() + int(
+                (self.limits.timeout_seconds + _LEASE_GRACE_SECONDS) * 1000
+            )
             attempt = database.claim_background_run(
-                run_id,
-                owner_token,
-                int(_WALL_TIME() + self.limits.timeout_seconds + _LEASE_GRACE_SECONDS),
+                run_id, owner_token, lease_expires_at,
             )
             if attempt is None:
                 return
+        renew_interval = min(
+            _LEASE_RENEW_INTERVAL_SECONDS,
+            max(0.1, self.limits.timeout_seconds / 3),
+        )
+        next_renewal = time.monotonic() + renew_interval
         try:
             if not cancel.is_set() and not self._closed:
                 receiver, sender = self._context.Pipe(duplex=False)
@@ -597,6 +740,30 @@ class BackgroundRuns:
                         except Exception:
                             _LOG.debug("Could not check background run state", exc_info=True)
                         next_state_check = now + 0.25
+                    if now >= next_renewal:
+                        new_expiry = _now_ms() + int(
+                            (self.limits.timeout_seconds + _LEASE_GRACE_SECONDS) * 1000
+                        )
+                        try:
+                            renewed = database.renew_background_run(
+                                run_id, owner_token, attempt, _now_ms(), new_expiry
+                            )
+                        except Exception:
+                            renewed = False
+                            _LOG.warning(
+                                "Could not renew background run lease for %s",
+                                run_id,
+                                exc_info=True,
+                            )
+                        if renewed:
+                            lease_expires_at = new_expiry
+                            next_renewal = now + renew_interval
+                        elif _now_ms() >= lease_expires_at:
+                            ownership_lost = True
+                            cancel.set()
+                            break
+                        else:
+                            next_renewal = now + min(1.0, renew_interval)
                     remaining = deadline - now
                     ready = receiver.poll(max(0, min(remaining, 0.05)))
                     if cancel.is_set() or self._closed:
@@ -653,9 +820,19 @@ class BackgroundRuns:
                 receiver.close()
             if sender is not None:
                 sender.close()
-            if (cancel.is_set() or self._closed) and not completed.is_set():
+            if (
+                not ownership_lost and (cancel.is_set() or self._closed)
+                and not completed.is_set()
+            ):
                 status, value = "failed", "Run cancelled."
             completed.set()
+            if ownership_lost:
+                _LOG.warning(
+                    "Background run %s lost ownership before completion", run_id
+                )
+                with self._lock:
+                    self._jobs.pop(run_id, None)
+                return
             try:
                 path = self._spool_dir / f"run-{run_id}-{attempt}-{owner_token}.json"
                 if not path.exists():
@@ -673,9 +850,11 @@ class BackgroundRuns:
                 self._schedule_retry()
 
     def _retry_pending(self):
-        delay = 0.5
+        retry_delay = 0.5
+        wait_delay = retry_delay
+        had_pending = False
         while not self._retry_stop.is_set():
-            self._retry_wakeup.wait(delay)
+            self._retry_wakeup.wait(wait_delay)
             self._retry_wakeup.clear()
             if self._retry_stop.is_set():
                 return
@@ -688,4 +867,13 @@ class BackgroundRuns:
                     "Background run recovery failed (%s)", type(exc).__name__
                 )
                 pending = True
-            delay = min(delay * 2, 30) if pending else 5
+            if pending:
+                retry_delay = (
+                    min(retry_delay * 2, 30) if had_pending else 0.5
+                )
+                wait_delay = retry_delay
+                had_pending = True
+            else:
+                retry_delay = 0.5
+                wait_delay = 5
+                had_pending = False

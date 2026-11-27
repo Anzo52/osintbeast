@@ -59,14 +59,19 @@ class Storage(Protocol):
 
     def create_background_run(
         self, tool_name: str, query_text: str, key_hash: str | None,
-        input_fingerprint: str | None,
-    ) -> tuple[int, bool]: ...
+        input_fingerprint: str | None, owner_token: str, lease_expires_at: int,
+    ) -> tuple[int, bool, int | None]: ...
 
     def ensure_background_run(self, run_id: int) -> None: ...
 
     def claim_background_run(
         self, run_id: int, owner_token: str, lease_expires_at: int
     ) -> int | None: ...
+
+    def renew_background_run(
+        self, run_id: int, owner_token: str, attempt: int, now: int,
+        lease_expires_at: int,
+    ) -> bool: ...
 
     def get_background_run_state(self, run_id: int) -> tuple[Any, ...] | None: ...
 
@@ -313,8 +318,8 @@ class SQLiteStorage:
 
     def create_background_run(
         self, tool_name: str, query_text: str, key_hash: str | None,
-        input_fingerprint: str | None,
-    ) -> tuple[int, bool]:
+        input_fingerprint: str | None, owner_token: str, lease_expires_at: int,
+    ) -> tuple[int, bool, int | None]:
         with closing(self.connect()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             if key_hash is not None:
@@ -328,7 +333,7 @@ class SQLiteStorage:
                         raise IdempotencyConflictError(
                             "Idempotency-Key was already used for a different request."
                         )
-                    return row[0], False
+                    return row[0], False, None
             cursor = conn.execute(
                 """INSERT INTO ToolRuns (toolName, queryText, status)
                    VALUES (?, ?, 'running')""",
@@ -336,9 +341,10 @@ class SQLiteStorage:
             )
             run_id = cursor.lastrowid
             conn.execute(
-                """INSERT INTO ToolRunExecutions (runID, state)
-                   VALUES (?, 'queued')""",
-                (run_id,),
+                """INSERT INTO ToolRunExecutions
+                   (runID, state, attempt, ownerToken, leaseExpiresAt)
+                   VALUES (?, 'running', 1, ?, ?)""",
+                (run_id, owner_token, lease_expires_at),
             )
             if key_hash is not None:
                 conn.execute(
@@ -347,7 +353,7 @@ class SQLiteStorage:
                        VALUES (?, ?, ?, ?)""",
                     (key_hash, tool_name, input_fingerprint, run_id),
                 )
-            return run_id, True
+            return run_id, True, 1
 
     def ensure_background_run(self, run_id: int) -> None:
         with closing(self.connect()) as conn, conn:
@@ -375,6 +381,20 @@ class SQLiteStorage:
                 (run_id,),
             ).fetchone()[0]
 
+    def renew_background_run(
+        self, run_id: int, owner_token: str, attempt: int, now: int,
+        lease_expires_at: int,
+    ) -> bool:
+        with closing(self.connect()) as conn, conn:
+            cursor = conn.execute(
+                """UPDATE ToolRunExecutions SET leaseExpiresAt = ?
+                   WHERE runID = ? AND state = 'running'
+                     AND ownerToken = ? AND attempt = ?
+                     AND leaseExpiresAt > ? AND leaseExpiresAt < ?""",
+                (lease_expires_at, run_id, owner_token, attempt, now, lease_expires_at),
+            )
+            return cursor.rowcount == 1
+
     def get_background_run_state(self, run_id: int) -> tuple[Any, ...] | None:
         with closing(self.connect()) as conn:
             return conn.execute(
@@ -391,7 +411,7 @@ class SQLiteStorage:
                    FROM ToolRunExecutions
                    JOIN ToolRuns USING (runID)
                    WHERE (state = 'queued'
-                          AND CAST(strftime('%s', startedAt) AS INTEGER) <= ? - 30)
+                          AND CAST(strftime('%s', startedAt) AS INTEGER) * 1000 <= ? - 30000)
                       OR (state = 'running' AND leaseExpiresAt <= ?)
                    ORDER BY runID""",
                 (now, now),
@@ -462,7 +482,8 @@ class SQLiteStorage:
                 """UPDATE ToolRunExecutions SET state = 'indeterminate'
                    WHERE runID = ? AND state = 'queued' AND EXISTS (
                        SELECT 1 FROM ToolRuns
-                       WHERE runID = ? AND CAST(strftime('%s', startedAt) AS INTEGER) <= ? - 30
+                       WHERE runID = ?
+                         AND CAST(strftime('%s', startedAt) AS INTEGER) * 1000 <= ? - 30000
                    )""",
                 (run_id, run_id, now),
             )
@@ -479,6 +500,38 @@ class SQLiteStorage:
         self, run_id: int, owner_token: str, attempt: int, now: int
     ) -> bool:
         with closing(self.connect()) as conn, conn:
+            cursor = conn.execute(
+                """UPDATE ToolRunExecutions
+                   SET state = 'indeterminate', ownerToken = NULL,
+                       leaseExpiresAt = NULL
+                   WHERE runID = ? AND state = 'running'
+                     AND ownerToken = ? AND attempt = ? AND leaseExpiresAt <= ?""",
+                (run_id, owner_token, attempt, now),
+            )
+            if cursor.rowcount != 1:
+                return False
+            conn.execute(
+                """UPDATE ToolRuns SET status = 'failed', resultText = NULL,
+                   errorText = ?, finishedAt = CURRENT_TIMESTAMP
+                   WHERE runID = ?""",
+                (_INDETERMINATE_RUN_ERROR, run_id),
+            )
+            return True
+
+    def recover_expired_background_run(
+        self, run_id: int, owner_token: str, attempt: int, now: int,
+        can_retry: bool,
+    ) -> bool:
+        with closing(self.connect()) as conn, conn:
+            if can_retry:
+                cursor = conn.execute(
+                    """UPDATE ToolRunExecutions
+                       SET state = 'queued', ownerToken = NULL, leaseExpiresAt = NULL
+                       WHERE runID = ? AND state = 'running'
+                         AND ownerToken = ? AND attempt = ? AND leaseExpiresAt <= ?""",
+                    (run_id, owner_token, attempt, now),
+                )
+                return cursor.rowcount == 1
             cursor = conn.execute(
                 """UPDATE ToolRunExecutions
                    SET state = 'indeterminate', ownerToken = NULL,
@@ -1016,8 +1069,8 @@ class MySQLStorage:
 
     def create_background_run(
         self, tool_name: str, query_text: str, key_hash: str | None,
-        input_fingerprint: str | None,
-    ) -> tuple[int, bool]:
+        input_fingerprint: str | None, owner_token: str, lease_expires_at: int,
+    ) -> tuple[int, bool, int | None]:
         try:
             with self._get_engine().begin() as connection:
                 if key_hash is not None:
@@ -1031,7 +1084,7 @@ class MySQLStorage:
                             raise IdempotencyConflictError(
                                 "Idempotency-Key was already used for a different request."
                             )
-                        return row[0], False
+                        return row[0], False, None
                 result = connection.exec_driver_sql(
                     """INSERT INTO ToolRuns (toolName, queryText, status)
                        VALUES (%s, %s, 'running')""",
@@ -1039,9 +1092,10 @@ class MySQLStorage:
                 )
                 run_id = result.lastrowid
                 connection.exec_driver_sql(
-                    """INSERT INTO ToolRunExecutions (runID, state)
-                       VALUES (%s, 'queued')""",
-                    (run_id,),
+                    """INSERT INTO ToolRunExecutions
+                       (runID, state, attempt, ownerToken, leaseExpiresAt)
+                       VALUES (%s, 'running', 1, %s, %s)""",
+                    (run_id, owner_token, lease_expires_at),
                 )
                 if key_hash is not None:
                     connection.exec_driver_sql(
@@ -1050,7 +1104,7 @@ class MySQLStorage:
                            VALUES (%s, %s, %s, %s)""",
                         (key_hash, tool_name, input_fingerprint, run_id),
                     )
-                return run_id, True
+                return run_id, True, 1
         except IntegrityError as exc:
             if key_hash is None:
                 raise StorageError(str(exc)) from exc
@@ -1068,7 +1122,7 @@ class MySQLStorage:
                     raise IdempotencyConflictError(
                         "Idempotency-Key was already used for a different request."
                     ) from exc
-                return row[0], False
+                return row[0], False, None
             raise StorageError(str(exc)) from exc
         except Exception as exc:
             if exc.__class__.__module__.startswith("sqlalchemy"):
@@ -1077,16 +1131,16 @@ class MySQLStorage:
 
     def ensure_background_run(self, run_id: int) -> None:
         try:
-                with self._get_engine().begin() as connection:
-                    connection.exec_driver_sql(
-                        """INSERT IGNORE INTO ToolRunExecutions (runID, state)
-                           VALUES (%s, 'queued')""",
-                        (run_id,),
-                    )
+            with self._get_engine().begin() as connection:
+                connection.exec_driver_sql(
+                    """INSERT IGNORE INTO ToolRunExecutions (runID, state)
+                       VALUES (%s, 'queued')""",
+                    (run_id,),
+                )
         except Exception as exc:
-                if exc.__class__.__module__.startswith("sqlalchemy"):
-                    raise StorageError(str(exc)) from exc
-                raise
+            if exc.__class__.__module__.startswith("sqlalchemy"):
+                raise StorageError(str(exc)) from exc
+            raise
 
     def claim_background_run(
         self, run_id: int, owner_token: str, lease_expires_at: int
@@ -1107,6 +1161,25 @@ class MySQLStorage:
                     (run_id,),
                 ).fetchone()
                 return row[0]
+        except Exception as exc:
+            if exc.__class__.__module__.startswith("sqlalchemy"):
+                raise StorageError(str(exc)) from exc
+            raise
+
+    def renew_background_run(
+        self, run_id: int, owner_token: str, attempt: int, now: int,
+        lease_expires_at: int,
+    ) -> bool:
+        try:
+            with self._get_engine().begin() as connection:
+                result = connection.exec_driver_sql(
+                    """UPDATE ToolRunExecutions SET leaseExpiresAt = %s
+                       WHERE runID = %s AND state = 'running'
+                         AND ownerToken = %s AND attempt = %s
+                         AND leaseExpiresAt > %s AND leaseExpiresAt < %s""",
+                    (lease_expires_at, run_id, owner_token, attempt, now, lease_expires_at),
+                )
+                return result.rowcount == 1
         except Exception as exc:
             if exc.__class__.__module__.startswith("sqlalchemy"):
                 raise StorageError(str(exc)) from exc
@@ -1133,7 +1206,7 @@ class MySQLStorage:
                               toolName, queryText
                        FROM ToolRunExecutions
                        JOIN ToolRuns USING (runID)
-                       WHERE (state = 'queued' AND UNIX_TIMESTAMP(startedAt) <= %s - 30)
+                       WHERE (state = 'queued' AND UNIX_TIMESTAMP(startedAt) * 1000 <= %s - 30000)
                           OR (state = 'running' AND leaseExpiresAt <= %s)
                        ORDER BY runID""",
                     (now, now),
@@ -1220,7 +1293,8 @@ class MySQLStorage:
                     """UPDATE ToolRunExecutions SET state = 'indeterminate'
                        WHERE runID = %s AND state = 'queued' AND EXISTS (
                            SELECT 1 FROM ToolRuns
-                           WHERE runID = %s AND UNIX_TIMESTAMP(startedAt) <= %s - 30
+                           WHERE runID = %s
+                             AND UNIX_TIMESTAMP(startedAt) * 1000 <= %s - 30000
                        )""",
                     (run_id, run_id, now),
                 )
@@ -1264,6 +1338,46 @@ class MySQLStorage:
             if exc.__class__.__module__.startswith("sqlalchemy"):
                 raise StorageError(str(exc)) from exc
             raise
+
+    def recover_expired_background_run(
+        self, run_id: int, owner_token: str, attempt: int, now: int,
+        can_retry: bool,
+    ) -> bool:
+        try:
+                with self._get_engine().begin() as connection:
+                    if can_retry:
+                        result = connection.exec_driver_sql(
+                            """UPDATE ToolRunExecutions
+                               SET state = 'queued', ownerToken = NULL,
+                                   leaseExpiresAt = NULL
+                               WHERE runID = %s AND state = 'running'
+                                 AND ownerToken = %s AND attempt = %s
+                                 AND leaseExpiresAt <= %s""",
+                            (run_id, owner_token, attempt, now),
+                        )
+                        return result.rowcount == 1
+                    result = connection.exec_driver_sql(
+                        """UPDATE ToolRunExecutions
+                           SET state = 'indeterminate', ownerToken = NULL,
+                               leaseExpiresAt = NULL
+                           WHERE runID = %s AND state = 'running'
+                             AND ownerToken = %s AND attempt = %s
+                             AND leaseExpiresAt <= %s""",
+                        (run_id, owner_token, attempt, now),
+                    )
+                    if result.rowcount != 1:
+                        return False
+                    connection.exec_driver_sql(
+                        """UPDATE ToolRuns SET status = 'failed', resultText = NULL,
+                           errorText = %s, finishedAt = CURRENT_TIMESTAMP
+                           WHERE runID = %s""",
+                        (_INDETERMINATE_RUN_ERROR, run_id),
+                    )
+                    return True
+        except Exception as exc:
+                if exc.__class__.__module__.startswith("sqlalchemy"):
+                    raise StorageError(str(exc)) from exc
+                raise
 
     def get_idempotent_tool_run(
         self, idempotency_key: str, request_hash: str

@@ -579,11 +579,16 @@ def ensure_background_run(run_id: int) -> None:
 
 def create_background_run(
     tool_name: str, query_text: str, key_hash: str | None = None,
-    input_fingerprint: str | None = None,
-) -> tuple[int, bool]:
+    input_fingerprint: str | None = None, owner_token: str | None = None,
+    lease_expires_at: int | None = None,
+) -> tuple[int, bool, int | None]:
     """Create one background execution and its optional durable idempotency key."""
     if (key_hash is None) != (input_fingerprint is None):
         raise ValueError("Idempotency key and input fingerprint must be supplied together.")
+    if owner_token is None or not re.fullmatch(r"[0-9a-f]{32}", owner_token):
+        raise ValueError("Invalid background run owner token.")
+    if not isinstance(lease_expires_at, int) or isinstance(lease_expires_at, bool):
+        raise ValueError("Invalid background run lease.")
     for value, label in (
         (key_hash, "idempotency key hash"),
         (input_fingerprint, "input fingerprint"),
@@ -593,7 +598,8 @@ def create_background_run(
         ):
             raise ValueError(f"Invalid {label}.")
     return _get_storage().create_background_run(
-        tool_name, query_text, key_hash, input_fingerprint
+        tool_name, query_text, key_hash, input_fingerprint,
+        owner_token, lease_expires_at,
     )
 
 def get_background_run_by_key(key_hash: str) -> tuple[Any, ...] | None:
@@ -617,13 +623,27 @@ def claim_background_run(
         raise ValueError("Invalid background run lease.")
     return _get_storage().claim_background_run(run_id, owner_token, lease_expires_at)
 
+def renew_background_run(
+    run_id: int, owner_token: str, attempt: int, now: int, lease_expires_at: int
+) -> bool:
+    run_id = _validate_run_id(run_id)
+    if not isinstance(owner_token, str) or not re.fullmatch(r"[0-9a-f]{32}", owner_token):
+        raise ValueError("Invalid background run owner token.")
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+        raise ValueError("Invalid background run attempt.")
+    if any(not isinstance(value, int) or isinstance(value, bool) for value in (now, lease_expires_at)):
+        raise ValueError("Invalid background run lease.")
+    return _get_storage().renew_background_run(
+        run_id, owner_token, attempt, now, lease_expires_at
+    )
+
 
 def get_background_run_state(run_id: int) -> tuple[Any, ...] | None:
     return _get_storage().get_background_run_state(_validate_run_id(run_id))
 
 
 def list_background_runs_for_recovery(now: int | None = None) -> list[tuple[Any, ...]]:
-    recovery_time = int(time.time()) if now is None else now
+    recovery_time = int(time.time() * 1000) if now is None else now
     if not isinstance(recovery_time, int) or isinstance(recovery_time, bool):
         raise ValueError("Recovery time must be an integer.")
     return _get_storage().list_background_runs_for_recovery(recovery_time)
@@ -664,9 +684,25 @@ def mark_background_run_indeterminate(
         raise ValueError("Invalid background run owner token.")
     if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
         raise ValueError("Invalid background run attempt.")
-    recovery_time = int(time.time()) if now is None else now
+    recovery_time = int(time.time() * 1000) if now is None else now
     return _get_storage().mark_background_run_indeterminate(
         run_id, owner_token, attempt, recovery_time
+    )
+
+def recover_expired_background_run(
+    run_id: int, owner_token: str, attempt: int, now: int, can_retry: bool
+) -> bool:
+    run_id = _validate_run_id(run_id)
+    if not isinstance(owner_token, str) or not re.fullmatch(r"[0-9a-f]{32}", owner_token):
+        raise ValueError("Invalid background run owner token.")
+    if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
+        raise ValueError("Invalid background run attempt.")
+    if not isinstance(now, int) or isinstance(now, bool):
+        raise ValueError("Invalid background run recovery time.")
+    if not isinstance(can_retry, bool):
+        raise ValueError("Invalid background run recovery policy.")
+    return _get_storage().recover_expired_background_run(
+        run_id, owner_token, attempt, now, can_retry
     )
 
 def _validate_idempotency_key(idempotency_key: str, request_hash: str) -> None:

@@ -270,10 +270,10 @@ def test_pending_completion_recovers_after_persistence_failure(
     tmp_path, monkeypatch, caplog
 ):
     server, base_url = _server(tmp_path, monkeypatch, Mock(return_value="output"))
-    finish = database.finish_tool_run
+    finish = database.finish_background_run
     monkeypatch.setattr(
         database,
-        "finish_tool_run",
+        "finish_background_run",
         Mock(side_effect=sqlite3.OperationalError("database unavailable")),
     )
     try:
@@ -282,20 +282,23 @@ def test_pending_completion_recovers_after_persistence_failure(
             {"tool": "sherlock", "input": "other", "authorized": True},
         )
         assert status == 202
+        run_service = server.run_service
         deadline = time.monotonic() + 2
-        while time.monotonic() < deadline and not caplog.records:
+        while time.monotonic() < deadline:
+            if any(run_service._spool_dir.glob(f"run-{launched['id']}-*.json")):
+                break
             time.sleep(0.01)
-        assert "Could not persist background run outcome" in caplog.text
+        assert any(run_service._spool_dir.glob(f"run-{launched['id']}-*.json"))
 
         status, _ = _request(f"{base_url}/api/runs/{launched['id']}")
-        assert status == 503
-        monkeypatch.setattr(database, "finish_tool_run", finish)
+        assert status == 200
+        monkeypatch.setattr(database, "finish_background_run", finish)
         status, detail = _request(f"{base_url}/api/runs/{launched['id']}")
         assert status == 200
         assert detail["status"] == "success"
         assert detail["result"] == "output"
     finally:
-        monkeypatch.setattr(database, "finish_tool_run", finish)
+        monkeypatch.setattr(database, "finish_background_run", finish)
         server.shutdown()
         server.server_close()
 
@@ -732,7 +735,7 @@ def test_browser_exposes_run_id_when_startup_failure_cannot_be_saved(tmp_path, m
     server, base_url = _server(tmp_path, monkeypatch, Mock())
     run_service = server.run_service
     run_id = database.start_tool_run("sherlock", "alice")
-    run_service._pending[run_id] = ("failed", "Could not start background worker.")
+    database.ensure_background_run(run_id)
     monkeypatch.setattr(
         run_service, "submit", Mock(side_effect=background_runs.StartupPersistenceError(run_id))
     )
@@ -743,9 +746,6 @@ def test_browser_exposes_run_id_when_startup_failure_cannot_be_saved(tmp_path, m
         )
         assert status == 503
         assert body["id"] == run_id
-        status, detail = _request(f"{base_url}/api/runs/{run_id}")
-        assert status == 200
-        assert detail["error"] == "Could not start background worker."
     finally:
         server.shutdown()
         server.server_close()
