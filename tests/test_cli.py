@@ -472,12 +472,13 @@ def test_cli_accepts_hyphen_identifiers_after_separator(
 ):
     monkeypatch.setattr(database, "DB_FILE", str(tmp_path / "cli.db"))
     database.setup_database()
-    runner = Mock(return_value=runner_output)
+    def runner(value):
+        assert value == identifier
+        return runner_output
+
     monkeypatch.setattr(main, runner_name, runner)
 
     assert main.cli(arguments) == 0
-
-    runner.assert_called_once_with(identifier)
 
 
 def test_cli_rejects_invalid_username_with_accepted_format(monkeypatch, capsys):

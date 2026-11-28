@@ -18,6 +18,7 @@ classifiers = [
 ]
 dependencies = [
     "requests>=2.31,<3",
+    "cloudpickle>=3,<4",
     "SQLAlchemy>=2.0,<3",
     "simple-term-menu>=1.6,<2",
     "holehe>=1.61,<2",

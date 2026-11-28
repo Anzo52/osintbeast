@@ -4,16 +4,22 @@ import os
 import signal
 import sqlite3
 import stat
+import subprocess
+import sys
+import time
 import warnings
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import Mock
 
 import pytest
 
 import checkers
-import data.utils.database as database
 import main
 import tool_runs
+from data.utils import database
 from holehe_integration import HoleheTimeoutError
+
+_TEST_LOGGER = logging.getLogger("test_sensitive_tool_output")
 
 
 @pytest.fixture
@@ -284,11 +290,15 @@ def test_sensitivity_is_required(initialized_db):
      ("timed_out", TimeoutError("private input timeout"))],
 )
 def test_sensitive_run_redacts_persistence(initialized_db, outcome, error):
-    runner = Mock(return_value="private input result", side_effect=error)
+    def runner(value):
+        assert value == "private input"
+        if error is not None:
+            raise error
+        return "private input result"
+
     status, value = tool_runs.execute_tool_run(
         "holehe", "private input", runner, sensitive_input=True
     )
-    runner.assert_called_once_with("private input")
     assert status == outcome
     assert value == (
         "[redacted] result" if error is None else str(error).replace("private input", "[redacted]")
@@ -409,14 +419,16 @@ def test_menu_accepts_leading_hyphen_identifiers(
         def show(self):
             return choice
 
-    runner = Mock(return_value=result)
+    def runner(value):
+        assert value == identifier
+        return result
+
     monkeypatch.setattr(main, "TerminalMenu", FakeMenu)
     monkeypatch.setattr(checkers, "getpass", lambda prompt: identifier)
     monkeypatch.setattr(main, target, runner)
 
     main.main_menu()
 
-    runner.assert_called_once_with(identifier)
     assert database.query_database("SELECT status FROM ToolRuns") == [("success",)]
 
 
@@ -737,10 +749,12 @@ def test_finish_tool_run_replaces_stale_reconciliation(initialized_db):
 def test_cli_saves_success(
     initialized_db, monkeypatch, capsys, function, target, value, query_text, result, tool
 ):
-    runner = Mock(return_value=result)
+    def runner(actual):
+        assert actual == query_text
+        return result
+
     monkeypatch.setattr(main, target, runner)
     function(value)
-    runner.assert_called_once_with(query_text)
     output = capsys.readouterr().out
     assert (result["output"] if isinstance(result, dict) else result) in output
     assert f"{tool.capitalize()} check saved to the database." in output
@@ -759,34 +773,237 @@ def test_cli_reports_and_records_failure(initialized_db, monkeypatch, capsys):
 
 
 def test_sensitive_values_are_redacted_from_output_and_run_records(
-    initialized_db, monkeypatch, capsys, caplog
+    initialized_db, tmp_path, capfd, caplog
 ):
-    sensitive_value = "person@example.com"
+    sensitive_values = ("first@example.com", "second@example.com")
+    caplog.set_level(logging.WARNING)
+    ready = tmp_path / "ready"
+    ready.mkdir()
 
     def run_with_output(value):
-        print(f"Starting lookup for {value}")
-        logging.warning("Lookup requested for %s", value)
+        print(f"stdout lookup {value}")
+        print(f"stderr lookup {value}", file=sys.stderr)
+        _TEST_LOGGER.addHandler(logging.FileHandler(ready / "tool.log"))
+        _TEST_LOGGER.warning("logged lookup %s", value)
+        (ready / ("first" if value == sensitive_values[0] else "second")).touch()
+        deadline = time.monotonic() + 10
+        while not (ready / "unrelated").exists():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Concurrent execution did not overlap.")
+            time.sleep(0.01)
         return f"Found {value} ({value.replace('@', '%40')})"
 
-    monkeypatch.setattr(
-        main,
-        "run_holehe",
-        Mock(side_effect=lambda value: {"output": run_with_output(value)}),
+    streams = (sys.stdout, sys.stderr)
+    logging_disable = logging.root.manager.disable
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        runs = [
+            executor.submit(
+                tool_runs.execute_tool_run,
+                "holehe",
+                value,
+                run_with_output,
+                sensitive_input=True,
+            )
+            for value in sensitive_values
+        ]
+
+        def unrelated_output():
+            deadline = time.monotonic() + 10
+            while not ((ready / "first").exists() and (ready / "second").exists()):
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("Sensitive workers did not overlap.")
+                time.sleep(0.01)
+            print("unrelated stdout")
+            print("unrelated stderr", file=sys.stderr)
+            _TEST_LOGGER.warning("unrelated log")
+            assert sys.stdout is streams[0]
+            assert sys.stderr is streams[1]
+            assert logging.root.manager.disable == logging_disable
+            (ready / "unrelated").touch()
+
+        unrelated = executor.submit(unrelated_output)
+        outcomes = [run.result(timeout=15) for run in runs]
+        unrelated.result(timeout=15)
+
+    captured = capfd.readouterr()
+    assert sys.stdout is streams[0]
+    assert sys.stderr is streams[1]
+    assert logging.root.manager.disable == logging_disable
+    output = captured.out + captured.err
+    assert "unrelated stdout" in output
+    assert "unrelated stderr" in output
+    assert "unrelated log" in caplog.text
+    assert all(value not in output and value not in caplog.text for value in sensitive_values)
+    assert all(value not in (ready / "tool.log").read_text() for value in sensitive_values)
+    assert outcomes == [
+        ("success", "Found [redacted] ([redacted])"),
+        ("success", "Found [redacted] ([redacted])"),
+    ]
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolRuns ORDER BY runID"
+    ) == [
+        ("[redacted]", "Found [redacted] ([redacted])"),
+        ("[redacted]", "Found [redacted] ([redacted])"),
+    ]
+    assert database.query_database(
+        "SELECT queryText, resultText FROM ToolResults ORDER BY resultID"
+    ) == [
+        ("[redacted]", "Found [redacted] ([redacted])"),
+        ("[redacted]", "Found [redacted] ([redacted])"),
+    ]
+
+
+def test_sensitive_failure_restores_parent_output_and_redacts_every_surface(
+    initialized_db, capfd, caplog
+):
+    sensitive_value = "private@example.com"
+    streams = (sys.stdout, sys.stderr)
+    logging_disable = logging.root.manager.disable
+
+    def fail_with_output(value):
+        print(f"stdout {value}")
+        print(f"stderr {value}", file=sys.stderr)
+        _TEST_LOGGER.error("log %s", value)
+        raise ValueError(f"failure for {value}")
+
+    outcome, message = tool_runs.execute_tool_run(
+        "holehe", sensitive_value, fail_with_output, sensitive_input=True
     )
 
-    main.run_holehe_check(sensitive_value)
-
-    output = capsys.readouterr().out
-    assert sensitive_value not in output
+    captured = capfd.readouterr()
+    assert (outcome, message) == ("failed", "failure for [redacted]")
+    assert sensitive_value not in captured.out + captured.err
     assert sensitive_value not in caplog.text
-    assert all(sensitive_value not in record.getMessage() for record in caplog.records)
-    assert "[redacted]" in output
+    assert sensitive_value not in str(database.get_tool_run(1))
+    assert sys.stdout is streams[0]
+    assert sys.stderr is streams[1]
+    assert logging.root.manager.disable == logging_disable
     assert database.query_database(
-        "SELECT queryText, resultText FROM ToolRuns"
-    ) == [("[redacted]", "Found [redacted] ([redacted])")]
-    assert database.query_database(
-        "SELECT queryText, resultText FROM ToolResults"
-    ) == [("[redacted]", "Found [redacted] ([redacted])")]
+        "SELECT queryText, errorText FROM ToolRuns"
+    ) == [("[redacted]", "failure for [redacted]")]
+
+
+@pytest.mark.parametrize("sensitive_value", ["person@example.com", 'person"@example.com'])
+def test_sensitive_json_keys_are_redacted_before_persistence(initialized_db, sensitive_value):
+    def runner(value):
+        return json.dumps({value: "found"})
+
+    status, output = tool_runs.execute_tool_run(
+        "holehe", sensitive_value, runner, sensitive_input=True
+    )
+    assert status == "success"
+    assert json.loads(output) == {"[redacted]": "found"}
+    assert sensitive_value not in str(database.get_tool_run(1))
+    assert sensitive_value not in str(database.list_tool_results())
+
+
+def test_sensitive_json_key_collision_is_reported_without_losing_results(initialized_db):
+    sensitive_value = "person@example.com"
+    status, output = tool_runs.execute_tool_run(
+        "holehe", sensitive_value,
+        lambda value: json.dumps({value: "first", "[redacted]": "second"}),
+        sensitive_input=True,
+    )
+    assert (status, output) == (
+        "failed", "Sensitive output contains conflicting redacted keys."
+    )
+    assert database.list_tool_results() == []
+    assert database.get_tool_run(1)[3] == "failed"
+
+
+def test_sensitive_worker_crash_is_reported_without_leaking_input(
+    initialized_db, capfd
+):
+    sensitive_value = "crash@example.com"
+
+    def crash(value):
+        os.write(2, value.encode())
+        os._exit(1)
+
+    status, message = tool_runs.execute_tool_run(
+        "holehe", sensitive_value, crash, sensitive_input=True
+    )
+    assert status == "failed"
+    assert message == "Sensitive tool worker exited without returning an outcome."
+    assert sensitive_value not in capfd.readouterr().err
+    assert sensitive_value not in str(database.get_tool_run(1))
+
+
+def test_sensitive_sherlock_runs_preserve_worker_capacity(initialized_db, monkeypatch):
+    import sherlock_integration
+
+    slots = sherlock_integration.threading.BoundedSemaphore(1)
+    monkeypatch.setattr(sherlock_integration, "_WORKER_SLOTS", slots)
+    assert slots.acquire(blocking=False)
+    try:
+        status, message = tool_runs.execute_tool_run(
+            "sherlock", "user", lambda _: "result", sensitive_input=True
+        )
+    finally:
+        slots.release()
+    assert (status, message) == ("failed", "Sherlock is busy; try again later.")
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux process state")
+@pytest.mark.parametrize("abrupt", [False, True])
+def test_sensitive_worker_stops_descendants_when_parent_exits(tmp_path, abrupt):
+    marker = tmp_path / "processes"
+    script = """
+import os
+import subprocess
+import sys
+import time
+import tool_runs
+
+def runner(marker):
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    with open(marker, "w") as stream:
+        stream.write(f"{os.getpid()} {child.pid}")
+    time.sleep(60)
+
+try:
+    tool_runs._run_sensitive_runner("holehe", runner, sys.argv[1])
+except KeyboardInterrupt:
+    pass
+"""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(sys.path)
+    parent = subprocess.Popen(
+        [sys.executable, "-c", script, str(marker)],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    child_pid = worker_pid = None
+    try:
+        deadline = time.monotonic() + 15
+        while not marker.exists() or not marker.read_text():
+            assert parent.poll() is None
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        worker_pid, child_pid = map(int, marker.read_text().split())
+        parent.send_signal(signal.SIGKILL if abrupt else signal.SIGINT)
+        parent.communicate(timeout=10)
+        deadline = time.monotonic() + 10
+        while True:
+            proc = f"/proc/{child_pid}/stat"
+            try:
+                with open(proc, encoding="utf-8") as stream:
+                    state = stream.read().split(") ", 1)[1][0]
+            except FileNotFoundError:
+                break
+            if state == "Z":
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+    finally:
+        if parent.poll() is None:
+            parent.kill()
+            parent.wait()
+        if child_pid is not None:
+            try:
+                if os.getpgid(child_pid) == worker_pid:
+                    os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 def test_sensitive_json_redaction_preserves_schema_and_mixed_encoding(initialized_db):
@@ -897,7 +1114,7 @@ def test_sensitive_unexpected_failure_is_recorded_and_propagated(initialized_db)
 
     assert "TypeError" in str(error.value)
     assert sensitive_value not in str(error.value)
-    assert any(frame.name == "fail" for frame in error.traceback)
+    assert "fail" in error.value.remote_frames
     assert database.query_database(
         "SELECT queryText, status, errorText FROM ToolRuns"
     ) == [("[redacted]", "failed", "holehe failed unexpectedly (TypeError).")]
@@ -1021,14 +1238,19 @@ def test_cli_reports_timeout_without_claiming_success(initialized_db, monkeypatc
 
 
 def test_cli_can_start_another_run_after_timeout(initialized_db, monkeypatch, capsys):
+    def run(query):
+        if query == "user":
+            raise TimeoutError("Maigret exceeded its time limit")
+        return "output"
+
     monkeypatch.setattr(
         main,
         "run_maigret",
-        Mock(side_effect=[TimeoutError("Maigret exceeded its time limit"), "output"]),
+        run,
     )
 
     main.run_maigret_check("user")
-    main.run_maigret_check("user")
+    main.run_maigret_check("another")
 
     assert capsys.readouterr().out == (
         "Maigret timed out: Maigret exceeded its time limit\n"
