@@ -15,9 +15,7 @@ import stat
 import tempfile
 import threading
 import time
-from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass
-from io import StringIO
 from pathlib import Path
 
 from data.utils import database
@@ -28,7 +26,7 @@ from maigret_integration import run_maigret
 from maigret_integration import validate_username as validate_maigret
 from sherlock_integration import run_sherlock
 from sherlock_integration import validate_username as validate_sherlock
-from tool_runs import redact_sensitive_output
+from tool_runs import discard_isolated_process_output, redact_sensitive_output
 
 _LOG = logging.getLogger(__name__)
 _SHUTDOWN_TIMEOUT_SECONDS = 5
@@ -143,7 +141,7 @@ def _write_spooled_outcome(spool_dir, run_id, attempt, owner_token, status, valu
 
 def _worker(
     connection, tool_name, query, max_output_bytes, deadline=None,
-    timed_out=None, spool_context=None,
+    timed_out=None, spool_context=None, spool_error_fd=None,
 ):
     status, message = b"F", "Background worker failed."
     try:
@@ -161,13 +159,7 @@ def _worker(
                 daemon=True,
             ).start()
         if tool_name == "holehe":
-            previous_disable = logging.root.manager.disable
-            logging.disable(logging.CRITICAL)
-            try:
-                with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
-                    output = _TOOLS[tool_name][1](query)["output"]
-            finally:
-                logging.disable(previous_disable)
+            output = _TOOLS[tool_name][1](query)["output"]
         else:
             output = _TOOLS[tool_name][1](query)
         if not isinstance(output, str):
@@ -201,7 +193,13 @@ def _worker(
                 b"S": "success", b"F": "failed", b"T": "timed_out"
             }[status], message)
         except Exception:
-            _LOG.exception("Could not durably spool background run outcome")
+            if spool_error_fd is None:
+                _LOG.exception("Could not durably spool background run outcome")
+            else:
+                try:
+                    os.write(spool_error_fd, b"Could not durably spool background run outcome\n")
+                except OSError:
+                    _LOG.exception("Could not report background run spool failure")
     try:
         connection.send_bytes(
             status + message.encode("utf-8")[:max_output_bytes]
@@ -210,6 +208,21 @@ def _worker(
         pass
     finally:
         connection.close()
+
+
+def _worker_entrypoint(worker, connection, tool_name, *args):
+    if tool_name == "holehe":
+        error_fd = os.dup(2)
+        try:
+            discard_isolated_process_output()
+            if worker is _worker:
+                worker(connection, tool_name, *args, spool_error_fd=error_fd)
+            else:
+                worker(connection, tool_name, *args)
+        finally:
+            os.close(error_fd)
+    else:
+        worker(connection, tool_name, *args)
 
 
 def _stop_process(process):
@@ -864,9 +877,9 @@ class BackgroundRuns:
                 receiver, sender = self._context.Pipe(duplex=False)
                 deadline = time.monotonic() + self.limits.timeout_seconds
                 process = self._context.Process(
-                    target=_worker,
+                    target=_worker_entrypoint,
                     args=(
-                        sender, tool_name, query, self.limits.max_output_bytes,
+                        _worker, sender, tool_name, query, self.limits.max_output_bytes,
                         deadline, timed_out,
                         (str(self._spool_dir), run_id, attempt, owner_token),
                     ),

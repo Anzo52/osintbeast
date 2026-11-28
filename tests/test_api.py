@@ -7,7 +7,18 @@ from unittest.mock import Mock
 import pytest
 
 import api
-import data.utils.database as database
+from data.utils import database
+
+
+def _replace_holehe_runner(monkeypatch, runner):
+    tools = api._tools
+
+    def patched_tools():
+        mapping = tools()
+        mapping["holehe"] = (mapping["holehe"][0], runner)
+        return mapping
+
+    monkeypatch.setattr(api, "_tools", patched_tools)
 
 
 @pytest.fixture
@@ -54,13 +65,20 @@ def test_create_and_get_run_delegates_to_shared_services(
     integration = getattr(api, name + "_integration")
     runner = Mock(return_value=result)
     monkeypatch.setattr(integration, target, runner)
+    if name == "holehe":
+        def sensitive_runner(value):
+            assert value == normalized
+            return result["output"]
+
+        _replace_holehe_runner(monkeypatch, sensitive_runner)
     response = client("POST", "/runs", {"tool": name.upper(), "query": query, "authorized": True})
 
     assert response["status"] == 201
     run_id = response["body"]["run_id"]
     assert response["body"]["status"] == "success"
     assert response["headers"]["Location"] == f"/runs/{run_id}"
-    runner.assert_called_once_with(normalized)
+    if name != "holehe":
+        runner.assert_called_once_with(normalized)
     saved = client("GET", f"/runs/{run_id}")
     assert saved["status"] == 200
     assert saved["body"] == {
@@ -76,11 +94,7 @@ def test_create_and_get_run_delegates_to_shared_services(
 
 def test_api_redacts_sensitive_input_and_output(client, monkeypatch):
     sensitive_value = "person@example.com"
-    monkeypatch.setattr(
-        api.holehe_integration,
-        "run_holehe",
-        Mock(return_value={"output": f"Found {sensitive_value}"}),
-    )
+    _replace_holehe_runner(monkeypatch, lambda value: f"Found {value}")
 
     response = client(
         "POST",
@@ -125,11 +139,10 @@ def test_unexpected_runner_failure_is_recorded_without_leaking_details(client, m
 
 def test_unexpected_sensitive_failure_is_logged_without_input(client, monkeypatch, caplog):
     sensitive_value = "person@example.com"
-    monkeypatch.setattr(
-        api.holehe_integration,
-        "run_holehe",
-        Mock(side_effect=TypeError(f"broken lookup for {sensitive_value}")),
-    )
+    def fail(value):
+        raise TypeError(f"broken lookup for {value}")
+
+    _replace_holehe_runner(monkeypatch, fail)
 
     response = client(
         "POST", "/runs",

@@ -1,4 +1,5 @@
 import json
+import logging
 import multiprocessing
 import os
 import sqlite3
@@ -15,6 +16,8 @@ import pytest
 
 import background_runs
 from data.utils import database
+
+_TEST_LOGGER = logging.getLogger("test_background_sensitive_worker")
 
 
 def mocked_worker(
@@ -120,6 +123,23 @@ def cancellation_race_worker(
     )
     (directory / "outcome-written").touch()
     time.sleep(30)
+
+
+def isolated_sensitive_test_worker(
+    connection, tool_name, query, max_output_bytes, deadline=None,
+    timed_out=None, spool_context=None,
+):
+    def runner(value):
+        print(f"stdout {value}")
+        print(f"stderr {value}", file=sys.stderr)
+        _TEST_LOGGER.warning("log %s", value)
+        return {"output": f"Found {value}"}
+
+    background_runs._TOOLS["holehe"] = (lambda value: value, runner)
+    background_runs._worker_entrypoint(
+        background_runs._worker, connection, tool_name, query, max_output_bytes,
+        deadline, timed_out, spool_context,
+    )
 
 
 def blocked_runner(query):
@@ -955,34 +975,40 @@ def test_worker_sanitizes_unexpected_exception(monkeypatch):
     assert connection.send_bytes.call_args.args[0] == b"Fmaigret failed unexpectedly (Exception)."
 
 
-def test_worker_redacts_sensitive_output_and_suppresses_console_output(
-    monkeypatch, capsys
+@pytest.mark.parametrize("spool_failure", [False, True])
+def test_isolated_background_worker_suppresses_sensitive_console_and_logs(
+    capfd, caplog, tmp_path, spool_failure
 ):
     sensitive_value = "person@example.com"
-
-    def run(query):
-        print(f"Starting lookup for {query}")
-        return f"Found {query}"
-
-    if os.name == "posix":
-        monkeypatch.setattr(os, "setsid", lambda: None)
-    monkeypatch.setitem(
-        background_runs._TOOLS,
-        "holehe",
-        (lambda value: value, lambda value: {"output": run(value)}),
+    context = multiprocessing.get_context("spawn")
+    receiver, sender = context.Pipe(duplex=False)
+    process = context.Process(
+        target=isolated_sensitive_test_worker,
+        args=(
+            sender, "holehe", sensitive_value, 1024, None, None,
+            (str(tmp_path / "missing"), 1, 1, "token") if spool_failure else None,
+        ),
     )
-    connection = Mock()
-
-    background_runs._worker(
-        connection, "holehe", sensitive_value, 1024
-    )
-
-    payload = connection.send_bytes.call_args.args[0]
-    captured = capsys.readouterr()
+    streams = (sys.stdout, sys.stderr)
+    logging_disable = logging.root.manager.disable
+    process.start()
+    sender.close()
+    try:
+        payload = receiver.recv_bytes(2048)
+    finally:
+        receiver.close()
+        process.join(5)
+        if process.is_alive():
+            process.kill()
+            process.join()
+    captured = capfd.readouterr()
+    assert process.exitcode == 0
     assert payload == b"SFound [redacted]"
-    assert sensitive_value not in captured.out
-    assert sensitive_value not in captured.err
-    connection.close.assert_called_once()
+    assert sensitive_value not in captured.out + captured.err + caplog.text
+    assert ("Could not durably spool background run outcome" in captured.err) == spool_failure
+    assert sys.stdout is streams[0]
+    assert sys.stderr is streams[1]
+    assert logging.root.manager.disable == logging_disable
 
 
 @pytest.mark.parametrize(

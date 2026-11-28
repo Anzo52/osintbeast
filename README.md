@@ -19,10 +19,22 @@ recorded outcomes:
 
 | Tool | Input | Availability |
 | --- | --- | --- |
-| Holehe | Sensitive email address; in-process Python API | Included in the standard installation |
-| Maigret | Sensitive username; in-process Python API | Optional: `python -m pip install -e ".[maigret]"` |
-| Helix OSINT | Sensitive username; in-process Python API | Optional: `python -m pip install -e ".[helix]"` |
-| Sherlock | Sensitive username; in-process Python API | Optional: `python -m pip install -e ".[sherlock]"` |
+| Holehe | Sensitive email address; Python API | Included in the standard installation |
+| Maigret | Sensitive username; Python API | Optional: `python -m pip install -e ".[maigret]"` |
+| Helix OSINT | Sensitive username; Python API | Optional: `python -m pip install -e ".[helix]"` |
+| Sherlock | Sensitive username; Python API | Optional: `python -m pip install -e ".[sherlock]"` |
+
+Sensitive synchronous runs execute their Python runner in a spawned child
+process. The child discards its standard output and error and disables Python
+logging within that child; the parent keeps its own streams and logging
+configuration unchanged. Input is passed
+through process IPC, not command-line arguments; returned output and errors
+are redacted before persistence. Runners must be serializable and cannot rely
+on changes to their in-memory state being reflected in the parent. Isolation
+does not prevent a tool from explicitly writing to its own files or network
+destinations outside Python logging. On POSIX, the synchronous worker and its
+process group are terminated if its parent exits or interrupts it. Background
+Holehe runs use their existing worker process and durable outcome spool.
 
 ### Registered tools planned for integration
 
